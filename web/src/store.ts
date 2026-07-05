@@ -22,6 +22,11 @@ export const store = {
   // screen shows the scrubbed snapshot instead.
   replayMode: false,
 
+  // Render style: "vector" = procedural no-asset diorama renderer (island),
+  // "tiles" = the original tileset renderer. Persisted per browser.
+  renderStyle: (localStorage.getItem("renderStyle") === "tiles" ? "tiles" : "vector") as
+    "tiles" | "vector",
+
   // System event ticker (left dock)
   events: [] as string[],
 

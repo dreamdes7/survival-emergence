@@ -8,7 +8,15 @@ import { requiredProgress, store } from "./store";
 import { agentCssInk, agentIndex, agentTint } from "./utils";
 import { closeModal, openAgentModal, openStructModal, pushEvent, renderChrome, stageEl, viewportTools } from "./ui";
 import { controlSim } from "./api";
+import { buildMeeple, buildVectorProp, buildVectorTerrain, invalidateVectorTerrain,
+         makeCloudShadowCanvas } from "./vector";
 import type { StructureState, WorldState } from "./types";
+
+// Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
+// the tile path in both styles.
+function vectorMode(): boolean {
+  return store.renderStyle === "vector" && store.state?.scenario === "island";
+}
 
 // ── pixi scene graph ──────────────────────────────────────────────────────────
 export const app = new Application();
@@ -78,6 +86,7 @@ export function handleWorldChange(next: WorldState): void {
   for (const id of [...agentDom.keys()]) removeAgentDom(id);
   cloudsForScenario = "";          // rebuild clouds for the new world
   terrainDirty = true;             // re-bake land for the new world
+  invalidateVectorTerrain();
   void setupClouds();
   sizeNight();
   app.renderer.background.color = next.scenario === "island" ? OCEAN_COLOR : VOID_COLOR;
@@ -90,6 +99,20 @@ export function resetForSimSwitch(): void {
   for (const id of [...agentDom.keys()]) removeAgentDom(id);
   fittedMapKey = "";
   cloudsForScenario = "";
+  invalidateVectorTerrain();
+}
+
+// Style toggle (🎨): swap between the tileset renderer and the procedural
+// vector diorama at runtime. Agent visuals rebuild in the new style.
+function toggleRenderStyle(): void {
+  store.renderStyle = store.renderStyle === "vector" ? "tiles" : "vector";
+  localStorage.setItem("renderStyle", store.renderStyle);
+  for (const vis of agentVis.values()) vis.container.destroy({ children: true });
+  agentVis.clear();
+  cloudsForScenario = "";
+  void setupClouds();
+  void render();
+  pushEvent(`render: ${store.renderStyle === "vector" ? "вектор (без ассетов)" : "тайлы"}`);
 }
 
 function bindViewportControls() {
@@ -99,6 +122,7 @@ function bindViewportControls() {
     if (action === "in") zoomAt(1.2, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
     if (action === "out") zoomAt(1 / 1.2, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
     if (action === "reset") fitCamera(true);
+    if (target.id === "style-btn") toggleRenderStyle();
     if (target.dataset.control === "pause") {
       const next = !store.simPaused;
       try {
@@ -217,6 +241,7 @@ type Dir = "down" | "up" | "left" | "right";
 type AgentVis = {
   container: Container;
   sprite: Sprite;
+  meeple?: Graphics;          // vector mode: the code-drawn survivor (no sprite)
   ring: Graphics;
   px: number; py: number;     // current pixel position (container)
   sx: number; sy: number;     // start pixel of current move
@@ -324,7 +349,14 @@ function syncAgents(): void {
         .stroke({ width: 2, color: 0x2bd1c4 });
       ring.visible = false;
       const sprite = new Sprite(Texture.EMPTY);
-      if (island) {
+      let meeple: Graphics | undefined;
+      if (vectorMode()) {
+        // Code-drawn survivor: capsule + head in the agent's colour.
+        meeple = buildMeeple(a.id, a.gender);
+        meeple.x = TILE_SIZE / 2 - AGENT_OFFX;
+        meeple.y = TILE_SIZE - AGENT_OFFY;         // feet on the tile bottom
+        sprite.visible = false;
+      } else if (island) {
         const set = pawnCache[pawnColor];
         sprite.texture = set ? set.idle[0] : Texture.EMPTY;
         sprite.anchor.set(0.5, 0.92);
@@ -337,11 +369,9 @@ function syncAgents(): void {
         sprite.height = SPRITE_PX;
         sprite.tint = agentTint(a.id);             // distinct colour per agent
       }
-      sprite.eventMode = "static";
-      sprite.cursor = "pointer";
       let lastTapId = "";
       let lastTapT = 0;
-      sprite.on("pointertap", () => {
+      const onTap = () => {
         const now = Date.now();
         const dbl = now - lastTapT < 280 && lastTapId === a.id;
         lastTapT = now; lastTapId = a.id;
@@ -350,16 +380,22 @@ function syncAgents(): void {
         if (dbl) { openAgentModal(a.id); return; }
         renderChrome();
         syncAgents();
-      });
+      };
+      for (const target of [sprite, meeple].filter(Boolean) as (Sprite | Graphics)[]) {
+        target.eventMode = "static";
+        target.cursor = "pointer";
+        target.on("pointertap", onTap);
+      }
       container.addChild(shadow, ring, sprite);
+      if (meeple) container.addChild(meeple);
       container.x = px;
       container.y = py;
       agentLayer.addChild(container);
       vis = {
-        container, sprite, ring,
+        container, sprite, meeple, ring,
         px, py, sx: px, sy: py, tx: px, ty: py,
         lx: a.x, ly: a.y, dir: "down", moving: false, moveElapsed: 0, moveDur: MOVE_DURATION,
-        frame: 0, frameT: 0, status: a.status, isPawn: island, pawnColor,
+        frame: 0, frameT: 0, status: a.status, isPawn: island && !meeple, pawnColor,
       };
       agentVis.set(a.id, vis);
     } else if (a.x !== vis.lx || a.y !== vis.ly) {
@@ -379,6 +415,13 @@ function syncAgents(): void {
     vis.status = a.status;
     vis.ring.visible = a.id === store.selectedAgentId;
     vis.sprite.alpha = a.status === "dead" ? 0.5 : 1;
+    if (vis.meeple) {
+      // Meeple death pose: lie down, fade; incapacitated: slump halfway.
+      const down = a.status === "dead" || a.status === "incapacitated";
+      vis.meeple.rotation = a.status === "dead" ? -Math.PI / 2
+        : a.status === "incapacitated" ? -Math.PI / 4 : 0;
+      vis.meeple.alpha = a.status === "dead" ? 0.55 : down ? 0.8 : 1;
+    }
     if (a.status === "dead" || a.status === "incapacitated") {
       vis.moving = false;
     }
@@ -474,7 +517,14 @@ function animateAgents(): void {
     vis.container.y = vis.py + (vis.isPawn ? 0 : bob);   // pawns animate their own run cycle
     vis.container.zIndex = vis.py + 38;                  // depth-sort by the agent's feet
 
-    if (vis.isPawn) {
+    if (vis.meeple) {
+      // Meeple: flip to face left, tiny walk lean; no textures involved.
+      vis.meeple.scale.x = vis.dir === "left" ? -1 : 1;
+      if (vis.status === "active") {
+        vis.meeple.rotation = vis.moving
+          ? Math.sin(vis.frame * 1.3) * 0.06 : 0;   // subtle waddle while walking
+      }
+    } else if (vis.isPawn) {
       const set = pawnCache[vis.pawnColor];
       if (set) {
         const frames = vis.moving ? set.run : set.idle;
@@ -532,16 +582,25 @@ function structureSpriteCandidates(s: StructureState): string[] {
   return out;
 }
 
+// Role-based palette so asset-less structures read as themselves, not as one
+// dark blob (the vector renderer leans on these until G2 draws each kind).
+const PLACEHOLDER_ROLE_COLOR: Record<string, number> = {
+  shelter: 0xc4a165, campfire: 0xe2641f, water: 0x4fa3b5, hotspring: 0x5db8c9,
+  store: 0xa5824f, salvage: 0x8a8f98, beacon: 0xd8cfae, signal: 0xc0574f,
+  escape: 0xd08a4e, workbench: 0x9b7a53, smokehouse: 0x8f6e4e, garden: 0x7fae56,
+  lookout: 0xb0946a, signpost: 0xcbb98a, refill_oxygen: 0x7fd0d8, hazard: 0xb0483f,
+};
+
 // Themed placeholder for a structure with no sprite yet (works before art lands).
 function structurePlaceholder(s: StructureState, px: number, py: number, pw: number, ph: number): Graphics {
   const st = s.state || {};
   const building = st.buildable_kind !== undefined && !st.complete;
-  let color = 0x3f6c53;
+  let color = PLACEHOLDER_ROLE_COLOR[s.role] ?? 0x9a8f7a;
   if (s.kind === "campfire") color = building ? 0x6b5230 : ((st.fuel as number ?? 0) > 0 ? 0xe2641f : 0x555048);
   else if (s.kind === "tent") color = building ? 0x7a6a3a : 0xb89a5a;
-  const g = new Graphics().roundRect(px + 2, py + 2, pw - 4, ph - 4, 4)
-    .fill({ color, alpha: building ? 0.55 : 0.9 })
-    .stroke({ width: 2, color: 0x1a2a22 });
+  const g = new Graphics().roundRect(px + 2, py + 2, pw - 4, ph - 4, Math.min(8, pw * 0.18))
+    .fill({ color, alpha: building ? 0.55 : 0.92 })
+    .stroke({ width: 1.5, color: 0x3a3128, alpha: 0.6 });
   if (building) {
     const req = requiredProgress((st.buildable_kind as string) ?? s.kind);
     const p = Math.min(1, (st.progress as number ?? 0) / req);
@@ -635,26 +694,38 @@ function animateBushes(): void {
   }
 }
 
+let cloudShadowTex: Texture | null = null;
+
 async function setupClouds(): Promise<void> {
   const state = store.state;
-  if (!state || cloudsForScenario === state.scenario) return;
-  cloudsForScenario = state.scenario;
+  const styleKey = `${state?.scenario}:${store.renderStyle}`;
+  if (!state || cloudsForScenario === styleKey) return;
+  cloudsForScenario = styleKey;
   cloudLayer.removeChildren();
   cloudSprites.length = 0;
   if (state.scenario !== "island") return;           // clouds only on the island for now
-  if (!cloudTex.length) {
-    for (let i = 1; i <= 8; i += 1) {
-      const t = await tinyTexture(`cloud${i}.png`);
-      if (t) cloudTex.push(t);
+
+  let texs: Texture[];
+  if (vectorMode()) {
+    // Diorama: no cloud sprites — just soft shadow blobs drifting over the land.
+    if (!cloudShadowTex) cloudShadowTex = Texture.from(makeCloudShadowCanvas());
+    texs = [cloudShadowTex];
+  } else {
+    if (!cloudTex.length) {
+      for (let i = 1; i <= 8; i += 1) {
+        const t = await tinyTexture(`cloud${i}.png`);
+        if (t) cloudTex.push(t);
+      }
     }
+    texs = cloudTex;
   }
-  if (!cloudTex.length) return;
+  if (!texs.length) return;
   const mapPx = state.map.size * TILE_SIZE;
-  for (let i = 0; i < ISLAND_CLOUD_COUNT; i += 1) {
-    const tex = cloudTex[Math.floor(Math.random() * cloudTex.length)];
+  const count = vectorMode() ? 8 : ISLAND_CLOUD_COUNT;
+  for (let i = 0; i < count; i += 1) {
+    const tex = texs[Math.floor(Math.random() * texs.length)];
     const s = new Sprite(tex);
-    s.alpha = 0.26 + Math.random() * 0.08;
-    s.scale.set((TILE_SIZE * 11) / tex.frame.width);  // ~11 tiles wide — big & soft
+    s.alpha = vectorMode() ? 0.5 : 0.26 + Math.random() * 0.08;
     s.scale.set((TILE_SIZE * (8 + Math.random() * 5)) / tex.frame.width);
     s.x = Math.random() * mapPx;
     s.y = Math.random() * mapPx;
@@ -1012,7 +1083,16 @@ export async function render() {
   propSprites.length = 0;
   updateCamera();
 
-  const islandDrawn = state.scenario === "island" ? await renderIslandTerrain(seq) : false;
+  let islandDrawn = false;
+  if (state.scenario === "island") {
+    if (vectorMode()) {
+      // Procedural diorama: cached container of smoothed polygons, no assets.
+      worldLayer.addChild(buildVectorTerrain(state));
+      islandDrawn = true;
+    } else {
+      islandDrawn = await renderIslandTerrain(seq);
+    }
+  }
   if (seq !== renderSeq) return;
 
   if (!islandDrawn) {
@@ -1051,7 +1131,21 @@ export async function render() {
   }
 
   if (state.scenario === "island") {
-    await renderNodes();
+    if (vectorMode()) {
+      for (const node of state.resources) {
+        if (node.quantity <= 0) continue;
+        const prop = buildVectorProp(node);
+        if (!prop) continue;
+        const base = node.y * TILE_SIZE + TILE_SIZE;
+        prop.x = node.x * TILE_SIZE + TILE_SIZE / 2;
+        prop.y = base;
+        prop.zIndex = base;
+        objectLayer.addChild(prop);
+        propSprites.push(prop);
+      }
+    } else {
+      await renderNodes();
+    }
     if (seq !== renderSeq) return;
   } else {
     for (const node of state.resources.filter((n) => n.quantity > 0)) {
@@ -1120,10 +1214,12 @@ export async function render() {
     }
 
     let t: Texture | null = null;
-    for (const cand of structureSpriteCandidates(s)) {
-      t = await silentTexture(`structures/${cand}`);
-      if (seq !== renderSeq) return;
-      if (t) break;
+    if (!vectorMode()) {          // vector mode: themed placeholders (asset-free)
+      for (const cand of structureSpriteCandidates(s)) {
+        t = await silentTexture(`structures/${cand}`);
+        if (seq !== renderSeq) return;
+        if (t) break;
+      }
     }
 
     let node: Sprite | Graphics;
@@ -1162,7 +1258,9 @@ export async function render() {
     }
   }
 
-  if (state.scenario === "island") {
+  if (vectorMode()) {
+    // meeples are code-drawn — no textures to load
+  } else if (state.scenario === "island") {
     for (const c of PAWN_COLORS) await loadPawn(c);
   } else {
     await ensureAgentTextures(agentPrefix());
