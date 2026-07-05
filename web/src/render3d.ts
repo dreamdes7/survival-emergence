@@ -75,21 +75,13 @@ const C = {
   skyNight: 0x0e1e34,
 };
 
-const BIOME_HEIGHT: Record<string, number> = {
-  water: -1.35, sand: 0.14, grass: 0.6, foliage: 0.85, rock: 1.9,
-};
-
-function biomeOf(t: string): keyof typeof BIOME_HEIGHT {
-  if (t.includes("water")) return "water";
-  if (t.includes("sand")) return "sand";
-  if (t.includes("foliage")) return "foliage";
-  if (t.includes("rock")) return "rock";
-  return "grass";
-}
-
-const BIOME_COLOR: Record<string, number> = {
-  water: C.seaDeep, sand: C.sand, grass: C.grass, foliage: C.jungle, rock: C.rock,
-};
+// Vertical drama: heights come from distance-to-coast (a natural island cone)
+// plus large-scale noise, biome bonuses (the rocky core towers), then get
+// TERRACED — quantised into steps whose walls auto-paint as cliffs. This is
+// the Islanders/Bad North silhouette, produced by generation, not assets.
+const TERRACE = 0.85;                     // metres per terrace step
+const PEAK_ROCK = 3.4;                    // extra height of the rocky core
+const SEA_FLOOR = -1.7;
 
 function hashStr(s: string): number {
   let h = 2166136261;
@@ -115,6 +107,8 @@ let structsGroup: THREE.Group | null = null;
 let foamGroup: THREE.Group | null = null;
 let foamMat: THREE.MeshBasicMaterial | null = null;
 let cloudsGroup: THREE.Group | null = null;
+let skyMesh: THREE.Mesh | null = null;
+let skyMat: THREE.ShaderMaterial | null = null;
 let fireLights: THREE.PointLight[] = [];
 let active = false;
 let rafId = 0;
@@ -134,14 +128,63 @@ type Agent3d = {
 const agents3d = new Map<string, Agent3d>();
 
 // ── height sampling ───────────────────────────────────────────────────────────
+// Two-octave value noise on a hashed lattice (deterministic, seedless).
+function vnoise(x: number, y: number, cell: number, salt: number): number {
+  const gx = x / cell, gy = y / cell;
+  const x0 = Math.floor(gx), y0 = Math.floor(gy);
+  const fx = gx - x0, fy = gy - y0;
+  const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+  const v00 = hash01(x0, y0, salt), v10 = hash01(x0 + 1, y0, salt);
+  const v01 = hash01(x0, y0 + 1, salt), v11 = hash01(x0 + 1, y0 + 1, salt);
+  return (v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy;
+}
+
+function hash01(x: number, y: number, salt: number): number {
+  let h = (x * 374761393 + y * 668265263 + salt * 2246822519) >>> 0;
+  h = ((h ^ (h >>> 13)) * 1274126177) >>> 0;
+  return (h >>> 8) / 16777216;
+}
+
 function buildHeights(st: WorldState): void {
   const n = st.map.size;
   mapN = n;
-  const tileH = (x: number, y: number) =>
-    x < 0 || y < 0 || x >= n || y >= n
-      ? BIOME_HEIGHT.water
-      : BIOME_HEIGHT[biomeOf(st.map.grid[y][x])];
-  // corner grid = average of adjacent tiles, then two smoothing passes
+  const grid = st.map.grid;
+  const isWater = (x: number, y: number) =>
+    x < 0 || y < 0 || x >= n || y >= n || grid[y][x].includes("water");
+
+  // BFS distance to the coast — the backbone of the island's cone shape.
+  const INF = 1e9;
+  const dist: number[][] = Array.from({ length: n }, () => new Array(n).fill(INF));
+  const queue: [number, number][] = [];
+  for (let y = 0; y < n; y += 1)
+    for (let x = 0; x < n; x += 1)
+      if (isWater(x, y)) { dist[y][x] = 0; queue.push([x, y]); }
+  for (let qi = 0; qi < queue.length; qi += 1) {
+    const [x, y] = queue[qi];
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && ny >= 0 && nx < n && ny < n && dist[ny][nx] > dist[y][x] + 1) {
+        dist[ny][nx] = dist[y][x] + 1;
+        queue.push([nx, ny]);
+      }
+    }
+  }
+
+  const tileH = (x: number, y: number): number => {
+    if (isWater(x, y)) return SEA_FLOOR;
+    const d = dist[y][x];
+    const t = grid[y][x];
+    // coastal shelf rises inland, biomes add their storeys
+    let h = 0.1 + Math.min(1, d / 7) ** 1.15 * 2.1;
+    if (t.includes("rock")) h += PEAK_ROCK * Math.min(1, d / 9 + 0.35);
+    else if (t.includes("foliage")) h += 0.5;
+    // large, slow noise so ridges and hollows cross biome lines
+    h += (vnoise(x, y, 9, 31) - 0.5) * 1.5 + (vnoise(x, y, 4, 57) - 0.5) * 0.5;
+    return Math.max(0.08, h);
+  };
+
+  // corner grid, smoothing, then TERRACING (the quantised steps), then one
+  // gentle pass so terrace lips aren't razor-sharp
   let g: number[][] = [];
   for (let y = 0; y <= n; y += 1) {
     const row: number[] = [];
@@ -150,14 +193,21 @@ function buildHeights(st: WorldState): void {
     }
     g.push(row);
   }
-  for (let pass = 0; pass < 3; pass += 1) {
+  for (let pass = 0; pass < 2; pass += 1) {
     const out = g.map((r) => r.slice());
     for (let y = 1; y < n; y += 1)
       for (let x = 1; x < n; x += 1)
         out[y][x] = (g[y][x] * 2 + g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1]) / 6;
     g = out;
   }
-  heightGrid = g;
+  for (let y = 0; y <= n; y += 1)
+    for (let x = 0; x <= n; x += 1)
+      if (g[y][x] > 0.05) g[y][x] = Math.round(g[y][x] / TERRACE) * TERRACE + 0.12;
+  const out = g.map((r) => r.slice());
+  for (let y = 1; y < n; y += 1)
+    for (let x = 1; x < n; x += 1)
+      out[y][x] = g[y][x] * 0.72 + (g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1]) * 0.07;
+  heightGrid = out;
 }
 
 function heightAt(wx: number, wz: number): number {
@@ -186,6 +236,32 @@ function ensureRenderer(stageEl: HTMLElement): void {
   scene = new THREE.Scene();
   scene.background = new THREE.Color(C.skyDay);
   scene.fog = new THREE.Fog(C.skyDay, 120, 280);
+
+  // Gradient sky dome — the flat backdrop is what screamed "web page".
+  skyMat = new THREE.ShaderMaterial({
+    side: THREE.BackSide,
+    depthWrite: false,
+    fog: false,
+    uniforms: {
+      uTop: { value: new THREE.Color(0x8fd0ea) },
+      uHor: { value: new THREE.Color(0xf6f3e2) },
+    },
+    vertexShader: `
+      varying float vY;
+      void main() {
+        vY = normalize(position).y;
+        gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+      }`,
+    fragmentShader: `
+      uniform vec3 uTop; uniform vec3 uHor;
+      varying float vY;
+      void main() {
+        float t = clamp(vY * 1.8, 0.0, 1.0);
+        gl_FragColor = vec4(mix(uHor, uTop, t), 1.0);
+      }`,
+  });
+  skyMesh = new THREE.Mesh(new THREE.SphereGeometry(420, 20, 14), skyMat);
+  scene.add(skyMesh);
 
   camera = new THREE.PerspectiveCamera(32, 1, 0.1, 500);
 
@@ -346,26 +422,65 @@ function buildTerrain(st: WorldState): void {
   const p2 = geo.getAttribute("position") as THREE.BufferAttribute;
   const colors = new Float32Array(p2.count * 3);
   const col = new THREE.Color();
+  const cSand = new THREE.Color(0xead9a4);
+  const cGrass = new THREE.Color(0x92c968);
+  const cGrassHi = new THREE.Color(0x7db457);
+  const cForest = new THREE.Color(0x5d9a4b);
+  const cRockTop = new THREE.Color(0xb3ac9d);
+  const cCliff = new THREE.Color(0x8a7355);
+  const cCliffDark = new THREE.Color(0x6e5a41);
+  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
+  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+
+  // Per-vertex ambient occlusion from the height Laplacian: hollows and the
+  // feet of terrace walls sit in quiet shade — depth without textures.
+  const aoAt = (wx: number, wz: number, wy: number): number => {
+    const xi = Math.max(1, Math.min(n - 1, Math.round(wx)));
+    const zi = Math.max(1, Math.min(n - 1, Math.round(wz)));
+    const around = (heightGrid[zi - 1][xi] + heightGrid[zi + 1][xi]
+      + heightGrid[zi][xi - 1] + heightGrid[zi][xi + 1]) / 4;
+    return Math.max(0, Math.min(0.3, (around - wy) * 0.5));
+  };
+
   for (let f = 0; f < p2.count; f += 3) {
-    // face centre -> owning tile -> biome colour (slight per-tile tone jitter)
-    const cx = (p2.getX(f) + p2.getX(f + 1) + p2.getX(f + 2)) / 3;
-    const cz = (p2.getZ(f) + p2.getZ(f + 1) + p2.getZ(f + 2)) / 3;
+    va.fromBufferAttribute(p2, f);
+    vb.fromBufferAttribute(p2, f + 1);
+    vc.fromBufferAttribute(p2, f + 2);
+    ab.subVectors(vb, va);
+    ac.subVectors(vc, va);
+    nrm.crossVectors(ab, ac).normalize();
+    const slope = Math.abs(nrm.y);
+    const cy = (va.y + vb.y + vc.y) / 3;
+    const cx = (va.x + vb.x + vc.x) / 3;
+    const cz = (va.z + vb.z + vc.z) / 3;
     const tx = Math.max(0, Math.min(n - 1, Math.floor(cx)));
     const tz = Math.max(0, Math.min(n - 1, Math.floor(cz)));
-    const biome = biomeOf(st.map.grid[tz][tx]);
-    col.setHex(BIOME_COLOR[biome]);
-    const jitter = (hashStr(`${tx}:${tz}`) - 0.5) * (biome === "grass" ? 0.07 : 0.04);
-    col.offsetHSL(0, 0, jitter);
+    const foliage = st.map.grid[tz][tx].includes("foliage");
+
+    // colour by form, not by tile: cliffs on steep faces, height bands on tops
+    if (cy > 0.05 && slope < 0.72) {
+      col.copy(cCliff).lerp(cCliffDark, Math.max(0, Math.min(1, 1.6 - cy * 0.4)) * 0.5);
+    } else if (cy < 0.42) {
+      col.copy(cSand);
+    } else if (cy > 3.4) {
+      col.copy(cRockTop);
+    } else if (foliage) {
+      col.copy(cForest);
+    } else {
+      col.copy(cGrass).lerp(cGrassHi, Math.max(0, Math.min(1, (cy - 1.2) / 2)));
+    }
+    // large-scale tonal drift (8-tile lattice) — variation without patchwork
+    col.offsetHSL(0, 0, (vnoise(cx, cz, 8, 77) - 0.5) * 0.09);
+
     for (let v = 0; v < 3; v += 1) {
-      // Per-VERTEX water blending: below the waterline each vertex dissolves
-      // toward turquoise shallows and then deep sea by its own depth, giving a
-      // smooth shore gradient instead of blocky per-face terraces.
       vCol.copy(col);
       const vy = p2.getY(f + v);
       if (vy < 0.1) {
-        const t = Math.min(1, (0.1 - vy) / 1.2);
+        const t = Math.min(1, (0.1 - vy) / 1.4);
         vCol.lerp(shallowCol, 0.4 + t * 0.25);
         vCol.lerp(deepCol, t * t);
+      } else {
+        vCol.multiplyScalar(1 - aoAt(p2.getX(f + v), p2.getZ(f + v), vy));
       }
       colors[(f + v) * 3] = vCol.r;
       colors[(f + v) * 3 + 1] = vCol.g;
@@ -395,6 +510,7 @@ function buildTerrain(st: WorldState): void {
 
   // Sea + sky furniture follows the island.
   waterMesh.position.set(cx, 0, cz);
+  if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildFoam(st);
   buildClouds(cx, cz, n);
 
@@ -510,19 +626,25 @@ function makePalm(id: string): THREE.Group {
   const h = 1.2 + r * 0.55;
   const lean = (r - 0.5) * 0.5;
 
-  const seg1 = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.085, h * 0.55, 5), lam(C.trunk));
-  seg1.position.set(Math.sin(lean * 0.4) * h * 0.14, h * 0.27, 0);
-  seg1.rotation.z = lean * 0.4;
-  seg1.castShadow = true;
-  g.add(seg1);
-  const topX = Math.sin(lean) * h * 0.42;
-  const seg2 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.055, h * 0.52, 5), lam(C.trunk));
-  seg2.position.set((topX + Math.sin(lean * 0.4) * h * 0.25) / 2, h * 0.72, 0);
-  seg2.rotation.z = lean * 0.85;
-  seg2.castShadow = true;
-  g.add(seg2);
-
-  const crownY = h + 0.02;
+  // Trunk as a CONNECTED chain of three tapering segments: each starts exactly
+  // where the previous ended, curving progressively (no more disjointed poles).
+  const tilts = [lean * 0.35, lean * 0.8, lean * 1.25];
+  const lens = [h * 0.4, h * 0.35, h * 0.3];
+  const radii: [number, number][] = [[0.075, 0.09], [0.055, 0.075], [0.04, 0.055]];
+  let bx = 0, by = 0;
+  for (let i = 0; i < 3; i += 1) {
+    const t = tilts[i], L = lens[i];
+    const dxs = -Math.sin(t) * L, dys = Math.cos(t) * L;
+    const seg = new THREE.Mesh(
+      new THREE.CylinderGeometry(radii[i][0], radii[i][1], L, 5), lam(C.trunk));
+    seg.position.set(bx + dxs / 2, by + dys / 2, 0);
+    seg.rotation.z = t;
+    seg.castShadow = true;
+    g.add(seg);
+    bx += dxs; by += dys;
+  }
+  const topX = bx;
+  const crownY = by + 0.02;
   const fronds = 7;
   for (let i = 0; i < fronds; i += 1) {
     const fr = hashStr(id + "f" + i);
@@ -1095,6 +1217,11 @@ export function agentScreen3d(id: string): { x: number; y: number } | null {
 // ── per-frame ─────────────────────────────────────────────────────────────────
 const dayFog = new THREE.Color(C.skyDay);
 const nightFog = new THREE.Color(C.skyNight);
+const skyTopDay = new THREE.Color(0x8fd0ea);
+const skyTopNight = new THREE.Color(0x0a1526);
+const skyHorDay = new THREE.Color(0xf6f3e2);
+const skyHorNight = new THREE.Color(0x24364e);
+const stormGrey = new THREE.Color(0x8f9aa0);
 const tmpColor = new THREE.Color();
 const clock = new THREE.Clock();
 
@@ -1147,8 +1274,15 @@ function tick(): void {
   sun.intensity = (2.9 - nightMix * 2.62) * (1 - stormMix * 0.35);
   ambient.intensity = 0.45 - nightMix * 0.22;
   tmpColor.copy(dayFog).lerp(nightFog, nightMix);
+  tmpColor.lerp(stormGrey, stormMix * 0.5);
   (scene.background as THREE.Color).copy(tmpColor);
   scene.fog!.color.copy(tmpColor);
+  if (skyMat) {
+    (skyMat.uniforms.uTop.value as THREE.Color)
+      .copy(skyTopDay).lerp(skyTopNight, nightMix).lerp(stormGrey, stormMix * 0.4);
+    (skyMat.uniforms.uHor.value as THREE.Color)
+      .copy(skyHorDay).lerp(skyHorNight, nightMix).lerp(stormGrey, stormMix * 0.55);
+  }
   sun.color.setHSL(0.09, 0.5, 0.9 - nightMix * 0.25);
   for (const l of fireLights) {
     l.intensity = (4.5 + Math.sin(performance.now() / 120) * 1.2) * (0.4 + nightMix * 0.9);

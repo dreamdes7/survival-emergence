@@ -10,7 +10,9 @@ currency_item: beads
 map:
   size: 60
   shape: island          # radial: ocean -> beach -> meadow/jungle (by moisture) -> rocky core
-  north_bias: 0.22       # island merges into the top edge (land border, no beach there)
+  # north_bias 0 = the island floats fully enclosed in open sea (diorama look);
+  # raise it (~0.22) to merge the island into the map's top edge instead.
+  north_bias: 0.0
   terrains:              # (used only as a fallback; island shape is procedural)
     island_jungle_grass: 1.0
   default_terrain: island_jungle_grass
