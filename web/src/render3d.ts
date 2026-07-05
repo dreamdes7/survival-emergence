@@ -10,10 +10,47 @@
 
 import * as THREE from "three";
 import { OrbitControls } from "three/examples/jsm/controls/OrbitControls.js";
+import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer.js";
+import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
+import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
+import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
+import { chaikin, maskLoops } from "./vector";
+
+// Final colour grade: gentle saturation lift, warm tint, vignette and a whisper
+// of animated film grain — the "hand-finished" layer over the raw render.
+const GradeShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uTime: { value: 0 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform float uTime;
+    varying vec2 vUv;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    void main() {
+      vec4 c = texture2D(tDiffuse, vUv);
+      // saturation lift
+      float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb = mix(vec3(l), c.rgb, 1.14);
+      // warm sunlit grade
+      c.rgb *= vec3(1.03, 1.0, 0.96);
+      // vignette
+      float d = distance(vUv, vec2(0.5));
+      c.rgb *= 1.0 - smoothstep(0.42, 0.86, d) * 0.32;
+      // animated grain (very subtle)
+      c.rgb += (hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 61.0) - 0.5) * 0.028;
+      gl_FragColor = c;
+    }`,
+};
 
 function lam(color: number): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ color, flatShading: true });
@@ -68,9 +105,16 @@ let controls: OrbitControls;
 let sun: THREE.DirectionalLight;
 let ambient: THREE.HemisphereLight;
 let waterMesh: THREE.Mesh;
+let waterShader: { uniforms: Record<string, { value: number }> } | null = null;
+let composer: EffectComposer;
+let gradePass: ShaderPass;
+let fxaaPass: ShaderPass;
 let terrainGroup: THREE.Group | null = null;
 let propsGroup: THREE.Group | null = null;
 let structsGroup: THREE.Group | null = null;
+let foamGroup: THREE.Group | null = null;
+let foamMat: THREE.MeshBasicMaterial | null = null;
+let cloudsGroup: THREE.Group | null = null;
 let fireLights: THREE.PointLight[] = [];
 let active = false;
 let rafId = 0;
@@ -79,6 +123,7 @@ let heightGrid: number[][] = [];          // smoothed corner heights (n+1)^2
 let mapN = 0;
 let state: WorldState | null = null;
 let nightMix = 0;                          // 0 = day, 1 = night (lerped)
+let stormMix = 0;                          // 0 = clear, 1 = storm (lerped)
 
 type Agent3d = {
   group: THREE.Group;
@@ -105,7 +150,7 @@ function buildHeights(st: WorldState): void {
     }
     g.push(row);
   }
-  for (let pass = 0; pass < 2; pass += 1) {
+  for (let pass = 0; pass < 3; pass += 1) {
     const out = g.map((r) => r.slice());
     for (let y = 1; y < n; y += 1)
       for (let x = 1; x < n; x += 1)
@@ -132,6 +177,8 @@ function ensureRenderer(stageEl: HTMLElement): void {
   renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.shadowMap.enabled = true;
   renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;   // filmic colour response
+  renderer.toneMappingExposure = 1.15;
   renderer.domElement.style.position = "absolute";
   renderer.domElement.style.inset = "0";
   stageEl.appendChild(renderer.domElement);
@@ -152,21 +199,31 @@ function ensureRenderer(stageEl: HTMLElement): void {
   ambient = new THREE.HemisphereLight(0xdff3f7, 0x5a6b4a, 0.45);
   scene.add(ambient);
 
-  // Sea: a translucent surface plane + an opaque deep floor far below.
-  const seaSize = 1000;
-  waterMesh = new THREE.Mesh(
-    new THREE.PlaneGeometry(seaSize, seaSize),
-    new THREE.MeshPhongMaterial({
-      color: C.seaSurface, transparent: true, opacity: 0.62,
-      shininess: 36, specular: 0x2f4f5c,
-    }),
-  );
+  // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
+  const waterMatl = new THREE.MeshPhongMaterial({
+    color: C.seaSurface, transparent: true, opacity: 0.62,
+    shininess: 36, specular: 0x2f4f5c,
+  });
+  waterMatl.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uAmp = { value: 0.05 };
+    shader.vertexShader = "uniform float uTime;\nuniform float uAmp;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+         transformed.z += sin(position.x * 0.55 + uTime * 1.1) * uAmp
+                        + cos(position.y * 0.45 + uTime * 0.8) * uAmp
+                        + sin((position.x + position.y) * 0.22 + uTime * 0.5) * uAmp * 1.4;`,
+      );
+    waterShader = shader as unknown as { uniforms: Record<string, { value: number }> };
+  };
+  waterMesh = new THREE.Mesh(new THREE.PlaneGeometry(480, 480, 110, 110), waterMatl);
   waterMesh.rotation.x = -Math.PI / 2;
   waterMesh.position.y = 0;
   waterMesh.receiveShadow = true;
   scene.add(waterMesh);
   const floor = new THREE.Mesh(
-    new THREE.PlaneGeometry(seaSize, seaSize),
+    new THREE.PlaneGeometry(1000, 1000),
     new THREE.MeshLambertMaterial({ color: C.seaDeep }),
   );
   floor.rotation.x = -Math.PI / 2;
@@ -189,6 +246,17 @@ function ensureRenderer(stageEl: HTMLElement): void {
   selRing.rotation.x = -Math.PI / 2;
   selRing.visible = false;
   scene.add(selRing);
+
+  // Post: render -> tone-map/sRGB output -> colour grade -> FXAA.
+  // OutputPass is what applies ACES + sRGB when a composer is in the chain;
+  // without it the frame stays linear and looks crushed-dark.
+  composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new OutputPass());
+  gradePass = new ShaderPass(GradeShader);
+  composer.addPass(gradePass);
+  fxaaPass = new ShaderPass(FXAAShader);
+  composer.addPass(fxaaPass);
 
   bindPicking(renderer.domElement);
 }
@@ -264,6 +332,12 @@ function buildTerrain(st: WorldState): void {
     const vx = Math.round(pos.getX(i));
     const vz = Math.round(pos.getZ(i));
     pos.setY(i, heightGrid[Math.min(n, Math.max(0, vz))][Math.min(n, Math.max(0, vx))]);
+    // Organic low-poly: jitter interior vertices in XZ so the triangulation
+    // stops reading as a regular grid (the classic hand-crafted-terrain trick).
+    if (vx > 0 && vx < n && vz > 0 && vz < n) {
+      pos.setX(i, vx + (hashStr(`jx${vx}:${vz}`) - 0.5) * 0.55);
+      pos.setZ(i, vz + (hashStr(`jz${vx}:${vz}`) - 0.5) * 0.55);
+    }
   }
   const shallowCol = new THREE.Color(0x2fa3b8);
   const deepCol = new THREE.Color(C.seaDeep);
@@ -319,41 +393,157 @@ function buildTerrain(st: WorldState): void {
   shCam.near = 10; shCam.far = 160;
   shCam.updateProjectionMatrix();
 
+  // Sea + sky furniture follows the island.
+  waterMesh.position.set(cx, 0, cz);
+  buildFoam(st);
+  buildClouds(cx, cz, n);
+
   // First-time camera framing: pulled back so the island floats in open sea.
   camera.position.set(cx + n * 0.12, n * 1.1, cz + n * 1.25);
   controls.target.set(cx, 0, cz);
   controls.update();
 }
 
+// Foam ribbons hugging the ACTUAL waterline: the y=0 iso-contour of the
+// smoothed height grid (the tile land-mask boundary drifts a tile or two from
+// where the smoothed terrain really meets the sea).
+function buildFoam(st: WorldState): void {
+  foamGroup?.removeFromParent();
+  foamGroup = new THREE.Group();
+  const n = st.map.size;
+  const land = (x: number, y: number) =>
+    x >= 0 && y >= 0 && x <= n && y <= n && heightGrid[y][x] > 0.03;
+  foamMat = new THREE.MeshBasicMaterial({
+    color: 0xeafaf4, transparent: true, opacity: 0.4,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
+  const W = 0.16;
+  const edge = (x: number, z: number) =>
+    x < 0.8 || z < 0.8 || x > n - 0.8 || z > n - 0.8;
+  for (const loop of maskLoops(n + 1, land).map((l) => chaikin(l, 2))) {
+    const verts: number[] = [];
+    for (let i = 0; i < loop.length; i += 1) {
+      const [ax, az] = loop[i];
+      const [bx, bz] = loop[(i + 1) % loop.length];
+      // Skip map-border segments (north_bias islands touch the map edge — foam
+      // along the world boundary reads as a line floating in open sea).
+      if (edge(ax, az) || edge(bx, bz)) continue;
+      const dx = bx - ax, dz = bz - az;
+      const len = Math.hypot(dx, dz) || 1;
+      const nx = -dz / len * W, nz = dx / len * W;
+      verts.push(
+        ax - nx, 0, az - nz, bx - nx, 0, bz - nz, ax + nx, 0, az + nz,
+        ax + nx, 0, az + nz, bx - nx, 0, bz - nz, bx + nx, 0, bz + nz,
+      );
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
+    const ribbon = new THREE.Mesh(geo, foamMat);
+    ribbon.position.y = 0.045;
+    foamGroup.add(ribbon);
+  }
+  scene.add(foamGroup);
+}
+
+// Low-poly clouds that drift over the island and cast MOVING shadows.
+function buildClouds(cx: number, cz: number, n: number): void {
+  cloudsGroup?.removeFromParent();
+  cloudsGroup = new THREE.Group();
+  const mat = new THREE.MeshLambertMaterial({
+    color: 0xffffff, emissive: 0x777777, transparent: true, opacity: 0.9,
+    flatShading: true,
+  });
+  for (let i = 0; i < 5; i += 1) {
+    const cluster = new THREE.Group();
+    const r = hashStr(`cloud${i}`);
+    for (let b = 0; b < 3 + Math.floor(r * 2); b += 1) {
+      const rb = hashStr(`cloud${i}b${b}`);
+      const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(1.6 + rb * 1.6, 0), mat);
+      blob.position.set(b * 2.2 - 2 + rb, (rb - 0.5) * 0.8, (rb - 0.5) * 2);
+      blob.scale.y = 0.55;
+      blob.castShadow = true;
+      cluster.add(blob);
+    }
+    cluster.position.set(
+      cx + (r - 0.5) * n * 1.4,
+      13 + r * 4,
+      cz + (hashStr(`cz${i}`) - 0.5) * n * 1.2,
+    );
+    cluster.userData.speed = 0.35 + r * 0.4;
+    cloudsGroup.add(cluster);
+  }
+  scene.add(cloudsGroup);
+}
+
 // ── props (primitive assemblies, deterministic per node id) ───────────────────
+// A palm frond as real geometry: an arched, tapering blade (double-sided strip
+// that rises from the crown, arcs outward and droops at the tip).
+function frondGeometry(len: number, width: number, droop: number): THREE.BufferGeometry {
+  const SEG = 4;
+  const verts: number[] = [];
+  const centers: [number, number][] = [];
+  for (let i = 0; i <= SEG; i += 1) {
+    const t = i / SEG;
+    const x = len * t;
+    const y = Math.sin(t * Math.PI * 0.55) * len * 0.22 - t * t * droop;
+    centers.push([x, y]);
+  }
+  for (let i = 0; i < SEG; i += 1) {
+    const w0 = width * (1 - (i / SEG) * 0.85) * 0.5;
+    const w1 = width * (1 - ((i + 1) / SEG) * 0.85) * 0.5;
+    const [x0, y0] = centers[i];
+    const [x1, y1] = centers[i + 1];
+    // two triangles per segment, blade lies flat-ish (width along z)
+    verts.push(x0, y0, -w0, x1, y1, -w1, x0, y0, w0);
+    verts.push(x0, y0, w0, x1, y1, -w1, x1, y1, w1);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
 function makePalm(id: string): THREE.Group {
-  // A real fan palm: bent trunk + two stacked frond umbrellas + coconuts.
+  // Curved two-segment trunk + a crown of 7 real arched fronds + coconuts.
   const g = new THREE.Group();
   const r = hashStr(id);
-  const h = 1.15 + r * 0.55;
-  const lean = (r - 0.5) * 0.35;
-  const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.08, h, 5), lam(C.trunk));
-  trunk.position.set(Math.sin(lean) * h * 0.4, h / 2, 0);
-  trunk.rotation.z = lean;
-  trunk.castShadow = true;
-  g.add(trunk);
-  const topX = Math.sin(lean) * h * 0.8;
-  // fronds: inverted shallow cones with few segments = a low-poly leaf umbrella
-  const fr1 = new THREE.Mesh(new THREE.ConeGeometry(0.62 + r * 0.15, 0.30, 7, 1, true), lam(C.leafDark));
-  fr1.position.set(topX, h + 0.02, 0);
-  fr1.rotation.x = Math.PI;                      // open side up
-  fr1.rotation.y = r * 3;
-  fr1.castShadow = true;
-  g.add(fr1);
-  const fr2 = new THREE.Mesh(new THREE.ConeGeometry(0.46 + r * 0.1, 0.34, 6, 1, true), lam(C.leaf));
-  fr2.position.set(topX, h + 0.14, 0);
-  fr2.rotation.x = Math.PI;
-  fr2.rotation.y = r * 5 + 0.4;
-  fr2.castShadow = true;
-  g.add(fr2);
-  const nut = new THREE.Mesh(new THREE.SphereGeometry(0.055, 5, 4), lam(0x6d4c2c));
-  nut.position.set(topX + 0.08, h - 0.02, 0.05);
-  g.add(nut);
+  const h = 1.2 + r * 0.55;
+  const lean = (r - 0.5) * 0.5;
+
+  const seg1 = new THREE.Mesh(new THREE.CylinderGeometry(0.055, 0.085, h * 0.55, 5), lam(C.trunk));
+  seg1.position.set(Math.sin(lean * 0.4) * h * 0.14, h * 0.27, 0);
+  seg1.rotation.z = lean * 0.4;
+  seg1.castShadow = true;
+  g.add(seg1);
+  const topX = Math.sin(lean) * h * 0.42;
+  const seg2 = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.055, h * 0.52, 5), lam(C.trunk));
+  seg2.position.set((topX + Math.sin(lean * 0.4) * h * 0.25) / 2, h * 0.72, 0);
+  seg2.rotation.z = lean * 0.85;
+  seg2.castShadow = true;
+  g.add(seg2);
+
+  const crownY = h + 0.02;
+  const fronds = 7;
+  for (let i = 0; i < fronds; i += 1) {
+    const fr = hashStr(id + "f" + i);
+    const blade = new THREE.Mesh(
+      frondGeometry(0.72 + fr * 0.25, 0.2 + fr * 0.06, 0.5 + fr * 0.25),
+      new THREE.MeshLambertMaterial({
+        color: i % 2 ? C.leaf : C.leafDark, flatShading: true, side: THREE.DoubleSide,
+      }),
+    );
+    blade.position.set(topX, crownY, 0);
+    blade.rotation.y = (i / fronds) * Math.PI * 2 + r * 2;
+    blade.rotation.z = 0.15 + fr * 0.2;            // initial upward tilt, then the arc droops
+    blade.castShadow = true;
+    g.add(blade);
+  }
+  for (let i = 0; i < 2; i += 1) {
+    const nut = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 4), lam(0x6d4c2c));
+    const a = r * 5 + i * 2.4;
+    nut.position.set(topX + Math.cos(a) * 0.09, crownY - 0.06, Math.sin(a) * 0.09);
+    g.add(nut);
+  }
   return g;
 }
 
@@ -752,32 +942,69 @@ function buildStructs(st: WorldState): void {
 
 // ── survivors (3D meeples) ────────────────────────────────────────────────────
 function makeMeeple3d(a: AgentState): THREE.Group {
+  // A character, not a bollard: tapered body, skin-tone head with EYES, swinging
+  // arms, hair by gender/hash, a small backpack. The group faces +z (movement
+  // direction via rotation.y), so the face reads as the front.
   const hue = agentHue(a.id);
-  const bodyColor = hslToRgbInt(hue, 58, 55);
-  const headColor = hslToRgbInt(hue, 32, 78);
+  const r = hashStr(a.id + a.name);
+  const bodyColor = hslToRgbInt(hue, 62, 52);
+  const bodyDark = hslToRgbInt(hue, 62, 38);
+  const skin = 0xe8c39a;
   const g = new THREE.Group();
-  const body = new THREE.Mesh(
-    new THREE.CapsuleGeometry(0.15, 0.26, 3, 8),
-    new THREE.MeshLambertMaterial({ color: bodyColor }),
-  );
-  body.position.y = 0.34;
+
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.11, 0.16, 0.4, 8), lam(bodyColor));
+  body.position.y = 0.28;
   body.castShadow = true;
   g.add(body);
-  const head = new THREE.Mesh(
-    new THREE.SphereGeometry(0.13, 10, 8),
-    new THREE.MeshLambertMaterial({ color: headColor }),
-  );
-  head.position.y = 0.72;
+  // legs: two stubs under the body
+  for (const sx of [-0.06, 0.06]) {
+    const leg = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.05, 0.14, 6), lam(bodyDark));
+    leg.position.set(sx, 0.07, 0);
+    g.add(leg);
+  }
+  // arms: hang from the shoulders, swing while walking (refs in userData)
+  const arms: THREE.Mesh[] = [];
+  for (const sx of [-0.16, 0.16]) {
+    const arm = new THREE.Mesh(new THREE.CapsuleGeometry(0.035, 0.2, 2, 6), lam(bodyColor));
+    arm.position.set(sx, 0.42, 0);
+    arm.geometry.translate(0, -0.1, 0);        // pivot at the shoulder
+    arm.castShadow = true;
+    g.add(arm);
+    arms.push(arm);
+  }
+  g.userData.arms = arms;
+
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.125, 10, 8), lam(skin));
+  head.position.y = 0.62;
   head.castShadow = true;
   g.add(head);
-  if (a.gender === "female") {
-    const bun = new THREE.Mesh(
-      new THREE.SphereGeometry(0.06, 6, 5),
-      new THREE.MeshLambertMaterial({ color: hslToRgbInt(hue, 58, 38) }),
-    );
-    bun.position.set(0.1, 0.8, -0.02);
-    g.add(bun);
+  // eyes: two dark dots on the front — the single biggest "alive" cue
+  for (const sx of [-0.05, 0.05]) {
+    const eye = new THREE.Mesh(new THREE.SphereGeometry(0.018, 5, 4),
+      new THREE.MeshBasicMaterial({ color: 0x2a2118 }));
+    eye.position.set(sx, 0.645, 0.115);
+    g.add(eye);
   }
+  // hair: women get a bun; men get a cap or stay bald (hashed)
+  const hairColor = r < 0.33 ? 0x3a2a1c : r < 0.66 ? 0x6d4c2c : 0x1e1a16;
+  if (a.gender === "female") {
+    const hair = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6), lam(hairColor));
+    hair.position.set(0, 0.655, -0.025);
+    hair.scale.set(1, 0.8, 0.95);
+    g.add(hair);
+    const bun = new THREE.Mesh(new THREE.SphereGeometry(0.055, 6, 5), lam(hairColor));
+    bun.position.set(0, 0.72, -0.12);
+    g.add(bun);
+  } else if (r > 0.45) {
+    const cap = new THREE.Mesh(new THREE.SphereGeometry(0.13, 8, 6,
+      0, Math.PI * 2, 0, Math.PI * 0.45), lam(bodyDark));
+    cap.position.y = 0.665;
+    g.add(cap);
+  }
+  // backpack: a small contrasting cube on the back
+  const pack = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.18, 0.08), lam(0x8a6f4c));
+  pack.position.set(0, 0.36, -0.15);
+  g.add(pack);
   return g;
 }
 
@@ -880,8 +1107,13 @@ function tick(): void {
     const w = el.clientWidth, h = el.clientHeight;
     const cur = renderer.getSize(new THREE.Vector2());
     if (Math.abs(cur.x - w) > 1 || Math.abs(cur.y - h) > 1) {
+      const pr = Math.min(2, window.devicePixelRatio || 1);
       renderer.setSize(w, h, false);
-      renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
+      renderer.setPixelRatio(pr);
+      composer.setSize(w, h);
+      composer.setPixelRatio(pr);
+      (fxaaPass.material.uniforms.resolution.value as THREE.Vector2)
+        .set(1 / (w * pr), 1 / (h * pr));
       camera.aspect = w / Math.max(1, h);
       camera.updateProjectionMatrix();
     }
@@ -896,15 +1128,23 @@ function tick(): void {
       v.x += (dx / dist) * step;
       v.z += (dz / dist) * step;
     }
-    const bob = dist > 0.05 ? Math.abs(Math.sin(performance.now() / 90)) * 0.05 : 0;
+    const walking = dist > 0.05;
+    const bob = walking ? Math.abs(Math.sin(performance.now() / 90)) * 0.05 : 0;
     v.group.position.set(v.x, Math.max(0.02, heightAt(v.x, v.z)) + bob, v.z);
-    if (dist > 0.05) v.group.rotation.y = Math.atan2(dx, dz);
+    if (walking) v.group.rotation.y = Math.atan2(dx, dz);
+    // arm swing while walking, relaxed at rest
+    const arms = v.group.userData.arms as THREE.Mesh[] | undefined;
+    if (arms) {
+      const swing = walking ? Math.sin(performance.now() / 100) * 0.7 : 0;
+      arms[0].rotation.x = swing;
+      arms[1].rotation.x = -swing;
+    }
   }
 
   // day/night: real lighting, not an overlay (time-based, frame-rate agnostic)
   const targetNight = state.is_night ? 1 : 0;
   nightMix += (targetNight - nightMix) * Math.min(1, dt * 1.6);
-  sun.intensity = 2.9 - nightMix * 2.62;
+  sun.intensity = (2.9 - nightMix * 2.62) * (1 - stormMix * 0.35);
   ambient.intensity = 0.45 - nightMix * 0.22;
   tmpColor.copy(dayFog).lerp(nightFog, nightMix);
   (scene.background as THREE.Color).copy(tmpColor);
@@ -923,6 +1163,27 @@ function tick(): void {
     selRing.visible = false;
   }
 
+  // atmosphere: waves, drifting clouds, breathing foam, storm front
+  const now = performance.now() / 1000;
+  const storm = state.weather === "storm" ? 1 : 0;
+  stormMix += (storm - stormMix) * Math.min(1, dt * 1.2);
+  if (waterShader) {
+    waterShader.uniforms.uTime.value = now;
+    waterShader.uniforms.uAmp.value = 0.05 + stormMix * 0.12;
+  }
+  if (foamMat) foamMat.opacity = 0.32 + Math.sin(now * 1.7) * 0.12;
+  if (cloudsGroup && state) {
+    const n = state.map.size;
+    for (const cl of cloudsGroup.children) {
+      cl.position.x += (cl.userData.speed as number) * dt * (1 + stormMix * 2.5);
+      if (cl.position.x > n / 2 + n) cl.position.x = n / 2 - n;
+    }
+  }
+  const fog = scene.fog as THREE.Fog;
+  fog.near = 120 - stormMix * 70;
+  fog.far = 280 - stormMix * 130;
+  if (gradePass) gradePass.uniforms.uTime.value = now;
+
   controls.update();
-  renderer.render(scene, camera);
+  composer.render();
 }
