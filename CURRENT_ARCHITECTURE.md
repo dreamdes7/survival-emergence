@@ -315,6 +315,34 @@ island.yaml: `currency_item: beads` + ресурс shell_bed на пляже (б
 metrics.jsonl и в metrics-панель UI. e2e stub 6 дней: 11 мемов, 23 передачи,
 7 крылатых, 1 цепочка × 10 пересказов → миф.
 
+## Спринт 4 — «Бенчмарк» (added 2026-07-05, FRONTIER_IDEAS 1.2/3.2/3.3)
+
+### Slow/fast мышление (PIANO по-честному)
+`llm.thinking: full|split` (+ Forge-селектор). В split-режиме
+`openrouter.deliberate()` раз в `deliberate_every` тиков строит план дня
+(goal + 2-4 шага, kind=deliberation в llm.jsonl, событие `plan`), а по-тиковые
+решения идут компактным промптом (`_build_messages(fast=True)`: 4 памяти,
+3 ресурса, без beliefs/rules/ritual — план несёт стратегический контекст).
+`agent.plan` в snapshot + строка 🗺 в карточке агента. Дефолт full — поведение
+не менялось.
+
+### ToM-пробы
+`engine/probes.py`: раз в `research.tom_probe_every` тиков (дефолт 12) каждого
+real-LLM агента вне мира спрашивают «как каждый относится К ТЕБЕ?» и скорят
+против ground truth (реальные relationship-лейблы других к нему). Синонимы
+нормализуются (ally/друг/союзник). world.tom_scores → metrics["tom"]
+(mean/per_agent/by_model) → snapshot/metrics.jsonl/meta.json. Stub пропускается.
+
+### Лидерборд
+`experiments/model_arena.yaml` (одинаковые сиды × разные model_override, split +
+wait + gate 1.2 — дёшево и чисто) + `analysis/leaderboard.py`: агрегация
+meta.json по моделям → таблица surv/esc/heur%/ToM/memes/myths/cost.
+`llm_usage` (calls/tokens/cost) пишется в meta при закрытии рана;
+recorder.add_meta() для дозаписи.
+
+Попутно: починен латентный NameError в `agents/runtime.py:retrieval_query`
+(NEARBY_RADIUS → PERCEPTION_RADIUS) — путь не выполнялся до real-LLM тестов.
+
 ## Ближайшие слабые места (обновлено 2026-07-05, после спринта 2)
 
 - Нет persistent restore из snapshot: `restart` пересобирает мир с нуля.

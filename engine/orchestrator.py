@@ -76,6 +76,10 @@ def load_config(overrides: dict) -> tuple[dict, dict]:
         cfg["sim"]["emergency_multiplier"] = overrides["emergency_multiplier"]
     if overrides.get("fallback_policy"):
         cfg.setdefault("llm", {})["fallback_policy"] = overrides["fallback_policy"]
+    if overrides.get("thinking"):
+        cfg.setdefault("llm", {})["thinking"] = overrides["thinking"]
+    if overrides.get("tom_probe_every") is not None:
+        cfg.setdefault("research", {})["tom_probe_every"] = overrides["tom_probe_every"]
     scenario = yaml.safe_load(
         (ROOT / "scenarios" / f"{cfg['scenario']}.yaml").read_text(encoding="utf-8"))
     return cfg, scenario
@@ -267,6 +271,8 @@ def build_llm(world: World, cfg: dict):
             context_tokens=int(budget_cfg.get("context_tokens_per_agent_tick", 32000)),
             provider=provider,
             seed=seed,
+            thinking=str(llm_cfg.get("thinking", "full")),
+            deliberate_every=int(llm_cfg.get("deliberate_every", 12)),
         )
     except RuntimeError as exc:
         print(f"[warn] {exc}; using stub fallback until a key is configured.")
@@ -395,6 +401,13 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
             if fragment:
                 say(f"   📜 {fragment}")
 
+        tom_every = int(cfg.get("research", {}).get("tom_probe_every", 0) or 0)
+        if (tom_every and t > 0 and t % tom_every == 0
+                and getattr(llm, "openrouter", None) is not None):
+            from engine.probes import run_tom_probes
+            for r in run_tom_probes(world, llm.openrouter):
+                say(f"   🧩 ToM {r['agent']}: {r['accuracy']:.0%}")
+
         if recorder is not None:
             recorder.tick_metrics(world)
 
@@ -410,6 +423,13 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
 
     if recorder is not None:
         recorder.close(world)
+        client = getattr(llm, "openrouter", None)
+        if client is not None:
+            b = client.budget
+            recorder.add_meta(llm_usage={
+                "calls": b.calls, "prompt_tokens": b.prompt_tokens,
+                "completion_tokens": b.completion_tokens, "cost_usd": round(b.cost, 4),
+            })
     if not quiet:
         _summary(world, llm, recorder)
     return recorder

@@ -1,0 +1,22 @@
+# Model arena (FRONTIER_IDEAS 3.3): same world, same seeds — different models.
+# Which model builds the better society? Aggregate with:
+#
+#   py -3.12 -m engine.batch experiments/model_arena.yaml
+#   py -3.12 -m analysis.leaderboard logs/runs/_batch_model-arena_*/summary.json
+#
+# Needs OPENROUTER_API_KEY (or MegaLLM). Split thinking + tight emergency gate +
+# wait-fallback keep runs cheap and the data attributable to the models.
+# Swap/extend the model list freely — any OpenRouter id works.
+name: model-arena
+scenario: island
+
+matrix:
+  seed: [1, 2, 3]
+  agents.model_override:
+    - "deepseek/deepseek-v4-flash"
+    - "openai/gpt-5.2-mini"
+    - "google/gemini-3-flash"
+  llm.thinking: [split]
+  llm.fallback_policy: [wait]
+  sim.emergency_multiplier: [1.2]
+  sim.max_days: [4]

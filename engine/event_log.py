@@ -152,6 +152,12 @@ class RunRecorder:
             "by_source": {k: round(v / total, 4) for k, v in sorted(self.source_counts.items())},
         }
 
+    def add_meta(self, **fields) -> None:
+        """Merge extra fields into the manifest and rewrite it (e.g. llm usage
+        totals added by the runner after the loop ends)."""
+        self.meta.update(fields)
+        self._write_meta()
+
     def close(self, world=None) -> None:
         contam = self.contamination()
         # A run is only "clean" if it actually exercised real models. A pure-stub
@@ -174,6 +180,13 @@ class RunRecorder:
                 "dead": [a.name for a in world.agents if a.status == "dead"],
                 "structures": sorted({s.kind for s in world.structures}),
             })
+            # Benchmark values live in the manifest so the leaderboard reads one file.
+            if getattr(world, "tom_scores", None):
+                from engine.probes import tom_summary
+                self.meta["tom"] = tom_summary(world)
+            culture = getattr(world, "culture", None)
+            if culture is not None:
+                self.meta["culture"] = culture.summary(world)
         self._write_meta()
         for h in (self._events, self._metrics, self._llm):
             try:

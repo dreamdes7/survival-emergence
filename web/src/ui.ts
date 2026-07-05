@@ -100,6 +100,7 @@ function renderAgentModal(agent: AgentState) {
     agent.thought ? `<div class="cc-cog-line cc-thought">💭 ${escapeHtml(agent.thought)}</div>` : "",
     agent.action ? `<div class="cc-cog-line cc-action">▶ ${escapeHtml(agent.action)}</div>` : "",
     agent.said ? `<div class="cc-cog-line cc-said">💬 ${escapeHtml(agent.said)}</div>` : "",
+    agent.plan ? `<div class="cc-cog-line cc-plan">🗺 ${escapeHtml(agent.plan.goal)}${agent.plan.steps.length ? ` <span class="cc-plan-steps">(${escapeHtml(agent.plan.steps.join(" → "))})</span>` : ""}</div>` : "",
     agent.decision_source ? `<div class="cc-cog-line cc-source">${sourceBadge(agent.decision_source)}</div>` : "",
   ].join("") || `<div class="cc-empty">No activity yet.</div>`;
 
@@ -273,6 +274,10 @@ export function renderForge(cfg: ForgeConfig) {
       <option value="stub"${(cfg.llm?.fallback_policy ?? "stub") === "stub" ? " selected" : ""}>stub (never stall)</option>
       <option value="wait"${(cfg.llm?.fallback_policy ?? "stub") === "wait" ? " selected" : ""}>wait (clean data)</option>
     </select>`)}
+    ${field("thinking", "thinking", `<select name="thinking" title="split = дешёвые тики + план дня раз в N тиков">
+      <option value="full"${(cfg.llm?.thinking ?? "full") === "full" ? " selected" : ""}>full (каждый тик)</option>
+      <option value="split"${(cfg.llm?.thinking ?? "full") === "split" ? " selected" : ""}>split (план+fast)</option>
+    </select>`)}
     ${field("anomaly", "anomaly", `<select name="anomaly">
       <option value="none">none</option>
       <option value="random">random (1)</option>
@@ -342,6 +347,7 @@ export function bindForgeSubmit(): void {
       persona_mode: String(form.get("persona_mode") ?? "blank"),
       emergency_multiplier: form.get("emergency_multiplier"),
       fallback_policy: String(form.get("fallback_policy") ?? "stub"),
+      thinking: String(form.get("thinking") ?? "full"),
       roster,
     };
     try {

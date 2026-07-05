@@ -19,6 +19,7 @@ export type AgentState = {
   action: string;
   said: string;
   decision_source?: string;   // llm | emergency | llm_fallback_stub | repair_stub | stub | wait
+  plan?: { goal: string; steps: string[] } | null;   // day plan from split thinking
   relationships?: { id: string; name: string; label: string; score: number }[];
   best_ally?: string | null;
   following?: string | null;
@@ -133,6 +134,7 @@ export type ForgeConfig = {
   };
   llm?: {
     fallback_policy?: string;
+    thinking?: string;
   };
   agents: {
     count: number;

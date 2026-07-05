@@ -76,6 +76,9 @@ def world_snapshot(world) -> dict:
                 # see when the heuristic — not the model — is driving.
                 "decision_source": getattr(a, "last_source", ""),
                 "dread": round(getattr(a, "dread", 0.0), 1),
+                # Day plan from split thinking (null in full mode / for stubs).
+                "plan": ({"goal": a.plan.get("goal", ""), "steps": a.plan.get("steps", [])}
+                         if getattr(a, "plan", None) else None),
                 # Fog of war visibility
                 "known_nodes": list(a.known_nodes.keys()),
                 "known_structures": list(a.known_structures.keys()),

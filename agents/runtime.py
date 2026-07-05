@@ -118,6 +118,9 @@ class Agent:
         self.last_source: str = ""      # provenance of the last decision (llm/emergency/…)
         self.dread: float = 0.0         # anomaly-driven fear; 0 unless an anomaly is placed
         self._last_dream_day: int = 0   # dreams fire at most once per sim-day
+        # Split thinking (Sprint 4): the day plan set by the slow deliberation
+        # call; per-tick fast decisions steer by it. None = full-prompt mode.
+        self.plan: dict | None = None
 
     # ── inbox ─────────────────────────────────────────────────────────────────
     def deliver(self, msg: dict) -> None:
@@ -286,7 +289,7 @@ class Agent:
         for o in world.agents:
             if o is self or o.status == "dead":
                 continue
-            if chebyshev(self.x, self.y, o.x, o.y) <= NEARBY_RADIUS:
+            if chebyshev(self.x, self.y, o.x, o.y) <= PERCEPTION_RADIUS:
                 parts.append(o.name)
         parts.extend(self.goals[:2])
         if world.is_night:

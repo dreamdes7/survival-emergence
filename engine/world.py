@@ -47,6 +47,7 @@ class World:
         # with measurable drift, and the optional currency experiment.
         from engine.culture import CultureTracker
         self.culture = CultureTracker(currency_item=scenario.get("currency_item"))
+        self.tom_scores: dict[str, list[float]] = {}   # theory-of-mind probe accuracy
 
         # Sprint 2 — commitments, culture, ritual
         self.commitments: list[dict] = []   # promises between agents

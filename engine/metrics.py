@@ -57,4 +57,8 @@ def awi_metrics(world) -> dict:
     culture = getattr(world, "culture", None)
     if culture is not None:
         out["culture"] = culture.summary(world)
+    # Theory-of-mind benchmark (Sprint 4): only present when probes have run.
+    if getattr(world, "tom_scores", None):
+        from engine.probes import tom_summary
+        out["tom"] = tom_summary(world)
     return out

@@ -160,7 +160,9 @@ class OpenRouterLLM:
                  context_tokens: int = 32000,
                  api_key: str | None = None,
                  provider: str = "openrouter",
-                 seed: int | None = None) -> None:
+                 seed: int | None = None,
+                 thinking: str = "full",
+                 deliberate_every: int = 12) -> None:
         load_dotenv()
         prov = PROVIDERS.get(provider) or PROVIDERS["openrouter"]
         self.provider = provider
@@ -176,12 +178,27 @@ class OpenRouterLLM:
         self.temperature = temperature
         self.context_tokens = context_tokens
         self.seed = seed          # forwarded to the API for best-effort reproducibility
+        # PIANO-style split thinking: "full" = every tick gets the full world
+        # prompt (original behaviour); "split" = one expensive deliberation every
+        # `deliberate_every` ticks builds a day plan, and per-tick decisions use a
+        # compact prompt checked against that plan (severalfold cheaper + more
+        # coherent multi-day behaviour).
+        self.thinking = thinking
+        self.deliberate_every = max(1, int(deliberate_every))
 
     # ── public API ────────────────────────────────────────────────────────────
     def decide(self, agent, world) -> dict:
         if self.budget.exceeded():
             return self._fb(agent, world, "budget cap reached")
-        messages = self._build_messages(agent, world)
+        fast = False
+        if self.thinking == "split":
+            plan = getattr(agent, "plan", None)
+            if plan is None or world.tick - plan.get("made_tick", -10**6) >= self.deliberate_every:
+                new_plan = self.deliberate(agent, world)
+                if new_plan:
+                    agent.plan = new_plan
+            fast = getattr(agent, "plan", None) is not None   # no plan -> full prompt
+        messages = self._build_messages(agent, world, fast=fast)
         try:
             data = self._post_with_retry(agent.model, messages)
         except Exception as exc:                       # network / api error
@@ -203,6 +220,43 @@ class OpenRouterLLM:
             return self._fb(agent, world, "unparseable action")
         decision["_source"] = "llm"
         return decision
+
+    # ── deliberation (Sprint 4: slow/fast thinking) ────────────────────────────
+    def deliberate(self, agent, world) -> dict | None:
+        """The SLOW thread: one full-context call that sets a day plan (goal +
+        2-4 concrete steps). Per-tick fast decisions then steer by it. Returns
+        None on any failure — the agent simply keeps thinking full-prompt."""
+        if self.budget.exceeded():
+            return None
+        base = self._build_messages(agent, world, fast=False)
+        messages = [
+            {"role": "system", "content":
+                base[0]["content"]
+                + "\n\nСЕЙЧАС НЕ ДЕЙСТВИЕ, А ПЛАН. Обдумай положение и составь план "
+                  "на ближайший день. Ответь ТОЛЬКО JSON: "
+                  '{"goal": "главная цель одним предложением", '
+                  '"steps": ["шаг 1", "шаг 2", "шаг 3"]}. Шагов 2-4, конкретных.'},
+            {"role": "user", "content": base[1]["content"].rsplit(
+                "Доступные действия", 1)[0] + "\nТвой план на день (только JSON):"},
+        ]
+        try:
+            data = self._post_with_retry(agent.model, messages)
+            usage = data.get("usage", {}) or {}
+            self.budget.add(usage)
+            content = (data["choices"][0]["message"].get("content") or "")
+            self._record_llm(agent, world, messages, content, usage, kind="deliberation")
+            m = re.search(r"\{.*\}", content, re.DOTALL)
+            obj = json.loads(m.group(0)) if m else None
+        except Exception:
+            return None
+        if not isinstance(obj, dict) or not obj.get("goal"):
+            return None
+        steps = [str(s).strip() for s in obj.get("steps", []) if str(s).strip()][:4]
+        plan = {"goal": str(obj["goal"]).strip()[:160], "steps": steps,
+                "made_tick": world.tick}
+        world.emit("plan", actor=agent.id,
+                   payload={"name": agent.name, "goal": plan["goal"], "steps": steps})
+        return plan
 
     def _record_llm(self, agent, world, messages, response, usage,
                     error=None, kind: str = "decision") -> None:
@@ -399,7 +453,10 @@ class OpenRouterLLM:
         return []
 
     # ── prompt construction ───────────────────────────────────────────────────
-    def _build_messages(self, agent, world) -> list[dict]:
+    def _build_messages(self, agent, world, fast: bool = False) -> list[dict]:
+        """fast=True builds the compact per-tick prompt for split thinking:
+        fewer memories/nodes, no beliefs/rules/ritual blocks — the day plan
+        (set by deliberate()) carries the strategic context instead."""
         persona = agent.persona
         gender_ru = _gender_ru(getattr(agent, "gender", "unspecified"))
         char = (f"You are {agent.name} ({gender_ru}), one of several people who just survived a crash in a "
@@ -474,7 +531,7 @@ class OpenRouterLLM:
                 nearby_agents.append(f"{o.name}({rel}, {tag}{role}) at ({o.x},{o.y})")
 
         nodes = sorted(agent.known_nodes.values(),
-                       key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))[:6]
+                       key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))[:3 if fast else 6]
         node_lines = [f"{n.kind}->{n.yield_item} at ({n.x},{n.y}) qty{n.quantity:.0f}"
                       for n in nodes if n.quantity > 0]
         def structure_line(s) -> str:
@@ -503,7 +560,7 @@ class OpenRouterLLM:
 
         structs = [structure_line(s) for s in agent.known_structures.values()]
 
-        memory_count = max(6, min(80, self.context_tokens // 700))
+        memory_count = 4 if fast else max(6, min(80, self.context_tokens // 700))
         # Retrieval scored against the agent's ACTUAL situation (needs + who's
         # nearby + goal), not the often-empty goals[0]. Falls back gracefully.
         query = agent.retrieval_query(world) if hasattr(agent, "retrieval_query") else \
@@ -527,7 +584,7 @@ class OpenRouterLLM:
             sp = id2agent.get(f.get("agent_id"))
             if sp is not None and chebyshev(agent.x, agent.y, sp.x, sp.y) <= NEARBY_RADIUS:
                 chatter.append(f"{sp.name}: {f.get('result', '')}")
-        chatter = chatter[-5:]
+        chatter = chatter[-(3 if fast else 5):]
 
         # Group the menu by intent so the choice is legible, not a wall of tools.
         tools = world.tools.available(world, agent)
@@ -594,27 +651,54 @@ class OpenRouterLLM:
             else:
                 ritual_line = "Ночь. Если втроём и больше собраться у горящего костра — всем легче на душе.\n"
 
-        user = (
-            f"День {world.day}, {phase}{weather}. Ты на ({agent.x},{agent.y}){place_here}.\n"
-            f"{ritual_line}"
-            f"Пол: {gender_ru}\n"
-            f"Твоё состояние:\n{phys_text}{dread_line}\n"
-            f"{role_line}"
-            f"Инвентарь: {inv}\n"
-            f"Цели: {', '.join(agent.goals) if agent.goals else 'выжить'}\n"
-            f"Данные обещания: {promises_txt}\n"
-            f"Следуешь за: {following}\n"
-            f"Правила группы: {rules}\n"
-            f"Выжившие рядом: {'; '.join(nearby_agents) if nearby_agents else 'никого не видно'}\n"
-            f"Что ты думаешь о людях:\n{beliefs_txt}\n"
-            f"Известные ресурсы: {'; '.join(node_lines) if node_lines else 'ещё не найдены'}\n"
-            f"Лагерь / постройки: {'; '.join(structs) if structs else 'ничего нет — нужно строить!'}\n"
-            f"Последние воспоминания:\n" + ("\n".join(mem_lines) if mem_lines else "  (нет)") + "\n"
-            f"Разговор рядом:\n"
-            + ("\n".join(chatter) if chatter else "  (тихо)") + "\n"
-            f"Доступные действия (выбери ровно одно):\n" + tool_menu + "\n"
-            "Ответь только JSON."
-        )
+        # Day plan (set by deliberate() in split mode; shown in full mode too).
+        plan = getattr(agent, "plan", None)
+        plan_block = ""
+        if plan:
+            steps = "; ".join(plan.get("steps", []))
+            plan_block = (f"ТВОЙ ПЛАН НА ДЕНЬ: {plan.get('goal', '')}"
+                          + (f" (шаги: {steps})" if steps else "")
+                          + " — действуй по нему, отклоняйся только если жизнь дороже.\n")
+
+        if fast:
+            user = (
+                f"День {world.day}, {phase}{weather}. Ты на ({agent.x},{agent.y}){place_here}.\n"
+                f"{plan_block}"
+                f"Твоё состояние:\n{phys_text}{dread_line}\n"
+                f"Инвентарь: {inv}\n"
+                f"Данные обещания: {promises_txt}\n"
+                f"Следуешь за: {following}\n"
+                f"Выжившие рядом: {'; '.join(nearby_agents) if nearby_agents else 'никого не видно'}\n"
+                f"Ближайшие ресурсы: {'; '.join(node_lines) if node_lines else 'ещё не найдены'}\n"
+                f"Лагерь / постройки: {'; '.join(structs[:6]) if structs else 'ничего нет — нужно строить!'}\n"
+                f"Свежие воспоминания:\n" + ("\n".join(mem_lines) if mem_lines else "  (нет)") + "\n"
+                f"Разговор рядом:\n" + ("\n".join(chatter) if chatter else "  (тихо)") + "\n"
+                f"Доступные действия (выбери ровно одно):\n" + tool_menu + "\n"
+                "Ответь только JSON."
+            )
+        else:
+            user = (
+                f"День {world.day}, {phase}{weather}. Ты на ({agent.x},{agent.y}){place_here}.\n"
+                f"{ritual_line}"
+                f"{plan_block}"
+                f"Пол: {gender_ru}\n"
+                f"Твоё состояние:\n{phys_text}{dread_line}\n"
+                f"{role_line}"
+                f"Инвентарь: {inv}\n"
+                f"Цели: {', '.join(agent.goals) if agent.goals else 'выжить'}\n"
+                f"Данные обещания: {promises_txt}\n"
+                f"Следуешь за: {following}\n"
+                f"Правила группы: {rules}\n"
+                f"Выжившие рядом: {'; '.join(nearby_agents) if nearby_agents else 'никого не видно'}\n"
+                f"Что ты думаешь о людях:\n{beliefs_txt}\n"
+                f"Известные ресурсы: {'; '.join(node_lines) if node_lines else 'ещё не найдены'}\n"
+                f"Лагерь / постройки: {'; '.join(structs) if structs else 'ничего нет — нужно строить!'}\n"
+                f"Последние воспоминания:\n" + ("\n".join(mem_lines) if mem_lines else "  (нет)") + "\n"
+                f"Разговор рядом:\n"
+                + ("\n".join(chatter) if chatter else "  (тихо)") + "\n"
+                f"Доступные действия (выбери ровно одно):\n" + tool_menu + "\n"
+                "Ответь только JSON."
+            )
         return [{"role": "system", "content": sys}, {"role": "user", "content": user}]
 
     # ── response parsing ──────────────────────────────────────────────────────

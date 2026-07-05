@@ -167,6 +167,11 @@ class SimulationRunner:
             if getattr(self, "narrator", None) is not None and t > 0:
                 # Narration is a blocking LLM call — keep it off the event loop.
                 await asyncio.to_thread(self.narrator.maybe_tick, self.world)
+            tom_every = int(self.cfg.get("research", {}).get("tom_probe_every", 0) or 0)
+            if (tom_every and t > 0 and t % tom_every == 0
+                    and getattr(self.llm, "openrouter", None) is not None):
+                from engine.probes import run_tom_probes
+                await asyncio.to_thread(run_tom_probes, self.world, self.llm.openrouter)
             if self.logger is not None:
                 self.logger.log_tick(self.world)
             if self.recorder is not None:
@@ -179,6 +184,14 @@ class SimulationRunner:
                     self.logger = None
                 if self.recorder is not None:
                     self.recorder.close(self.world)
+                    client = getattr(self.llm, "openrouter", None)
+                    if client is not None:
+                        b = client.budget
+                        self.recorder.add_meta(llm_usage={
+                            "calls": b.calls, "prompt_tokens": b.prompt_tokens,
+                            "completion_tokens": b.completion_tokens,
+                            "cost_usd": round(b.cost, 4),
+                        })
                     self.recorder = None
                 break
             if self.tick_seconds > 0:
@@ -212,10 +225,12 @@ def _clean_overrides(raw: dict) -> dict:
         "api_tick_seconds", "usd_cap", "tokens_per_agent_tick",
         "context_tokens_per_agent_tick", "max_output_tokens", "provider",
         "anomaly", "persona_mode", "emergency_multiplier", "fallback_policy",
+        "thinking", "tom_probe_every",
     }
     clean = {k: raw.get(k) for k in allowed}
     for key in ("days", "agents", "seed", "tokens_per_agent_tick",
-                "context_tokens_per_agent_tick", "max_output_tokens"):
+                "context_tokens_per_agent_tick", "max_output_tokens",
+                "tom_probe_every"):
         if clean.get(key) not in (None, ""):
             clean[key] = int(clean[key])
     for key in ("api_tick_seconds", "usd_cap", "emergency_multiplier"):

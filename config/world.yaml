@@ -64,6 +64,12 @@ llm:
   seed_requests: true     # forward `seed` to the provider for best-effort reproducibility
   reflect_with_llm: true  # periodic reflection is a real LLM synthesis, not a template
   dreams: true            # night rest consolidates the day into a short dream
+  # Split thinking (PIANO): "full" = full world prompt every tick (original);
+  # "split" = one deliberation per `deliberate_every` ticks sets a day plan and
+  # per-tick decisions use a compact prompt — severalfold cheaper real-model
+  # runs with more coherent multi-day behaviour.
+  thinking: full
+  deliberate_every: 12
 
 # ── Narrator (saga voice-over) ────────────────────────────────────────────────
 # A separate LLM voice that retells the event stream as literary saga fragments,
@@ -80,3 +86,6 @@ research:
   record: true            # write logs/runs/<id>/ (events, metrics, llm, meta)
   log_llm: true           # capture full prompt+response per call (large; off for long runs)
   taint_threshold: 0.20   # flag a run tainted if >this share of decisions were heuristic
+  # Theory-of-mind probes: every N ticks ask each real-LLM agent how the others
+  # relate to IT and score against ground truth. 0 = off. Stub agents skipped.
+  tom_probe_every: 12
