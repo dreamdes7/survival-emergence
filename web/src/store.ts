@@ -22,10 +22,12 @@ export const store = {
   // screen shows the scrubbed snapshot instead.
   replayMode: false,
 
-  // Render style: "vector" = procedural no-asset diorama renderer (island),
-  // "tiles" = the original tileset renderer. Persisted per browser.
-  renderStyle: (localStorage.getItem("renderStyle") === "tiles" ? "tiles" : "vector") as
-    "tiles" | "vector",
+  // Render style: "3d" = low-poly three.js diorama, "vector" = procedural 2D
+  // (both asset-free, island only), "tiles" = the original tileset renderer.
+  renderStyle: ((): "tiles" | "vector" | "3d" => {
+    const saved = localStorage.getItem("renderStyle");
+    return saved === "tiles" || saved === "vector" || saved === "3d" ? saved : "3d";
+  })(),
 
   // System event ticker (left dock)
   events: [] as string[],

@@ -9,7 +9,9 @@
     "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
+    "@types/three": "^0.185.0",
     "pixi.js": "^8.6.6",
+    "three": "^0.185.1",
     "vite": "^8.1.0"
   },
   "devDependencies": {

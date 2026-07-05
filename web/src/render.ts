@@ -10,12 +10,18 @@ import { closeModal, openAgentModal, openStructModal, pushEvent, renderChrome, s
 import { controlSim } from "./api";
 import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
          invalidateVectorTerrain, makeCloudShadowCanvas } from "./vector";
+import { agentScreen3d, invalidate3d, setActive3d, sync3d } from "./render3d";
 import type { StructureState, WorldState } from "./types";
 
 // Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
 // the tile path in both styles.
 function vectorMode(): boolean {
   return store.renderStyle === "vector" && store.state?.scenario === "island";
+}
+
+// Low-poly three.js diorama (G3) — island only as well.
+function mode3d(): boolean {
+  return store.renderStyle === "3d" && store.state?.scenario === "island";
 }
 
 // ── pixi scene graph ──────────────────────────────────────────────────────────
@@ -87,6 +93,7 @@ export function handleWorldChange(next: WorldState): void {
   cloudsForScenario = "";          // rebuild clouds for the new world
   terrainDirty = true;             // re-bake land for the new world
   invalidateVectorTerrain();
+  invalidate3d();
   void setupClouds();
   sizeNight();
   app.renderer.background.color = next.scenario === "island" ? OCEAN_COLOR : VOID_COLOR;
@@ -100,19 +107,22 @@ export function resetForSimSwitch(): void {
   fittedMapKey = "";
   cloudsForScenario = "";
   invalidateVectorTerrain();
+  invalidate3d();
 }
 
-// Style toggle (🎨): swap between the tileset renderer and the procedural
-// vector diorama at runtime. Agent visuals rebuild in the new style.
+// Style toggle (🎨): cycle 3d -> vector -> tiles. Agent visuals rebuild.
 function toggleRenderStyle(): void {
-  store.renderStyle = store.renderStyle === "vector" ? "tiles" : "vector";
+  store.renderStyle = store.renderStyle === "3d" ? "vector"
+    : store.renderStyle === "vector" ? "tiles" : "3d";
   localStorage.setItem("renderStyle", store.renderStyle);
   for (const vis of agentVis.values()) vis.container.destroy({ children: true });
   agentVis.clear();
   cloudsForScenario = "";
   void setupClouds();
   void render();
-  pushEvent(`render: ${store.renderStyle === "vector" ? "вектор (без ассетов)" : "тайлы"}`);
+  const label = store.renderStyle === "3d" ? "3D диорама"
+    : store.renderStyle === "vector" ? "вектор (2D)" : "тайлы";
+  pushEvent(`render: ${label}`);
 }
 
 function bindViewportControls() {
@@ -477,17 +487,45 @@ function removeAgentDom(id: string): void {
   if (d) { d.wrap.remove(); agentDom.delete(id); }
 }
 
+// Names/bubbles without Pixi sprites — used by the 3D mode, where three.js owns
+// the world but the crisp HTML overlay stays exactly the same.
+function syncAgentDom(state: WorldState): void {
+  const seen = new Set<string>();
+  for (const a of state.agents) {
+    seen.add(a.id);
+    const dom = ensureAgentDom(a.id, a.name);
+    if (a.status === "dead") dom.wrap.classList.add("dead");
+    else dom.wrap.classList.remove("dead");
+    if (a.said && a.said !== dom.lastSaid) {
+      dom.lastSaid = a.said;
+      dom.bubbleEl.textContent = a.said;
+      dom.bubbleEl.classList.add("show");
+      dom.ttl = 6;
+    }
+  }
+  for (const id of [...agentDom.keys()]) {
+    if (!seen.has(id)) removeAgentDom(id);
+  }
+}
+
 // Position each agent's name + bubble just above its head, in screen space.
 function updateOverlay(): void {
   const dt = app.ticker.deltaMS / 1000;
+  const in3d = mode3d();
   const sc = camera.scale;
   for (const [id, d] of agentDom) {
-    const vis = agentVis.get(id);
-    if (!vis) continue;
     if (d.ttl > 0) {
       d.ttl -= dt;
       if (d.ttl <= 0) d.bubbleEl.classList.remove("show");
     }
+    if (in3d) {
+      const p = agentScreen3d(id);
+      if (!p) { d.wrap.style.transform = "translate(-9999px, -9999px)"; continue; }
+      d.wrap.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -100%)`;
+      continue;
+    }
+    const vis = agentVis.get(id);
+    if (!vis) continue;
     const sx = mapRoot.position.x + (vis.px + 16) * sc;
     const sy = mapRoot.position.y + (vis.py + (vis.isPawn ? -14 : -2)) * sc;
     d.wrap.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%)`;
@@ -1077,6 +1115,17 @@ async function renderIslandTerrain(seq: number): Promise<boolean> {
 export async function render() {
   const state = store.state;
   if (!state) return;
+
+  // 3D mode: three.js owns the frame; Pixi canvas hides, HTML overlay stays.
+  if (mode3d()) {
+    sync3d(state, stageEl);
+    app.canvas.style.display = "none";
+    syncAgentDom(state);
+    return;
+  }
+  setActive3d(false);
+  app.canvas.style.display = "";
+
   const seq = ++renderSeq;
   worldLayer.removeChildren();
   // Destroy last frame's props (nodes + structures); agents persist & animate.
