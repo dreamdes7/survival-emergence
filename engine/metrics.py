@@ -47,9 +47,14 @@ def awi_metrics(world) -> dict:
         "economic_activity": _clamp01(world.barter_count / max(1, world.tick + 1)),
         "escape_progress": _clamp01(world.escape_progress / escape_required),
     }
-    return {
+    out = {
         "indicators": indicators,
         "gini_inventory": _gini(inventory_values),
         "tool_usage": dict(world.tool_usage),
         "barter_count": world.barter_count,
     }
+    # Culture as data (Sprint 3): memes / story chains / currency experiment.
+    culture = getattr(world, "culture", None)
+    if culture is not None:
+        out["culture"] = culture.summary(world)
+    return out

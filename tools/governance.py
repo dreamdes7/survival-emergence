@@ -70,6 +70,9 @@ def _exec_vote(world, agent, args) -> str:
         proposal["adopted"] = True
         proposal["closed"] = True
         world.rules.append(proposal["text"])
+        # An adopted rule is culture: it joins the meme ledger.
+        world.culture.register_meme(world, "rule", proposal["text"],
+                                    proposal["proposer"], agent.id)
         return f"voted {'yes' if yes else 'no'} on #{proposal['id']} -> ADOPTED: {proposal['text']}"
     return (f"voted {'yes' if yes else 'no'} on #{proposal['id']} "
             f"({proposal['yes']}y/{proposal['no']}n)")
@@ -107,6 +110,7 @@ def _exec_announce(world, agent, args) -> str:
     if not msg:
         return "nothing to announce"
     agent.memory.add(world.tick, world.day, "social", f"I announced: {msg}", 1.8)
+    world.culture.note_spoken(world, agent, msg)   # meme transmission check
     delivered = 0
     for o in world.agents:
         if o is agent or o.status != "active":

@@ -2,6 +2,11 @@
 name: island
 agent_sprite: castaway
 
+# Currency experiment (FRONTIER_IDEAS 2.3): beads are useless (not edible, not a
+# build material), scarce and divisible. NOTHING tells the agents what they're
+# for — whether they become a medium of exchange is the observed question.
+currency_item: beads
+
 map:
   size: 60
   shape: island          # radial: ocean -> beach -> meadow/jungle (by moisture) -> rocky core
@@ -28,6 +33,8 @@ resources:
   - { kind: thicket,    yield_item: fiber, count: 22, quantity: 18, regen: 0.0, terrain: jungle,   consumable: true }
   - { kind: rocks,      yield_item: stone, count: 26, quantity: 12, regen: 0.0, terrain: highland, consumable: true }  # rocky core
   - { kind: orerock,    yield_item: flint, count: 12, quantity: 10, regen: 0.0, terrain: highland, consumable: true }  # flint for tools
+  # currency experiment: rare shell beds on the beach yield beads (no use value)
+  - { kind: shell_bed,  yield_item: beads, count: 2,  quantity: 40, regen: 0.0, terrain: beach, blocking: false, consumable: false }
 
 # Structures agents can build themselves (cost paid from the builder's inventory,
 # then progress accumulates over ticks — several builders finish faster).

@@ -152,6 +152,10 @@ class Agent:
             # (a) Always write exactly one social memory from the message text.
             importance = 2.0 if mtype in ("threat", "follow_request") else 1.6
             self.memory.add(world.tick, world.day, "social", text, importance)
+            # Culture: spoken words that reached this agent count as "heard" —
+            # if they later repeat one, that's a proven meme transmission.
+            if mtype in ("speech", "announce"):
+                world.culture.note_heard(self, text)
 
             # (b) Structured learning by message type.
             if mtype == "location":

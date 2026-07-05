@@ -120,6 +120,13 @@ class HeuristicLLM:
             if ann:
                 return ann
 
+        # 4b2) Tell a story: retell something memorable (or a story once heard) —
+        # keeps the oral-history mechanic alive in free stub worlds.
+        if rng.random() < 0.10:
+            story = self._maybe_tell_story(agent, world)
+            if story:
+                return story
+
         # 4c) Maintain the campfire if it's dying out and we have wood.
         maint = self._maybe_maintain(agent, world)
         if maint:
@@ -602,3 +609,26 @@ class HeuristicLLM:
         return (f"Хм... если честно — вот что приходит на ум: {recalled}. "
                 f"Сейчас у меня {allies} союзник(ов) и {rivals} соперник(ов), "
                 f"держусь как могу.")
+
+    # ── oral history (Sprint 3) ────────────────────────────────────────────────
+    def _maybe_tell_story(self, agent, world) -> dict | None:
+        """Retell either a story once heard (chains the telephone game) or this
+        agent's own most significant memory. Verbatim — a stub has no voice of
+        its own, so drift stays 0 in debug worlds (honest baseline)."""
+        target = self._nearest_agent(world, agent)
+        if target is None or chebyshev(agent.x, agent.y, target.x, target.y) > 1:
+            return None
+        heard = [e for e in agent.memory.entries if e.kind == "story"]
+        if heard:
+            src = world.rng.choice(heard)
+            story = src.text.split(": ", 1)[-1]     # strip "история от X: "
+        else:
+            memorable = [e for e in agent.memory.entries
+                         if e.importance >= 2.0 and e.tick < world.tick - 4
+                         and e.kind in ("social", "observation")]
+            if not memorable:
+                return None
+            story = world.rng.choice(memorable).text
+        return {"tool": "tell_story",
+                "args": {"target": target.name, "story": story},
+                "thought": f"share a story with {target.name}"}

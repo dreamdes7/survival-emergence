@@ -54,6 +54,8 @@ def run_scene(world, llm, initiator, partner, opening: str, max_lines: int) -> i
                            f'я ответил {listener.name}: "{reply}"', 1.4)
         listener.memory.add(world.tick, world.day, "social",
                             f'{speaker.name} сказал мне: "{reply}"', 1.5)
+        world.culture.note_spoken(world, speaker, reply)
+        world.culture.note_heard(listener, reply)
         speaker.relationships.record(listener.id, +0.03)
         listener.relationships.record(speaker.id, +0.03)
         speaker.last_said = reply

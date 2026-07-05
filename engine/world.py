@@ -43,6 +43,10 @@ class World:
         self.events: list[dict] = []      # typed event stream (bounded; mirrored to recorder)
         self.recorder = None              # RunRecorder, when a run is being logged
         self.saga: list[dict] = []        # narrator's literary retelling of the run
+        # Culture as data: memes (transmission-proven phrases), story chains
+        # with measurable drift, and the optional currency experiment.
+        from engine.culture import CultureTracker
+        self.culture = CultureTracker(currency_item=scenario.get("currency_item"))
 
         # Sprint 2 — commitments, culture, ritual
         self.commitments: list[dict] = []   # promises between agents
@@ -743,6 +747,9 @@ class World:
                     self.log_event("culture",
                                    "У костра сложилась традиция — ночами собираться вместе у огня",
                                    2.6, [a.name for a in present])
+                    self.culture.register_meme(self, "ritual",
+                                               "ночной сбор у костра",
+                                               present[0].name, present[0].id)
                 break   # one gathering counts per tick
 
         # ── place-names: a name spreads as more survivors pass through it ───────
@@ -759,6 +766,7 @@ class World:
                 pn["famous"] = True
                 self.log_event("culture", f"Место теперь все зовут «{pn['name']}»",
                                2.2, [pn["by"]])
+                self.culture.register_meme(self, "name", pn["name"], pn["by"], pn["by_id"])
 
     def emit(self, kind: str, *, actor: str | None = None, target: str | None = None,
              payload: dict | None = None) -> dict:

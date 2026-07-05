@@ -91,6 +91,15 @@ export type WorldState = {
     gini_inventory: number;
     tool_usage: Record<string, number>;
     barter_count: number;
+    // Culture as data (Sprint 3): memes / story chains / currency experiment.
+    culture?: {
+      memes: {
+        count: number; transmissions: number; famous: number;
+        top: { text: string; author: string; kind: string; carriers: number }[];
+      };
+      stories: { chains: number; retellings: number; myths: number; max_drift: number };
+      currency?: { item: string; transfers: number; holders: number; velocity: number };
+    };
   };
   // Decision provenance: share of actions authored by each brain this run.
   provenance?: {

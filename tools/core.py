@@ -229,6 +229,7 @@ def _exec_say_to(world, agent, args) -> str:
     agent.relationships.record(other.id, +0.06)
     other.relationships.record(agent.id, +0.04)
     agent.memory.add(world.tick, world.day, "social", f'I said to {target_name}: "{message}"', 1.5)
+    world.culture.note_spoken(world, agent, message)   # meme transmission check
     # Recipient memory is created inside _process_inbox (one write, no duplicates).
     other.deliver({
         "type": "speech",

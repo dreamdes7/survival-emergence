@@ -53,6 +53,11 @@ def _exec_give(world, agent, args) -> str:
     agent.memory.add(world.tick, world.day, "social", f"I gave {qty:.0f} {item} to {target_name}", 1.8)
     other.memory.add(world.tick, world.day, "social", f"{agent.name} gave me {qty:.0f} {item}", 2.0)
     _maybe_keep_promise(world, agent, other)
+    # Typed record of every hand-to-hand transfer (economy is data, not prose);
+    # the culture tracker watches the scenario's currency item specifically.
+    world.emit("gift", actor=agent.id, target=other.id,
+               payload={"item": item, "qty": qty, "from": agent.name, "to": other.name})
+    world.culture.note_transfer(world, item, agent, other, qty)
     return f"gave {qty:.0f} {item} to {target_name}"
 
 

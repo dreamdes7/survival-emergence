@@ -482,8 +482,31 @@ function renderMetrics() {
     ${metricRow("gini inventory", state.metrics.gini_inventory)}
     <div class="line-item">barter: ${state.metrics.barter_count}</div>
     <div class="line-item">tools: ${Object.keys(state.metrics.tool_usage).length}</div>
+    ${cultureLines(state.metrics.culture)}
     ${provenanceLine(state.provenance)}
   `;
+}
+
+// Culture as data: memes that provably travelled, story chains + drift, beads.
+function cultureLines(c: WorldState["metrics"]["culture"]): string {
+  if (!c) return "";
+  const parts: string[] = [];
+  parts.push(`<div class="line-item">мемы: ${c.memes.count} (передач ${c.memes.transmissions})</div>`);
+  if (c.stories.chains) {
+    parts.push(`<div class="line-item">истории: ${c.stories.chains} · пересказов ${c.stories.retellings}`
+      + ` · дрейф ${Math.round(c.stories.max_drift * 100)}%`
+      + (c.stories.myths ? ` · мифов ${c.stories.myths}` : "") + `</div>`);
+  }
+  if (c.currency) {
+    parts.push(`<div class="line-item">💠 ${escapeHtml(c.currency.item)}: передач ${c.currency.transfers}`
+      + ` · у ${c.currency.holders} чел.</div>`);
+  }
+  const top = c.memes.top[0];
+  if (top && top.carriers > 0) {
+    parts.push(`<div class="line-item meme-top" title="самый живучий мем">«${escapeHtml(top.text)}»`
+      + ` — ${escapeHtml(top.author)}, носителей ${top.carriers}</div>`);
+  }
+  return parts.join("");
 }
 
 // The headline research indicator: how much of this run the MODEL actually drove.
