@@ -341,6 +341,27 @@ def run(overrides: dict) -> None:
     run_config(cfg, scenario)
 
 
+def advance_tick(world, llm, events, t: int, reflect_every: int,
+                 reflect_with_llm: bool):
+    """One deterministic simulation tick — the SINGLE source of truth for the
+    per-tick body, shared by run_config and the counterfactual fork engine so a
+    fork reproduces a run's RNG bit-for-bit. Returns (fired_event, steps,
+    notices) where steps is a list of (agent, decision, result) for the caller
+    to print/inspect. Anything that consumes world.rng lives here and NOWHERE
+    else in a run loop."""
+    world.tick = t
+    world.begin_tick()
+    fired = events.maybe_fire()
+    steps = []
+    for agent in world.active_agents():
+        decision, result = agent.step(world, llm)
+        steps.append((agent, decision, result))
+        if t % reflect_every == 0 and t > 0:
+            agent.reflect(world, llm if reflect_with_llm else None)
+    notices = world.end_tick()
+    return fired, steps, notices
+
+
 def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
     """Run a simulation from an already-resolved (cfg, scenario). Returns the
     RunRecorder (or None) so batch harnesses can read the manifest/provenance.
@@ -375,25 +396,20 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
     say("=" * 78)
 
     for t in range(max_ticks):
-        world.tick = t
-        world.begin_tick()
-        fired = events.maybe_fire()
+        fired, steps, notices = advance_tick(
+            world, llm, events, t, reflect_every, reflect_with_llm)
 
         phase = "night" if world.is_night else "day"
         wx = f" weather={world.weather}" if world.weather else ""
         say(f"\n[D{world.day} T{t % day_len:02d} {phase}{wx}]")
         if fired:
             say(f"   ** a {fired} begins **")
-
-        for agent in world.active_agents():
-            decision, result = agent.step(world, llm)
+        for agent, decision, result in steps:
             say(f"   {agent.name:<10} ({agent.x:2d},{agent.y:2d}) {stats_str(agent):<28} "
                 f"| [{decision.get('_source','?')}] {decision['tool']}: {result}")
             if t % reflect_every == 0 and t > 0:
-                agent.reflect(world, llm if reflect_with_llm else None)
                 say(f"   {'':<10} diary: {agent.memory.diary[-1][1]}")
-
-        for notice in world.end_tick():
+        for notice in notices:
             say(f"   !! {notice}")
 
         if narrator is not None and t > 0:

@@ -451,7 +451,8 @@ class Agent:
                    target=(decision.get("args") or {}).get("target"),
                    payload={
                        "name": self.name, "model": self.model, "source": source,
-                       "tool": tool, "kind": kind, "thought": thought, "result": result,
+                       "tool": tool, "args": dict(decision.get("args") or {}),
+                       "kind": kind, "thought": thought, "result": result,
                        "x": self.x, "y": self.y,
                        "phys": {k: round(v) for k, v in self.physiology.items()},
                        "fallback_reason": decision.get("_fallback_reason"),
