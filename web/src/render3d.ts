@@ -38,11 +38,14 @@ const GradeShader = {
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     void main() {
       vec4 c = texture2D(tDiffuse, vUv);
-      // saturation lift
+      // gentle saturation (references are muted, not punchy)
       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-      c.rgb = mix(vec3(l), c.rgb, 1.14);
-      // warm sunlit grade
-      c.rgb *= vec3(1.03, 1.0, 0.96);
+      c.rgb = mix(vec3(l), c.rgb, 1.05);
+      // haze lift: raise the blacks toward the ambient haze — nothing is ever
+      // fully dark in the reference look
+      c.rgb = mix(c.rgb, vec3(0.72, 0.83, 0.82), 0.06);
+      // faint warmth
+      c.rgb *= vec3(1.02, 1.0, 0.97);
       // vignette
       float d = distance(vUv, vec2(0.5));
       c.rgb *= 1.0 - smoothstep(0.42, 0.86, d) * 0.32;
@@ -65,10 +68,10 @@ const C = {
   jungle: 0x5f9e4d,
   rock: 0xb0a89a,
   cliff: 0x8a6f4c,
-  trunk: 0x8a6239,
-  leaf: 0x4f9448,
-  leafDark: 0x3d7a3a,
-  bush: 0x67a052,
+  trunk: 0x8a6a45,
+  leaf: 0x6f9c5f,
+  leafDark: 0x587f4b,
+  bush: 0x74a061,
   stone: 0xa8a29a,
   flame: 0xffa54f,
   skyDay: 0xbfe0e8,
@@ -79,8 +82,8 @@ const C = {
 // plus large-scale noise, biome bonuses (the rocky core towers), then get
 // TERRACED — quantised into steps whose walls auto-paint as cliffs. This is
 // the Islanders/Bad North silhouette, produced by generation, not assets.
-const TERRACE = 0.85;                     // metres per terrace step
-const PEAK_ROCK = 3.4;                    // extra height of the rocky core
+const TERRACE = 1.35;                     // metres per terrace step — few BOLD plateaus
+const PEAK_ROCK = 3.6;                    // extra height of the rocky core
 const SEA_FLOOR = -1.7;
 
 function hashStr(s: string): number {
@@ -178,8 +181,8 @@ function buildHeights(st: WorldState): void {
     let h = 0.1 + Math.min(1, d / 7) ** 1.15 * 2.1;
     if (t.includes("rock")) h += PEAK_ROCK * Math.min(1, d / 9 + 0.35);
     else if (t.includes("foliage")) h += 0.5;
-    // large, slow noise so ridges and hollows cross biome lines
-    h += (vnoise(x, y, 9, 31) - 0.5) * 1.5 + (vnoise(x, y, 4, 57) - 0.5) * 0.5;
+    // gentle, slow noise — enough to bend plateau outlines, not to crumb them
+    h += (vnoise(x, y, 11, 31) - 0.5) * 0.8 + (vnoise(x, y, 5, 57) - 0.5) * 0.2;
     return Math.max(0.08, h);
   };
 
@@ -235,7 +238,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   scene = new THREE.Scene();
   scene.background = new THREE.Color(C.skyDay);
-  scene.fog = new THREE.Fog(C.skyDay, 120, 280);
+  scene.fog = new THREE.Fog(C.skyDay, 70, 210);   // ever-present unifying haze
 
   // Gradient sky dome — the flat backdrop is what screamed "web page".
   skyMat = new THREE.ShaderMaterial({
@@ -265,20 +268,22 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   camera = new THREE.PerspectiveCamera(32, 1, 0.1, 500);
 
-  sun = new THREE.DirectionalLight(0xfff2dd, 2.9);
+  sun = new THREE.DirectionalLight(0xfff2dd, 1.9);
   sun.castShadow = true;
   sun.shadow.mapSize.set(2048, 2048);
   sun.shadow.bias = -0.0005;
   scene.add(sun);
   scene.add(sun.target);
 
-  ambient = new THREE.HemisphereLight(0xdff3f7, 0x5a6b4a, 0.45);
+  // Ambient dominates (soft, near-shadowless reference look); the sun only adds
+  // gentle modelling and long soft shadows.
+  ambient = new THREE.HemisphereLight(0xd8ecec, 0x6a7a5e, 0.85);
   scene.add(ambient);
 
   // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
   const waterMatl = new THREE.MeshPhongMaterial({
-    color: C.seaSurface, transparent: true, opacity: 0.62,
-    shininess: 36, specular: 0x2f4f5c,
+    color: 0x4b9db0, transparent: true, opacity: 0.55,
+    shininess: 18, specular: 0x1e3a44,        // matte reference water, no glare
   });
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
@@ -422,13 +427,15 @@ function buildTerrain(st: WorldState): void {
   const p2 = geo.getAttribute("position") as THREE.BufferAttribute;
   const colors = new Float32Array(p2.count * 3);
   const col = new THREE.Color();
-  const cSand = new THREE.Color(0xead9a4);
-  const cGrass = new THREE.Color(0x92c968);
-  const cGrassHi = new THREE.Color(0x7db457);
-  const cForest = new THREE.Color(0x5d9a4b);
-  const cRockTop = new THREE.Color(0xb3ac9d);
-  const cCliff = new THREE.Color(0x8a7355);
-  const cCliffDark = new THREE.Color(0x6e5a41);
+  // Curated muted palette (Bad North / Islanders envelope): sage greens, GREY
+  // cliffs, warm pale sand — no primary/acid hues anywhere.
+  const cSand = new THREE.Color(0xe9ddb6);
+  const cGrass = new THREE.Color(0x9fc37e);
+  const cGrassHi = new THREE.Color(0x87ab6b);
+  const cForest = new THREE.Color(0x6f9c5f);
+  const cRockTop = new THREE.Color(0xaaa69e);
+  const cCliff = new THREE.Color(0x99a0a4);
+  const cCliffDark = new THREE.Color(0x6e767c);
   const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
   const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
 
@@ -457,8 +464,10 @@ function buildTerrain(st: WorldState): void {
     const tz = Math.max(0, Math.min(n - 1, Math.floor(cz)));
     const foliage = st.map.grid[tz][tx].includes("foliage");
 
-    // colour by form, not by tile: cliffs on steep faces, height bands on tops
-    if (cy > 0.05 && slope < 0.72) {
+    // colour by form: cliffs ONLY on real terrace walls (steep AND tall faces —
+    // small meadow bumps stay grass, killing the brown-confetti artefact)
+    const ySpan = Math.max(va.y, vb.y, vc.y) - Math.min(va.y, vb.y, vc.y);
+    if (cy > 0.05 && slope < 0.6 && ySpan > 0.45) {
       col.copy(cCliff).lerp(cCliffDark, Math.max(0, Math.min(1, 1.6 - cy * 0.4)) * 0.5);
     } else if (cy < 0.42) {
       col.copy(cSand);
@@ -496,6 +505,14 @@ function buildTerrain(st: WorldState): void {
   mesh.castShadow = true;
   mesh.receiveShadow = true;
   terrainGroup.add(mesh);
+
+  // Bad North touch: the island faintly mirrored in the still water.
+  const refl = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+    vertexColors: true, transparent: true, opacity: 0.12, depthWrite: false,
+  }));
+  refl.scale.y = -0.5;
+  refl.position.y = -0.08;
+  terrainGroup.add(refl);
   scene.add(terrainGroup);
 
   // Sun geometry sized to the island (kept low so shadows stay long and legible).
@@ -530,59 +547,68 @@ function buildFoam(st: WorldState): void {
   const land = (x: number, y: number) =>
     x >= 0 && y >= 0 && x <= n && y <= n && heightGrid[y][x] > 0.03;
   foamMat = new THREE.MeshBasicMaterial({
-    color: 0xeafaf4, transparent: true, opacity: 0.4,
+    color: 0xf2fbf6, transparent: true, opacity: 0.55,
     depthWrite: false, side: THREE.DoubleSide,
   });
-  const W = 0.16;
+  // The Islanders signature: a soft glowing halo just off every shore.
+  const glowMat = new THREE.MeshBasicMaterial({
+    color: 0xaee6d8, transparent: true, opacity: 0.22,
+    depthWrite: false, side: THREE.DoubleSide,
+  });
   const edge = (x: number, z: number) =>
     x < 0.8 || z < 0.8 || x > n - 0.8 || z > n - 0.8;
-  for (const loop of maskLoops(n + 1, land).map((l) => chaikin(l, 2))) {
-    const verts: number[] = [];
-    for (let i = 0; i < loop.length; i += 1) {
-      const [ax, az] = loop[i];
-      const [bx, bz] = loop[(i + 1) % loop.length];
-      // Skip map-border segments (north_bias islands touch the map edge — foam
-      // along the world boundary reads as a line floating in open sea).
-      if (edge(ax, az) || edge(bx, bz)) continue;
-      const dx = bx - ax, dz = bz - az;
-      const len = Math.hypot(dx, dz) || 1;
-      const nx = -dz / len * W, nz = dx / len * W;
-      verts.push(
-        ax - nx, 0, az - nz, bx - nx, 0, bz - nz, ax + nx, 0, az + nz,
-        ax + nx, 0, az + nz, bx - nx, 0, bz - nz, bx + nx, 0, bz + nz,
-      );
+  const ribbonFor = (loops: [number, number][][], w: number,
+                     mat: THREE.Material, y: number): void => {
+    for (const loop of loops) {
+      const verts: number[] = [];
+      for (let i = 0; i < loop.length; i += 1) {
+        const [ax, az] = loop[i];
+        const [bx, bz] = loop[(i + 1) % loop.length];
+        if (edge(ax, az) || edge(bx, bz)) continue;
+        const dx = bx - ax, dz = bz - az;
+        const len = Math.hypot(dx, dz) || 1;
+        const nx = -dz / len * w, nz = dx / len * w;
+        verts.push(
+          ax - nx, 0, az - nz, bx - nx, 0, bz - nz, ax + nx, 0, az + nz,
+          ax + nx, 0, az + nz, bx - nx, 0, bz - nz, bx + nx, 0, bz + nz,
+        );
+      }
+      const geo = new THREE.BufferGeometry();
+      geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
+      const ribbon = new THREE.Mesh(geo, mat);
+      ribbon.position.y = y;
+      foamGroup!.add(ribbon);
     }
-    const geo = new THREE.BufferGeometry();
-    geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(verts), 3));
-    const ribbon = new THREE.Mesh(geo, foamMat);
-    ribbon.position.y = 0.045;
-    foamGroup.add(ribbon);
-  }
+  };
+  const loops = maskLoops(n + 1, land).map((l) => chaikin(l, 2));
+  ribbonFor(loops, 0.85, glowMat, 0.035);     // wide soft halo
+  ribbonFor(loops, 0.2, foamMat, 0.05);       // crisp foam line
   scene.add(foamGroup);
 }
 
-// Low-poly clouds that drift over the island and cast MOVING shadows.
+// Islanders-style clouds: flat white unlit slabs drifting high, still casting
+// soft moving shadows on the land below.
 function buildClouds(cx: number, cz: number, n: number): void {
   cloudsGroup?.removeFromParent();
   cloudsGroup = new THREE.Group();
-  const mat = new THREE.MeshLambertMaterial({
-    color: 0xffffff, emissive: 0x777777, transparent: true, opacity: 0.9,
-    flatShading: true,
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.94,
   });
   for (let i = 0; i < 5; i += 1) {
     const cluster = new THREE.Group();
     const r = hashStr(`cloud${i}`);
-    for (let b = 0; b < 3 + Math.floor(r * 2); b += 1) {
+    const slabs = 2 + Math.floor(r * 2);
+    for (let b = 0; b < slabs; b += 1) {
       const rb = hashStr(`cloud${i}b${b}`);
-      const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(1.6 + rb * 1.6, 0), mat);
-      blob.position.set(b * 2.2 - 2 + rb, (rb - 0.5) * 0.8, (rb - 0.5) * 2);
-      blob.scale.y = 0.55;
-      blob.castShadow = true;
-      cluster.add(blob);
+      const slab = new THREE.Mesh(
+        new THREE.BoxGeometry(2.6 + rb * 2.6, 0.5 + rb * 0.3, 1.4 + rb * 1.2), mat);
+      slab.position.set(b * 1.6 - slabs * 0.8 + rb, b * 0.42, (rb - 0.5) * 1.4);
+      slab.castShadow = true;
+      cluster.add(slab);
     }
     cluster.position.set(
       cx + (r - 0.5) * n * 1.4,
-      13 + r * 4,
+      14 + r * 5,
       cz + (hashStr(`cz${i}`) - 0.5) * n * 1.2,
     );
     cluster.userData.speed = 0.35 + r * 0.4;
@@ -756,6 +782,35 @@ function buildProps(st: WorldState): void {
     const wx = node.x + 0.5, wz = node.y + 0.5;
     obj.position.set(wx, Math.max(0.02, heightAt(wx, wz)), wz);
     propsGroup.add(obj);
+  }
+
+  // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
+  // read as MASSES (references cluster; a lawn with lone lollipops reads cheap).
+  const n = st.map.size;
+  const canopyMats = [lam(0x5f8f52), lam(0x6f9c5f), lam(0x557d49)];
+  for (let ty = 0; ty < n; ty += 1) {
+    for (let tx = 0; tx < n; tx += 1) {
+      if (!st.map.grid[ty][tx].includes("foliage")) continue;
+      const r = hash01(tx, ty, 91);
+      if (r > 0.55) continue;
+      const count = r < 0.18 ? 2 : 1;
+      for (let k = 0; k < count; k += 1) {
+        const ox = hash01(tx, ty, 92 + k) * 0.8 + 0.1;
+        const oz = hash01(tx, ty, 95 + k) * 0.8 + 0.1;
+        const wx = tx + ox, wz = ty + oz;
+        const gy = heightAt(wx, wz);
+        if (gy < 0.15) continue;
+        const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
+        const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0),
+          canopyMats[(tx + ty + k) % 3]);
+        blob.position.set(wx, gy + s * 0.9, wz);
+        blob.scale.y = 0.8;
+        blob.castShadow = true;
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, s, 4), lam(C.trunk));
+        stem.position.set(wx, gy + s * 0.4, wz);
+        propsGroup.add(stem, blob);
+      }
+    }
   }
   scene.add(propsGroup);
 }
@@ -1271,8 +1326,8 @@ function tick(): void {
   // day/night: real lighting, not an overlay (time-based, frame-rate agnostic)
   const targetNight = state.is_night ? 1 : 0;
   nightMix += (targetNight - nightMix) * Math.min(1, dt * 1.6);
-  sun.intensity = (2.9 - nightMix * 2.62) * (1 - stormMix * 0.35);
-  ambient.intensity = 0.45 - nightMix * 0.22;
+  sun.intensity = (1.9 - nightMix * 1.68) * (1 - stormMix * 0.35);
+  ambient.intensity = 0.85 - nightMix * 0.5;
   tmpColor.copy(dayFog).lerp(nightFog, nightMix);
   tmpColor.lerp(stormGrey, stormMix * 0.5);
   (scene.background as THREE.Color).copy(tmpColor);
@@ -1314,8 +1369,8 @@ function tick(): void {
     }
   }
   const fog = scene.fog as THREE.Fog;
-  fog.near = 120 - stormMix * 70;
-  fog.far = 280 - stormMix * 130;
+  fog.near = 70 - stormMix * 35;
+  fog.far = 210 - stormMix * 90;
   if (gradePass) gradePass.uniforms.uTime.value = now;
 
   controls.update();
