@@ -83,6 +83,11 @@ function lam(color: number): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ color, flatShading: true });
 }
 
+// Smooth-shaded variant for sculpted surfaces (plate tops and walls).
+function lamS(color: number): THREE.MeshLambertMaterial {
+  return new THREE.MeshLambertMaterial({ color });
+}
+
 // ── palette (shared spirit with vector.ts, tuned for lit 3D) ──────────────────
 const C = {
   seaDeep: 0x1f5a66,
@@ -220,25 +225,26 @@ function buildHeights(st: WorldState): void {
     }
     g.push(row);
   }
-  for (let pass = 0; pass < 2; pass += 1) {
+  for (let pass = 0; pass < 3; pass += 1) {
     const out = g.map((r) => r.slice());
     for (let y = 1; y < n; y += 1)
       for (let x = 1; x < n; x += 1)
         out[y][x] = (g[y][x] * 2 + g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1]) / 6;
     g = out;
   }
-  for (let y = 0; y <= n; y += 1)
-    for (let x = 0; x <= n; x += 1)
-      if (g[y][x] > 0.05) g[y][x] = Math.round(g[y][x] / TERRACE) * TERRACE + 0.12;
-  const out = g.map((r) => r.slice());
-  for (let y = 1; y < n; y += 1)
-    for (let x = 1; x < n; x += 1)
-      out[y][x] = g[y][x] * 0.72 + (g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1]) * 0.07;
-  heightGrid = out;
+  heightGrid = g;    // SMOOTH field — the plates quantise it, not the grid
 }
 
-function heightAt(wx: number, wz: number): number {
-  // bilinear over the corner grid
+// ── the island as SCULPTURE: stacked extruded plates ─────────────────────────
+// Bad North islands are not displaced planes — they are clean 2D outlines
+// extruded into vertical-walled plates. We cut the smooth height field at
+// fixed thresholds, smooth each cut with Chaikin, and extrude. Flat tops,
+// smooth curved walls, an authored silhouette — out of pure generation.
+const PLATE_THRESH = [0.05, 1.2, 2.4, 3.6, 4.8];  // raw-height cuts (0 = coastline)
+const PLATE_TOP = [0.26, 1.0, 1.74, 2.48, 3.22];  // world-space top of each plate
+
+function rawHeightAt(wx: number, wz: number): number {
+  // bilinear over the smooth corner grid
   const x = Math.max(0, Math.min(mapN - 0.001, wx));
   const z = Math.max(0, Math.min(mapN - 0.001, wz));
   const x0 = Math.floor(x), z0 = Math.floor(z);
@@ -246,6 +252,20 @@ function heightAt(wx: number, wz: number): number {
   const h00 = heightGrid[z0][x0], h10 = heightGrid[z0][x0 + 1];
   const h01 = heightGrid[z0 + 1][x0], h11 = heightGrid[z0 + 1][x0 + 1];
   return (h00 * (1 - fx) + h10 * fx) * (1 - fz) + (h01 * (1 - fx) + h11 * fx) * fz;
+}
+
+function plateLevelAt(wx: number, wz: number): number {
+  const h = rawHeightAt(wx, wz);
+  let level = -1;
+  for (let k = 0; k < PLATE_THRESH.length; k += 1) {
+    if (h > PLATE_THRESH[k]) level = k;
+  }
+  return level;                    // -1 = open sea
+}
+
+function heightAt(wx: number, wz: number): number {
+  const level = plateLevelAt(wx, wz);
+  return level < 0 ? SEA_FLOOR : PLATE_TOP[level];
 }
 
 // ── scene bootstrap ───────────────────────────────────────────────────────────
@@ -456,160 +476,118 @@ function paintTexture(n: number): THREE.Texture {
   return paintTex;
 }
 
-// ── terrain ───────────────────────────────────────────────────────────────────
+// ── loop classification for extrusion (outer shells vs holes) ─────────────────
+type Loop = [number, number][];
+
+function polyArea(loop: Loop): number {
+  let a = 0;
+  for (let i = 0; i < loop.length; i += 1) {
+    const [x1, y1] = loop[i];
+    const [x2, y2] = loop[(i + 1) % loop.length];
+    a += x1 * y2 - x2 * y1;
+  }
+  return a / 2;
+}
+
+function pointInLoop(px: number, py: number, loop: Loop): boolean {
+  let inside = false;
+  for (let i = 0, j = loop.length - 1; i < loop.length; j = i, i += 1) {
+    const [xi, yi] = loop[i];
+    const [xj, yj] = loop[j];
+    if ((yi > py) !== (yj > py)
+        && px < ((xj - xi) * (py - yi)) / (yj - yi) + xi) {
+      inside = !inside;
+    }
+  }
+  return inside;
+}
+
+/** Group contour loops into {outer, holes[]} shells by containment parity. */
+function classifyLoops(loops: Loop[]): { outer: Loop; holes: Loop[] }[] {
+  const info = loops.map((l) => ({ loop: l, area: Math.abs(polyArea(l)), depth: 0, parent: -1 }));
+  for (let i = 0; i < info.length; i += 1) {
+    const [px, py] = info[i].loop[0];
+    let best = -1;
+    for (let j = 0; j < info.length; j += 1) {
+      if (i === j) continue;
+      if (info[j].area > info[i].area && pointInLoop(px, py, info[j].loop)) {
+        info[i].depth += 1;
+        if (best === -1 || info[j].area < info[best].area) best = j;
+      }
+    }
+    info[i].parent = best;
+  }
+  const shells: { outer: Loop; holes: Loop[] }[] = [];
+  const shellIdx = new Map<number, number>();
+  info.forEach((it, i) => {
+    if (it.depth % 2 === 0) {
+      shellIdx.set(i, shells.length);
+      shells.push({ outer: it.loop, holes: [] });
+    }
+  });
+  info.forEach((it) => {
+    if (it.depth % 2 === 1 && it.parent >= 0 && shellIdx.has(it.parent)) {
+      shells[shellIdx.get(it.parent)!].holes.push(it.loop);
+    }
+  });
+  return shells;
+}
+
+// ── terrain: the island as SCULPTURE — stacked extruded plates ────────────────
 function buildTerrain(st: WorldState): void {
   terrainGroup?.removeFromParent();
   terrainGroup = new THREE.Group();
   const n = st.map.size;
   buildHeights(st);
 
-  let geo: THREE.BufferGeometry = new THREE.PlaneGeometry(n, n, n, n);
-  geo.rotateX(-Math.PI / 2);
-  geo.translate(n / 2, 0, n / 2);
-  const pos = geo.getAttribute("position") as THREE.BufferAttribute;
-  for (let i = 0; i < pos.count; i += 1) {
-    const vx = Math.round(pos.getX(i));
-    const vz = Math.round(pos.getZ(i));
-    pos.setY(i, heightGrid[Math.min(n, Math.max(0, vz))][Math.min(n, Math.max(0, vx))]);
-    // Organic low-poly: jitter interior vertices in XZ so the triangulation
-    // stops reading as a regular grid (the classic hand-crafted-terrain trick).
-    if (vx > 0 && vx < n && vz > 0 && vz < n) {
-      pos.setX(i, vx + (hashStr(`jx${vx}:${vz}`) - 0.5) * 0.55);
-      pos.setZ(i, vz + (hashStr(`jz${vx}:${vz}`) - 0.5) * 0.55);
-    }
-  }
-  const shallowCol = new THREE.Color(0x2fa3b8);
-  const deepCol = new THREE.Color(C.seaDeep);
-  const vCol = new THREE.Color();
-  geo = geo.toNonIndexed();                    // crisp low-poly facets
-  const p2 = geo.getAttribute("position") as THREE.BufferAttribute;
-  const colors = new Float32Array(p2.count * 3);
-  const col = new THREE.Color();
-  // Curated muted palette (Bad North / Islanders envelope): sage greens, GREY
-  // cliffs, warm pale sand — no primary/acid hues anywhere.
-  const cSand = new THREE.Color(0xe9ddb6);
-  const cGrass = new THREE.Color(0x9fc37e);
-  const cGrassHi = new THREE.Color(0x87ab6b);
-  const cForest = new THREE.Color(0x6f9c5f);
-  const cRockTop = new THREE.Color(0xaaa69e);
-  const cCliff = new THREE.Color(0x99a0a4);
-  const cCliffDark = new THREE.Color(0x6e767c);
-  const ab = new THREE.Vector3(), ac = new THREE.Vector3(), nrm = new THREE.Vector3();
-  const va = new THREE.Vector3(), vb = new THREE.Vector3(), vc = new THREE.Vector3();
+  // One plate per level: smooth contour -> Shape (with holes) -> extrusion with
+  // a soft bevel lip. Flat tops, smooth vertical walls, authored silhouette.
+  const topColors = [0xe9ddb6, 0x9fc37e, 0x93bb74, 0x89ad84, 0xaaa69e];
+  const wallLow = lamS(0xcfbf9a);              // wet-sand base walls
+  const wallHigh = lamS(0x9aa1a5);             // grey rock walls above
+  const BEV = 0.12;
+  for (let k = 0; k < PLATE_THRESH.length; k += 1) {
+    const thr = PLATE_THRESH[k];
+    const solid = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x <= n && y <= n && heightGrid[y]?.[x] > thr;
+    let loops = maskLoops(n + 1, solid).map((l) => chaikin(l, 2));
+    loops = loops.map((l) => l.filter((_, i) => i % 2 === 0));   // decimate
+    loops = loops.filter((l) => Math.abs(polyArea(l)) > 2.5);    // drop crumbs
+    if (!loops.length) continue;
 
-  // Per-vertex ambient occlusion from the height Laplacian: hollows and the
-  // feet of terrace walls sit in quiet shade — depth without textures.
-  const aoAt = (wx: number, wz: number, wy: number): number => {
-    const xi = Math.max(1, Math.min(n - 1, Math.round(wx)));
-    const zi = Math.max(1, Math.min(n - 1, Math.round(wz)));
-    const around = (heightGrid[zi - 1][xi] + heightGrid[zi + 1][xi]
-      + heightGrid[zi][xi - 1] + heightGrid[zi][xi + 1]) / 4;
-    return Math.max(0, Math.min(0.3, (around - wy) * 0.5));
-  };
-
-  for (let f = 0; f < p2.count; f += 3) {
-    va.fromBufferAttribute(p2, f);
-    vb.fromBufferAttribute(p2, f + 1);
-    vc.fromBufferAttribute(p2, f + 2);
-    ab.subVectors(vb, va);
-    ac.subVectors(vc, va);
-    nrm.crossVectors(ab, ac).normalize();
-    const slope = Math.abs(nrm.y);
-    const cy = (va.y + vb.y + vc.y) / 3;
-    const cx = (va.x + vb.x + vc.x) / 3;
-    const cz = (va.z + vb.z + vc.z) / 3;
-    const tx = Math.max(0, Math.min(n - 1, Math.floor(cx)));
-    const tz = Math.max(0, Math.min(n - 1, Math.floor(cz)));
-    const foliage = st.map.grid[tz][tx].includes("foliage");
-
-    // colour by form: cliffs ONLY on real terrace walls (steep AND tall faces —
-    // small meadow bumps stay grass, killing the brown-confetti artefact)
-    const ySpan = Math.max(va.y, vb.y, vc.y) - Math.min(va.y, vb.y, vc.y);
-    if (cy > 0.05 && slope < 0.6 && ySpan > 0.45) {
-      col.copy(cCliff).lerp(cCliffDark, Math.max(0, Math.min(1, 1.6 - cy * 0.4)) * 0.5);
-      // painted strata: faint horizontal bands across the wall (Bad North cliffs)
-      if (Math.floor(cy / 0.42) % 2 === 0) col.offsetHSL(0, 0, 0.035);
-    } else if (cy < 0.42) {
-      col.copy(cSand);
-    } else if (cy > 3.4) {
-      col.copy(cRockTop);
-    } else if (foliage) {
-      col.copy(cForest);
-    } else {
-      col.copy(cGrass).lerp(cGrassHi, Math.max(0, Math.min(1, (cy - 1.2) / 2)));
-    }
-    // large-scale tonal drift (8-tile lattice) — variation without patchwork
-    col.offsetHSL(0, 0, (vnoise(cx, cz, 8, 77) - 0.5) * 0.09);
-
-    for (let v = 0; v < 3; v += 1) {
-      vCol.copy(col);
-      const vy = p2.getY(f + v);
-      if (vy < 0.1) {
-        const t = Math.min(1, (0.1 - vy) / 1.4);
-        vCol.lerp(shallowCol, 0.4 + t * 0.25);
-        vCol.lerp(deepCol, t * t);
-      } else {
-        vCol.multiplyScalar(1 - aoAt(p2.getX(f + v), p2.getZ(f + v), vy));
+    const baseY = k === 0 ? -1.3 : PLATE_TOP[k - 1] - 0.08;
+    const depth = PLATE_TOP[k] - baseY - BEV * 2;
+    const topMat = lamS(topColors[k]);
+    for (const shell of classifyLoops(loops)) {
+      const shape = new THREE.Shape(
+        shell.outer.map(([x, z]) => new THREE.Vector2(x, -z)));
+      for (const h of shell.holes) {
+        shape.holes.push(new THREE.Path(h.map(([x, z]) => new THREE.Vector2(x, -z))));
       }
-      colors[(f + v) * 3] = vCol.r;
-      colors[(f + v) * 3 + 1] = vCol.g;
-      colors[(f + v) * 3 + 2] = vCol.b;
+      const geo = new THREE.ExtrudeGeometry(shape, {
+        depth, steps: 1,
+        bevelEnabled: true, bevelThickness: BEV, bevelSize: BEV * 1.1,
+        bevelSegments: 2,
+      });
+      geo.rotateX(-Math.PI / 2);               // shape XY -> world XZ, depth -> +Y
+      geo.translate(0, baseY + BEV, 0);
+      const mesh = new THREE.Mesh(geo, [topMat, k === 0 ? wallLow : wallHigh]);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+      terrainGroup.add(mesh);
     }
   }
-  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 
-  // HYBRID normals — the cure for "flat-painted polygons". Gentle ground gets
-  // analytic smooth normals from the height field (matte airbrushed rolling
-  // meadows, no facet checker), while steep terrace walls keep their crisp
-  // per-face normals. Faceting survives only where it means something.
-  const normals = new Float32Array(p2.count * 3);
-  const smoothNormal = (wx: number, wz: number, out: THREE.Vector3): void => {
-    const e = 0.7;
-    const hx = heightAt(wx + e, wz) - heightAt(wx - e, wz);
-    const hz = heightAt(wx, wz + e) - heightAt(wx, wz - e);
-    out.set(-hx / (2 * e), 1, -hz / (2 * e)).normalize();
-  };
-  const sn = new THREE.Vector3();
-  for (let f = 0; f < p2.count; f += 3) {
-    va.fromBufferAttribute(p2, f);
-    vb.fromBufferAttribute(p2, f + 1);
-    vc.fromBufferAttribute(p2, f + 2);
-    ab.subVectors(vb, va);
-    ac.subVectors(vc, va);
-    nrm.crossVectors(ab, ac).normalize();
-    const crisp = nrm.y < 0.78;                    // terrace wall -> keep facet
-    for (let v = 0; v < 3; v += 1) {
-      if (crisp) {
-        normals[(f + v) * 3] = nrm.x;
-        normals[(f + v) * 3 + 1] = nrm.y;
-        normals[(f + v) * 3 + 2] = nrm.z;
-      } else {
-        smoothNormal(p2.getX(f + v), p2.getZ(f + v), sn);
-        normals[(f + v) * 3] = sn.x;
-        normals[(f + v) * 3 + 1] = sn.y;
-        normals[(f + v) * 3 + 2] = sn.z;
-      }
-    }
+  // Bad North: the island mirrored as a dark still silhouette in the water.
+  const reflMat = new THREE.MeshBasicMaterial({
+    color: 0x16323a, transparent: true, opacity: 0.13, depthWrite: false,
+  });
+  const refl = new THREE.Group();
+  for (const child of [...terrainGroup.children]) {
+    refl.add(new THREE.Mesh((child as THREE.Mesh).geometry, reflMat));
   }
-  geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
-
-  const mesh = new THREE.Mesh(
-    geo,
-    new THREE.MeshLambertMaterial({
-      vertexColors: true,
-      map: paintTexture(n),        // hand-painted paper wash over everything
-    }),
-  );
-  mesh.castShadow = true;
-  mesh.receiveShadow = true;
-  terrainGroup.add(mesh);
-
-  // Bad North touch: the island faintly mirrored in the still water.
-  const refl = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
-    vertexColors: true, transparent: true, opacity: 0.12, depthWrite: false,
-  }));
-  refl.scale.y = -0.5;
-  refl.position.y = -0.08;
+  refl.scale.y = -1;
+  refl.position.y = -0.15;
   terrainGroup.add(refl);
   scene.add(terrainGroup);
 
