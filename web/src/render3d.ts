@@ -14,6 +14,7 @@ import { EffectComposer } from "three/examples/jsm/postprocessing/EffectComposer
 import { RenderPass } from "three/examples/jsm/postprocessing/RenderPass.js";
 import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
+import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
@@ -21,8 +22,10 @@ import { store } from "./store";
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
-// Final colour grade: gentle saturation lift, warm tint, vignette and a whisper
-// of animated film grain — the "hand-finished" layer over the raw render.
+// The "film preset" (Dehancer-style): a technically clean render becomes a
+// mood through split toning (teal shadows / golden highlights), a gentle
+// filmic S-curve, haze-lifted blacks, vignette and live grain. Bloom (added as
+// a separate pass) supplies the halation glow around fire and sky.
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
@@ -38,19 +41,29 @@ const GradeShader = {
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     void main() {
       vec4 c = texture2D(tDiffuse, vUv);
-      // gentle saturation (references are muted, not punchy)
       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-      c.rgb = mix(vec3(l), c.rgb, 1.05);
-      // haze lift: raise the blacks toward the ambient haze — nothing is ever
-      // fully dark in the reference look
-      c.rgb = mix(c.rgb, vec3(0.72, 0.83, 0.82), 0.06);
-      // faint warmth
-      c.rgb *= vec3(1.02, 1.0, 0.97);
-      // vignette
+
+      // split toning: shadows drift teal, highlights drift gold
+      vec3 shadowTint = vec3(0.86, 1.02, 1.04);
+      vec3 highTint  = vec3(1.08, 1.01, 0.88);
+      c.rgb *= mix(shadowTint, highTint, smoothstep(0.15, 0.85, l));
+
+      // filmic S-curve: rolled shadows, soft shoulder — the "one preset" feel
+      c.rgb = mix(c.rgb, c.rgb * c.rgb * (3.0 - 2.0 * c.rgb), 0.42);
+
+      // saturation with a little life back after the curve
+      l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb = mix(vec3(l), c.rgb, 1.12);
+
+      // haze-lifted blacks: nothing is ever pure dark
+      c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
+
+      // vignette, slightly stronger — pulls the eye to the island
       float d = distance(vUv, vec2(0.5));
-      c.rgb *= 1.0 - smoothstep(0.42, 0.86, d) * 0.32;
-      // animated grain (very subtle)
-      c.rgb += (hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 61.0) - 0.5) * 0.028;
+      c.rgb *= 1.0 - smoothstep(0.38, 0.9, d) * 0.38;
+
+      // live grain
+      c.rgb += (hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 61.0) - 0.5) * 0.030;
       gl_FragColor = c;
     }`,
 };
@@ -61,8 +74,8 @@ function lam(color: number): THREE.MeshLambertMaterial {
 
 // ── palette (shared spirit with vector.ts, tuned for lit 3D) ──────────────────
 const C = {
-  seaDeep: 0x2b6a80,
-  seaSurface: 0x3f96a8,
+  seaDeep: 0x1f5a66,
+  seaSurface: 0x3fa7ad,
   sand: 0xeadfa8,
   grass: 0x8fc767,
   jungle: 0x5f9e4d,
@@ -74,7 +87,7 @@ const C = {
   bush: 0x74a061,
   stone: 0xa8a29a,
   flame: 0xffa54f,
-  skyDay: 0xbfe0e8,
+  skyDay: 0xd6e8df,
   skyNight: 0x0e1e34,
 };
 
@@ -282,8 +295,8 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
   const waterMatl = new THREE.MeshPhongMaterial({
-    color: 0x4b9db0, transparent: true, opacity: 0.55,
-    shininess: 18, specular: 0x1e3a44,        // matte reference water, no glare
+    color: 0x3fa7ad, transparent: true, opacity: 0.55,
+    shininess: 18, specular: 0x1e3a44,        // matte emerald water, no glare
   });
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
@@ -328,11 +341,12 @@ function ensureRenderer(stageEl: HTMLElement): void {
   selRing.visible = false;
   scene.add(selRing);
 
-  // Post: render -> tone-map/sRGB output -> colour grade -> FXAA.
-  // OutputPass is what applies ACES + sRGB when a composer is in the chain;
+  // Post: render -> bloom (halation for fire/sky) -> tone-map/sRGB output ->
+  // film grade -> FXAA. OutputPass applies ACES + sRGB inside a composer chain;
   // without it the frame stays linear and looks crushed-dark.
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.32, 0.7, 0.82));
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
   composer.addPass(gradePass);
@@ -849,13 +863,49 @@ function cone(r: number, h: number, seg: number, color: number,
   return m;
 }
 
-function flameMesh(s: number, y: number): THREE.Mesh {
-  const m = new THREE.Mesh(
-    new THREE.ConeGeometry(s * 0.5, s * 1.4, 6),
-    new THREE.MeshBasicMaterial({ color: C.flame }),
-  );
-  m.position.y = y + s * 0.7;
-  return m;
+// Live fire: three additive cones (orange shell, amber body, pale core) that
+// flicker in tick(), plus glowing embers at the base. Registered globally so
+// the animation loop can breathe life into every fire on the island.
+let flames: THREE.Mesh[] = [];
+
+function makeFire(s: number, y: number): THREE.Group {
+  const g = new THREE.Group();
+  const layers: [number, number, number, number][] = [
+    [0.55, 1.5, 0xff7a2e, 0.75],
+    [0.36, 1.15, 0xffb23e, 0.85],
+    [0.2, 0.8, 0xffe59a, 0.95],
+  ];
+  for (const [r, h, colr, op] of layers) {
+    const cone = new THREE.Mesh(
+      new THREE.ConeGeometry(s * r, s * h, 6),
+      new THREE.MeshBasicMaterial({
+        color: colr, transparent: true, opacity: op,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+    );
+    cone.position.y = y + s * h * 0.5;
+    cone.userData.phase = r * 37;
+    cone.userData.baseY = cone.position.y;
+    flames.push(cone);
+    g.add(cone);
+  }
+  for (let i = 0; i < 4; i += 1) {                 // embers
+    const e = new THREE.Mesh(
+      new THREE.SphereGeometry(s * 0.06, 4, 3),
+      new THREE.MeshBasicMaterial({
+        color: 0xff9a4d, transparent: true, opacity: 0.9,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+    );
+    const a = i * 1.7;
+    e.position.set(Math.cos(a) * s * 0.3, y + s * 0.06, Math.sin(a) * s * 0.3);
+    g.add(e);
+  }
+  return g;
+}
+
+function flameMesh(s: number, y: number): THREE.Group {
+  return makeFire(s, y);
 }
 
 function makeStructure(s: StructureState): THREE.Group {
@@ -880,23 +930,40 @@ function makeStructure(s: StructureState): THREE.Group {
 
   switch (s.kind) {
     case "campfire": {
-      for (let i = 0; i < 6; i += 1) {
-        const a = (i / 6) * Math.PI * 2;
-        g.add(box(0.1, 0.08, 0.1, 0x8b867c, Math.cos(a) * 0.3, 0.04, Math.sin(a) * 0.3));
+      // irregular stone ring
+      for (let i = 0; i < 7; i += 1) {
+        const a = (i / 7) * Math.PI * 2 + 0.4;
+        const r = hashStr(`st${i}${s.id}`);
+        const stone = new THREE.Mesh(
+          new THREE.DodecahedronGeometry(0.055 + r * 0.045, 0), lam(0x8f9296));
+        stone.position.set(Math.cos(a) * (0.3 + r * 0.06), 0.05, Math.sin(a) * (0.27 + r * 0.06));
+        stone.rotation.set(r * 5, r * 9, r * 3);
+        stone.castShadow = true;
+        g.add(stone);
       }
-      const log1 = box(0.4, 0.07, 0.07, WOOD_D, 0, 0.06, 0);
-      log1.rotation.y = 0.6;
-      g.add(log1);
-      const log2 = box(0.4, 0.07, 0.07, WOOD, 0, 0.1, 0);
-      log2.rotation.y = -0.5;
-      g.add(log2);
-      if (lit) g.add(flameMesh(0.22, 0.1));
+      // charred ground + teepee of three leaning logs
+      g.add(cyl(0.2, 0.24, 0.04, 7, 0x2e2620, 0, 0.02, 0));
+      for (let i = 0; i < 3; i += 1) {
+        const log = cyl(0.032, 0.04, 0.4, 5, i % 2 ? WOOD_D : 0x6b4d2e);
+        log.position.set(Math.cos(i * 2.1) * 0.08, 0.14, Math.sin(i * 2.1) * 0.08);
+        log.rotation.z = 0.9;
+        log.rotation.y = i * 2.1;
+        log.castShadow = true;
+        g.add(log);
+      }
+      if (lit) g.add(makeFire(0.42, 0.06));
       break;
     }
     case "signal_fire": {
-      g.add(cone(0.42, 0.5, 6, WOOD_D, 0, 0.25, 0));
-      g.add(cone(0.3, 0.42, 5, WOOD, 0, 0.36, 0));
-      g.add(flameMesh(0.34, 0.55));
+      for (let i = 0; i < 4; i += 1) {
+        const log = cyl(0.05, 0.065, 0.85, 5, i % 2 ? WOOD_D : 0x6b4d2e);
+        log.position.set(Math.cos(i * 1.57) * 0.16, 0.32, Math.sin(i * 1.57) * 0.16);
+        log.rotation.z = 0.5;
+        log.rotation.y = i * 1.57 + 0.78;
+        log.castShadow = true;
+        g.add(log);
+      }
+      g.add(makeFire(0.75, 0.3));
       break;
     }
     case "tent": case "lean_to": {
@@ -1094,6 +1161,7 @@ function buildStructs(st: WorldState): void {
   structsGroup?.removeFromParent();
   for (const l of fireLights) l.removeFromParent();
   fireLights = [];
+  flames = [];
   structsGroup = new THREE.Group();
   for (const s of st.structures) {
     const obj = makeStructure(s);
@@ -1272,9 +1340,9 @@ export function agentScreen3d(id: string): { x: number; y: number } | null {
 // ── per-frame ─────────────────────────────────────────────────────────────────
 const dayFog = new THREE.Color(C.skyDay);
 const nightFog = new THREE.Color(C.skyNight);
-const skyTopDay = new THREE.Color(0x8fd0ea);
+const skyTopDay = new THREE.Color(0x8ecfe0);
 const skyTopNight = new THREE.Color(0x0a1526);
-const skyHorDay = new THREE.Color(0xf6f3e2);
+const skyHorDay = new THREE.Color(0xf4ead2);       // golden-cream horizon
 const skyHorNight = new THREE.Color(0x24364e);
 const stormGrey = new THREE.Color(0x8f9aa0);
 const tmpColor = new THREE.Color();
@@ -1360,7 +1428,15 @@ function tick(): void {
     waterShader.uniforms.uTime.value = now;
     waterShader.uniforms.uAmp.value = 0.05 + stormMix * 0.12;
   }
-  if (foamMat) foamMat.opacity = 0.32 + Math.sin(now * 1.7) * 0.12;
+  if (foamMat) foamMat.opacity = 0.42 + Math.sin(now * 1.7) * 0.14;
+  // living fire: each flame layer breathes on its own phase
+  for (const f of flames) {
+    const ph = f.userData.phase as number;
+    f.scale.x = f.scale.z = 1 + Math.sin(now * 9 + ph) * 0.1;
+    f.scale.y = 1 + Math.sin(now * 13 + ph * 1.3) * 0.22;
+    f.position.y = (f.userData.baseY as number) * f.scale.y;
+    f.rotation.y = now * 1.4 + ph;
+  }
   if (cloudsGroup && state) {
     const n = state.map.size;
     for (const cl of cloudsGroup.children) {
