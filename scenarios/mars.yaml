@@ -1,0 +1,44 @@
+# ── Mars scenario ─────────────────────────────────────────────────────────────
+name: mars
+agent_sprite: suit
+
+map:
+  size: 32                      # 32x32 grid (kept small for fast headless runs)
+  terrains:                     # weighted terrain palette
+    mars_regolith: 0.5
+    mars_rock: 0.2
+    mars_dune: 0.2
+    mars_ice_patch: 0.1
+  default_terrain: mars_regolith
+
+# Vital stats decay every tick. Hitting 0 -> incapacitation -> death if untreated.
+physiology:
+  hunger: { start: 100, decay: 2.0, critical: 25, restore: 45 }
+  thirst: { start: 100, decay: 2.5, critical: 20, restore: 45 }
+  energy: { start: 100, decay: 1.8, critical: 15, restore: 35 }
+  oxygen: { start: 100, decay: 2.2, critical: 40, restore: 100 }
+
+# Harvestable resource nodes. yield_item = what gathering produces.
+resources:
+  - { kind: water_ice,    yield_item: water, count: 5, quantity: 50, regen: 0.3, blocking: false }
+  - { kind: ore_vein,     yield_item: ore,   count: 3, quantity: 40, regen: 0.0 }
+  - { kind: ration_cache, yield_item: food,  count: 4, quantity: 25, regen: 0.0 }
+
+structures:
+  - { kind: oxygen_generator, count: 2, role: refill_oxygen }
+  - { kind: shuttle_wreckage, count: 1, role: escape }
+  - { kind: habitat_dome,     count: 1, role: shelter }
+  # mystery sites — placed far from camp; profit vs risk (see tools/sites.py)
+  - { kind: distress_pod,  count: 1, role: investigate, far: true }
+  - { kind: anomaly,       count: 1, role: examine,     far: true }
+  - { kind: hazard_zone,   count: 1, role: hazard,      far: true }
+  - { kind: sealed_bunker, count: 1, role: breach,      far: true }
+
+escape:
+  structure: shuttle_wreckage
+  action: repair_shuttle
+  required_progress: 200
+  work_rate: 6
+
+weather:
+  events: [dust_storm]          # raises oxygen + energy decay while active

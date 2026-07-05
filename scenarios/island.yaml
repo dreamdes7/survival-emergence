@@ -1,0 +1,103 @@
+# ── Island scenario ───────────────────────────────────────────────────────────
+name: island
+agent_sprite: castaway
+
+map:
+  size: 60
+  shape: island          # radial: ocean -> beach -> meadow/jungle (by moisture) -> rocky core
+  north_bias: 0.22       # island merges into the top edge (land border, no beach there)
+  terrains:              # (used only as a fallback; island shape is procedural)
+    island_jungle_grass: 1.0
+  default_terrain: island_jungle_grass
+
+physiology:
+  hunger: { start: 100, decay: 2.5, critical: 25, restore: 40 }
+  thirst: { start: 100, decay: 2.6, critical: 20, restore: 45 }
+  energy: { start: 100, decay: 2.0, critical: 15, restore: 35 }
+  warmth: { start: 100, decay: 1.3, critical: 20, restore: 50 }   # drops faster at night
+  morale: { start: 80,  decay: 0.8, critical: 20, restore: 25, lethal: false }  # comfort/hope, not deadly
+
+resources:
+  # persistent props (stay, regenerate). Springs sit inland, never on the beach.
+  - { kind: spring,     yield_item: water, count: 7,  quantity: 60, regen: 0.5, terrain: grass,   blocking: false, min_coast_dist: 4 }
+  - { kind: spring,     yield_item: water, count: 5,  quantity: 50, regen: 0.4, terrain: jungle,  blocking: false, min_coast_dist: 4 }
+  - { kind: fruit_tree, yield_item: food,  count: 22, quantity: 30, regen: 0.2, terrain: grass }      # palms on the meadow
+  - { kind: fishing,    yield_item: food,  count: 6,  quantity: 40, regen: 0.4, terrain: coast, blocking: false }
+  # harvestable props — a chopped tree / mined rock disappears once emptied
+  - { kind: wood,       yield_item: wood,  count: 52, quantity: 12, regen: 0.0, terrain: jungle,   consumable: true }  # dense forest
+  - { kind: thicket,    yield_item: fiber, count: 22, quantity: 18, regen: 0.0, terrain: jungle,   consumable: true }
+  - { kind: rocks,      yield_item: stone, count: 26, quantity: 12, regen: 0.0, terrain: highland, consumable: true }  # rocky core
+  - { kind: orerock,    yield_item: flint, count: 12, quantity: 10, regen: 0.0, terrain: highland, consumable: true }  # flint for tools
+
+# Structures agents can build themselves (cost paid from the builder's inventory,
+# then progress accumulates over ticks — several builders finish faster).
+buildables:
+  campfire:
+    cost: { wood: 3, stone: 2 }
+    required_progress: 30
+    work_rate: 10
+    role: campfire
+  tent:
+    cost: { wood: 4, fiber: 3 }
+    required_progress: 40
+    work_rate: 10
+    role: shelter
+    capacity: 2          # only 2 can shelter here — build more tents for everyone
+  water_still:
+    cost: { wood: 2, fiber: 2 }
+    required_progress: 25
+    work_rate: 10
+    role: water          # drink here for free, no need to carry water
+  store:
+    cost: { wood: 3 }
+    required_progress: 25
+    work_rate: 10
+    role: store          # shared cache: stash / grab food & supplies
+  workbench:
+    cost: { wood: 4, stone: 2 }
+    required_progress: 35
+    work_rate: 10
+    role: workbench      # craft tools: axe (chop faster), spear, net (fish faster)
+  smokehouse:
+    cost: { wood: 4, stone: 1 }
+    required_progress: 35
+    work_rate: 10
+    role: smokehouse     # cook raw food + wood -> dried food (more filling)
+  garden:
+    cost: { wood: 3, fiber: 2 }
+    required_progress: 30
+    work_rate: 10
+    role: garden         # plant food as seed, it grows over days, then harvest
+  well:
+    cost: { wood: 3, stone: 4 }
+    required_progress: 35
+    work_rate: 10
+    role: water          # a dug well — drink here for free
+  signpost:
+    cost: { wood: 2 }
+    required_progress: 15
+    work_rate: 10
+    role: signpost       # post a written message others can read; declare rules
+  watchtower:
+    cost: { wood: 6, fiber: 2 }
+    required_progress: 45
+    work_rate: 10
+    role: lookout        # scan from up high to reveal far places & strange sources
+
+structures:
+  - { kind: plane_wreckage, count: 1, role: salvage,  place: coast }    # crashed on the shore
+  - { kind: hotspring,      count: 2, role: hotspring, place: inland }   # natural warmth at night
+  - { kind: cave,           count: 2, role: shelter,  place: highland, capacity: 3 }  # natural shelter
+  - { kind: lighthouse,     count: 1, role: beacon,   place: coast }    # abandoned — can be relit
+  - { kind: radiotower,     count: 1, role: signal,   place: far }      # abandoned tech, repairable
+  # no pre-placed shelter/fire — survivors build their own camp
+
+escape:
+  structure: signal_fire
+  action: build_signal_fire
+  required_progress: 200
+  work_rate: 5
+  requires_item: wood          # building consumes wood from inventory
+
+weather:
+  events: [storm]              # raises warmth + energy decay while active

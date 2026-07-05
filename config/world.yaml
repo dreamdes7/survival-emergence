@@ -1,0 +1,67 @@
+# ── Master config — the knobs you control ────────────────────────────────────
+# Loads scenarios/<scenario>.yaml for the survival layer (terrain, resources,
+# physiology, escape condition).
+
+scenario: mars            # mars | island
+seed: 42
+
+sim:
+  max_days: 4
+  day_length_ticks: 12    # ticks per sim-day
+  reflect_every: 6        # run agent reflection every N ticks
+  tick_seconds: 0         # 0 = run as fast as possible (headless)
+  api_tick_seconds: 1     # observer API cadence
+  move_speed: 3           # tiles an agent crosses per go_to (faster traversal)
+  # Emergency gate: if a lethal stat < critical*emergency_multiplier, the heuristic
+  # overrides the brain to avert death. Wider band = more heuristic contamination.
+  # Default 2.0 preserves the tuned survival balance; RESEARCH RUNS should lower
+  # this to ~1.2 (or 0 to disable) so emergent behaviour is attributable to the model.
+  emergency_multiplier: 2.0
+  fog:
+    home_radius: 10       # tiles each agent can see from spawn (per-agent sector)
+    reveal_roles:         # structure roles always visible at spawn (survival infra)
+      - escape
+      - refill_oxygen
+    vital_guarantee: 3    # N nearest water + food nodes always known (safety net)
+
+agents:
+  count: 5
+  model_override: "stub"   # default world is free/instant; pick deepseek in Forge
+  # blank = clean slate (Project Sid): identical agents, no authored identity/role.
+  # Personality, roles, leaders and norms EMERGE from interaction — the actual test.
+  # Other modes: library (abstract dispositions) | custom | self_select | mixed.
+  persona_mode: blank
+  # model: "stub" = free heuristic brain (no API). Any other value = an OpenRouter
+  # model id (needs OPENROUTER_API_KEY). --model <id> overrides all for a quick run.
+  # Names are auto: each agent picks its own (5 ranked preferences, no collisions).
+  # Set a name here only if you want to force one. roster = per-agent model.
+  roster:
+    - { model: "stub" }
+    - { model: "stub" }
+    - { model: "stub" }
+    - { model: "stub" }
+    - { model: "stub" }
+
+budget:
+  usd_cap: 0              # Phase 2 (OpenRouter). 0 = ignored with stub LLM.
+  model_context_window: 1048576       # deepseek/deepseek-v4-flash context window
+  context_tokens_per_agent_tick: 32000 # local prompt budget, not model max context
+  max_output_tokens: 1024             # JSON action output cap
+  summarize_at_tokens: 12000
+
+# ── LLM behaviour ─────────────────────────────────────────────────────────────
+llm:
+  # What happens when a real model call fails (no key / api error / budget /
+  # unparseable). "stub" = heuristic stands in (sim never stalls, but heuristic
+  # behaviour enters the data). "wait" = agent does nothing that turn, so a
+  # research run's data stays clean. Use "wait" when the run is data.
+  fallback_policy: stub
+  temperature: 0.85       # per-call sampling temperature (research: lower for stability)
+  seed_requests: true     # forward `seed` to the provider for best-effort reproducibility
+  reflect_with_llm: true  # periodic reflection is a real LLM synthesis, not a template
+
+# ── Research instrumentation ──────────────────────────────────────────────────
+research:
+  record: true            # write logs/runs/<id>/ (events, metrics, llm, meta)
+  log_llm: true           # capture full prompt+response per call (large; off for long runs)
+  taint_threshold: 0.20   # flag a run tainted if >this share of decisions were heuristic

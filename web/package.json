@@ -1,0 +1,18 @@
+{
+  "name": "survival-emergence-observer",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc && vite build",
+    "preview": "vite preview --host 127.0.0.1"
+  },
+  "dependencies": {
+    "pixi.js": "^8.6.6",
+    "vite": "^8.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.0"
+  }
+}

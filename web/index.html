@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Survival Emergence Observer</title>
+  </head>
+  <body>
+    <div id="app">
+      <!-- Full-screen world canvas -->
+      <div id="stage"></div>
+      <div id="overlay" class="overlay"></div>
+
+      <!-- Top-center: world status readout -->
+      <div class="world-stats floaty" id="world-stats"></div>
+
+      <!-- Bottom-center: map tools -->
+      <div class="viewport-tools floaty" id="viewport-tools">
+        <button type="button" data-zoom="out" title="Zoom out">−</button>
+        <button type="button" data-zoom="in" title="Zoom in">+</button>
+        <button type="button" data-zoom="reset" title="Reset view">⤢</button>
+        <span class="vt-sep"></span>
+        <button type="button" id="pause-btn" data-control="pause" title="Pause / resume">⏸</button>
+      </div>
+
+      <!-- LEFT dock — identity · simulations · activity (one cohesive panel) -->
+      <aside class="leftdock floaty">
+        <div class="dock-head">
+          <p class="eyebrow">Survival Emergence</p>
+          <h1 id="world-title">Observer</h1>
+          <div class="simbar" id="simbar"></div>
+        </div>
+        <div class="dock-label">Хроника</div>
+        <div id="chronicle" class="chronicle"></div>
+        <div class="dock-label">Activity</div>
+        <div id="event-log" class="event-log"></div>
+      </aside>
+
+      <!-- RIGHT dock — forge + metrics (one panel, two sections) -->
+      <aside class="rightdock floaty">
+        <div class="dock-pad">
+          <div class="dock-label">World Forge</div>
+          <form id="forge-form" class="forge-form"></form>
+        </div>
+        <div class="dock-rule"></div>
+        <div class="dock-pad">
+          <div class="dock-label">Metrics</div>
+          <div id="metrics-dashboard" class="metrics-dashboard"></div>
+        </div>
+      </aside>
+
+      <!-- Bottom-right: world tally -->
+      <div class="legend floaty" id="legend"></div>
+    </div>
+
+    <!-- Character / structure modal -->
+    <div id="char-modal" class="cc-scrim" aria-modal="true" role="dialog" hidden>
+      <div class="cc-card floaty">
+        <button class="cc-close" id="cc-close" aria-label="Close">✕</button>
+        <div id="cc-agent-view">
+          <div class="cc-header">
+            <div class="cc-swatch" id="cc-swatch"></div>
+            <div>
+              <div class="cc-name" id="cc-name"></div>
+              <div class="cc-chips" id="cc-chips"></div>
+            </div>
+          </div>
+          <div class="cc-cognition" id="cc-cognition"></div>
+          <div class="cc-section-label">Vitals</div>
+          <div class="cc-bars" id="cc-bars"></div>
+          <div class="cc-section-label">Inventory</div>
+          <div class="cc-inv" id="cc-inv"></div>
+          <div class="cc-section-label">Ремёсла</div>
+          <div class="cc-skills" id="cc-skills"></div>
+          <div class="cc-section-label">Relationships</div>
+          <div class="cc-rels" id="cc-rels"></div>
+          <div class="cc-section-label">Мнения о людях</div>
+          <div class="cc-beliefs" id="cc-beliefs"></div>
+          <div class="cc-section-label">Diary</div>
+          <div class="cc-diary" id="cc-diary"></div>
+        </div>
+        <div id="cc-struct-view" hidden>
+          <div id="cc-struct-body"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- New simulation modal -->
+    <div id="newsim-modal" class="newsim-scrim" hidden>
+      <div class="newsim-card floaty">
+        <h2>New Simulation</h2>
+        <form id="newsim-form" class="newsim-form">
+          <div class="field">
+            <label for="ns-scenario">Scenario</label>
+            <select name="scenario" id="ns-scenario">
+              <option value="island">island</option>
+              <option value="mars">mars</option>
+            </select>
+          </div>
+          <div class="ns-grid">
+            <div class="field">
+              <label for="ns-seed">Seed</label>
+              <input type="number" name="seed" id="ns-seed" min="0" value="0">
+            </div>
+            <div class="field">
+              <label for="ns-agents">Agents</label>
+              <input type="number" name="agents" id="ns-agents" min="1" max="12" value="5">
+            </div>
+            <div class="field">
+              <label for="ns-days">Days</label>
+              <input type="number" name="days" id="ns-days" min="1" max="30" value="4">
+            </div>
+          </div>
+          <div class="field">
+            <label for="ns-model">Model <span class="hint">blank = stub</span></label>
+            <input type="text" name="model" id="ns-model" list="model-options" placeholder="deepseek-ai/deepseek-v4-flash">
+          </div>
+          <div class="field">
+            <label for="ns-provider">Provider</label>
+            <select name="provider" id="ns-provider">
+              <option value="openrouter">OpenRouter</option>
+              <option value="megallm">MegaLLM</option>
+              <option value="stub">Stub (free)</option>
+            </select>
+          </div>
+          <div id="newsim-status" class="newsim-status" role="status" aria-live="polite"></div>
+          <div class="newsim-actions">
+            <button type="button" class="btn-cancel" id="newsim-cancel">Cancel</button>
+            <button type="submit" class="btn-create">Launch ✦</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

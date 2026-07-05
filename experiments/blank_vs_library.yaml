@@ -1,0 +1,18 @@
+# Example experiment: does a blank slate produce different survival/social
+# outcomes than authored psychotypes, and how much does the emergency gate's
+# width contaminate the signal?
+#
+# Run:  py -3.12 -m engine.batch experiments/blank_vs_library.yaml
+#
+# 3 seeds x 2 persona modes x 2 emergency multipliers = 12 stub runs (free/instant).
+# Swap agents.model_override to a real model id (and set OPENROUTER_API_KEY) to run
+# it on live LLMs — then heuristic_share in the summary tells you if it's clean.
+name: blank-vs-library
+scenario: island
+
+matrix:
+  seed: [1, 2, 3]
+  agents.persona_mode: [blank, library]
+  sim.emergency_multiplier: [2.0, 1.2]
+  # agents.model_override: ["stub"]        # -> "deepseek/deepseek-v4-flash" for a real run
+  # llm.fallback_policy: ["wait"]          # keep heuristic out of real-model data

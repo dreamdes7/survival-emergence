@@ -1,0 +1,6 @@
+pyyaml>=6.0
+fastapi>=0.110
+uvicorn[standard]>=0.27
+
+# dev / tests
+pytest>=8.0
