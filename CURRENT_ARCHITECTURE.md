@@ -237,7 +237,30 @@ summarisation — `agents/memory.py:compact`.
 
 ### Тесты
 `tests/` (pytest): golden-run детерминизм stub-пути, provenance/emergency-пороги,
-memory scoring + compact, tool gating, RunRecorder на диск. 15 тестов зелёные.
+memory scoring + compact, tool gating, RunRecorder на диск, сцены/сны/narrator-gating.
+20 тестов зелёные.
+
+## Спринт 1 — «Живые агенты» (added 2026-07-05, FRONTIER_IDEAS 1.1/1.3/4.1)
+
+### Диалоговые сцены
+`say_to`, попавший в adjacent-агента, разыгрывает до `sim.dialogue_scene_lines`
+дополнительных реплик в тот же тик (`agents/dialogue.py:run_scene`, триггер в
+`runtime.step`). Реплики генерирует мозг каждого участника: real LLM — компактным
+дешёвым промптом (`openrouter.dialogue_reply`, тег kind=dialogue в llm.jsonl),
+stub — детерминированным пулом фраз по отношению. Эффекты: память обеим сторонам,
++affinity, feed/bubbles, одно типизированное событие `dialogue` с полным транскриптом.
+
+### Сны
+Ночной `rest` (раз в сим-день) консолидирует день в короткий сон:
+`runtime._dream` → `openrouter.dream` (LLM) или шаблон stub. Сон = память
+kind=dream + diary-строка «(сон) …» + morale +3 + dread −5 + событие `dream`.
+Ручка `llm.dreams`.
+
+### Рассказчик
+`engine/narrator.py` — отдельный LLM-голос читает chronicle+feed с прошлого
+фрагмента и пишет сагу (2-3 предложения) каждые `narrator.every_ticks` тиков в
+`world.saga` → snapshot → блок саги в панели хроники UI. Без real-модели/ключа
+narrator = None (stub-миры бесплатны). Вызовы пишутся в llm.jsonl как kind=saga.
 
 ## Ближайшие слабые места (обновлено 2026-07-05)
 

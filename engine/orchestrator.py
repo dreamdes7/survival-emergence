@@ -276,11 +276,36 @@ def build_llm(world: World, cfg: dict):
 
 def apply_runtime_policy(world: World, cfg: dict) -> None:
     """Push the decision-authorship knobs from config onto the live world so the
-    runtime (emergency gate, fallback policy) reads them per tick."""
+    runtime (emergency gate, fallback policy, scenes, dreams) reads them per tick."""
     sim = cfg.get("sim", {})
     llm_cfg = cfg.get("llm", {})
     world.emergency_multiplier = float(sim.get("emergency_multiplier", 2.0))
     world.fallback_policy = str(llm_cfg.get("fallback_policy", "stub"))
+    world.dialogue_scene_lines = int(sim.get("dialogue_scene_lines", 4))
+    world.dreams_enabled = bool(llm_cfg.get("dreams", True))
+
+
+def build_narrator(world: World, cfg: dict, llm):
+    """Create the saga narrator when it can actually speak: needs enabled=true and
+    a real model (explicit narrator.model, else the first real agent's). Stub-only
+    worlds get None — the free world stays free."""
+    ncfg = cfg.get("narrator", {})
+    if not ncfg.get("enabled", False):
+        return None
+    model = str(ncfg.get("model") or "").strip()
+    if not model:
+        model = next((a.model for a in world.agents if a.model != "stub"), "")
+    if not model:
+        return None
+    client = getattr(llm, "openrouter", None)
+    if client is None:
+        try:
+            client = OpenRouterLLM(fallback=HeuristicLLM(),
+                                   provider=cfg.get("provider", "openrouter"))
+        except RuntimeError:
+            return None
+    from engine.narrator import Narrator
+    return Narrator(client, model, int(ncfg.get("every_ticks", 12)))
 
 
 def build_recorder(world: World, cfg: dict, scenario: dict):
@@ -328,6 +353,7 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
     llm = build_llm(world, cfg)
     resolve_names(world, llm, scenario)
     recorder = build_recorder(world, cfg, scenario)
+    narrator = build_narrator(world, cfg, llm)
     reflect_with_llm = bool(cfg.get("llm", {}).get("reflect_with_llm", True))
 
     def say(*a):
@@ -363,6 +389,11 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
 
         for notice in world.end_tick():
             say(f"   !! {notice}")
+
+        if narrator is not None and t > 0:
+            fragment = narrator.maybe_tick(world)
+            if fragment:
+                say(f"   📜 {fragment}")
 
         if recorder is not None:
             recorder.tick_metrics(world)

@@ -117,6 +117,7 @@ class Agent:
         self.last_said: str = ""        # most recent thing this agent said aloud
         self.last_source: str = ""      # provenance of the last decision (llm/emergency/…)
         self.dread: float = 0.0         # anomaly-driven fear; 0 unless an anomaly is placed
+        self._last_dream_day: int = 0   # dreams fire at most once per sim-day
 
     # ── inbox ─────────────────────────────────────────────────────────────────
     def deliver(self, msg: dict) -> None:
@@ -241,6 +242,31 @@ class Agent:
                 self.memory.add(world.tick, world.day, "observation",
                                 f"вдалеке {col} — на {where} ({s.x},{s.y}), там огонь и, наверное, люди", 1.6)
             self.known_structures[s.id] = s
+
+    # ── dreams (Sprint 1) ──────────────────────────────────────────────────────
+    def _dream(self, world, llm) -> None:
+        """Night-time consolidation: the sleeping mind recombines the day into one
+        short symbolic dream. Real LLM synthesises it; stub agents get a templated
+        recombination. A dream is a memory + a diary line + a small morale lift
+        (and it eases anomaly dread a little)."""
+        self._last_dream_day = world.day
+        text = ""
+        brain = llm.brain_for(self) if hasattr(llm, "brain_for") else llm
+        if hasattr(brain, "dream"):
+            try:
+                text = brain.dream(self, world) or ""
+            except Exception:
+                text = ""
+        if not text:
+            from llm.stub import HeuristicLLM
+            text = HeuristicLLM().dream(self, world)
+        self.memory.add(world.tick, world.day, "dream", text, 1.6)
+        self.memory.add_diary(world.tick, f"(сон) {text}")
+        if "morale" in self.physiology:
+            self.physiology["morale"] = min(100.0, self.physiology["morale"] + 3.0)
+        self.dread = max(0.0, self.dread - 5.0)
+        world.log_feed(self, "action", "", "dream", text)
+        world.emit("dream", actor=self.id, payload={"name": self.name, "text": text})
 
     def retrieval_query(self, world) -> str:
         """The situation this agent is actually in, as keywords — used to score
@@ -394,6 +420,24 @@ class Agent:
         self.memory.add(world.tick, world.day, "action",
                         f"({thought}) -> {tool}: {result}", 1.0)
         world.log_feed(self, kind, thought, tool, result)
+
+        # Conversation scene: a landed say_to on an adjacent agent plays out a
+        # few extra replies in one sitting instead of one line per tick.
+        if (tool == "say_to" and result.startswith("said to")
+                and getattr(world, "dialogue_scene_lines", 0) > 0):
+            target = world.agent_by_name(decision.get("args", {}).get("target", ""))
+            if target is not None and target is not self and target.status == "active":
+                from agents.dialogue import run_scene
+                run_scene(world, llm, self, target,
+                          decision.get("args", {}).get("message", ""),
+                          int(world.dialogue_scene_lines))
+
+        # Dream: night-time rest consolidates the day's memories (once per day).
+        if (tool == "rest" and world.is_night
+                and getattr(world, "dreams_enabled", True)
+                and self._last_dream_day != world.day
+                and not result.startswith(("[blocked]", "[error]"))):
+            self._dream(world, llm)
 
         # The core research record: who acted, how, why-source, and to what effect.
         world.emit("decision", actor=self.id,

@@ -204,14 +204,16 @@ class OpenRouterLLM:
         decision["_source"] = "llm"
         return decision
 
-    def _record_llm(self, agent, world, messages, response, usage, error=None) -> None:
+    def _record_llm(self, agent, world, messages, response, usage,
+                    error=None, kind: str = "decision") -> None:
         """Persist the exact prompt + raw model output so an action can be audited
-        offline. No-ops when the run isn't being recorded."""
+        offline. `kind` tags the call's purpose (decision/dialogue/reflection/dream).
+        No-ops when the run isn't being recorded."""
         rec = getattr(world, "recorder", None)
         if rec is None:
             return
         rec.llm({
-            "t": world.tick, "day": world.day,
+            "t": world.tick, "day": world.day, "kind": kind,
             "agent": agent.id, "name": agent.name, "model": agent.model,
             "provider": self.provider,
             "prompt": messages,
@@ -248,9 +250,77 @@ class OpenRouterLLM:
             data = self._post_with_retry(agent.model, messages)
             self.budget.add(data.get("usage", {}) or {})
             content = data["choices"][0]["message"].get("content") or ""
-            self._record_llm(agent, world, messages, content, data.get("usage", {}) or {})
+            self._record_llm(agent, world, messages, content, data.get("usage", {}) or {},
+                             kind="reflection")
             line = content.strip().strip('"').split("\n")[0][:240]
             return line
+        except Exception:
+            return ""
+
+    # ── dialogue scenes (Sprint 1) ─────────────────────────────────────────────
+    def dialogue_reply(self, agent, world, partner, transcript: list) -> str | None:
+        """One short in-character reply inside a conversation scene. A compact
+        prompt (persona line + relationship + a few shared memories + the scene so
+        far) instead of the full world context — scenes are cheap by design.
+        Returns None to end the conversation (model says [конец], or any failure).
+        """
+        if self.budget.exceeded():
+            return None
+        rel = agent.relationships.get(partner.id)
+        persona_line = agent.persona.summary or (
+            "Кто ты — решаешь ты сам; характер складывается из таких разговоров.")
+        shared = [m.text for m in agent.memory.retrieve(partner.name, n=4)]
+        shared_txt = "\n".join(f"- {s}" for s in shared) or "  (мало что вспоминается)"
+        convo = "\n".join(f"{l['speaker']}: {l['text']}" for l in transcript[-8:])
+        messages = [
+            {"role": "system", "content":
+                f"Ты {agent.name}. {persona_line}\n"
+                f"Ты разговариваешь с {partner.name} (отношение: {rel.label}, "
+                f"близость {rel.affinity:+.1f}). Отвечай ПО-РУССКИ, 1-2 короткие живые "
+                "реплики как в настоящем разговоре: отвечай по сути, соглашайся, спорь, "
+                "шути, вспоминай. Без координат и чисел. Только текст реплики. "
+                "Если сказать больше нечего и разговор исчерпан — ответь ровно [конец]."},
+            {"role": "user", "content":
+                f"Что ты помнишь о {partner.name}:\n{shared_txt}\n\n"
+                f"Разговор:\n{convo}\n\nТвоя реплика:"},
+        ]
+        try:
+            data = self._post_with_retry(agent.model, messages)
+            usage = data.get("usage", {}) or {}
+            self.budget.add(usage)
+            content = (data["choices"][0]["message"].get("content") or "").strip()
+            self._record_llm(agent, world, messages, content, usage, kind="dialogue")
+        except Exception:
+            return None
+        line = content.strip().strip('"').split("\n")[0][:220]
+        if not line or "[конец]" in line.lower() or "[end]" in line.lower():
+            return None
+        return line
+
+    # ── dreams (Sprint 1) ──────────────────────────────────────────────────────
+    def dream(self, agent, world) -> str:
+        """Night-time memory consolidation: recombine recent memories into one
+        short symbolic dream. Returns "" on failure (caller falls back to stub)."""
+        if self.budget.exceeded():
+            return ""
+        mems = agent.memory.retrieve(agent.retrieval_query(world), n=12) \
+            if hasattr(agent, "retrieval_query") else agent.memory.recent(12)
+        mem_text = "\n".join(f"- {m.text}" for m in mems) or "  (день прошёл как в тумане)"
+        messages = [
+            {"role": "system", "content":
+                f"Ты {agent.name}, ты спишь. Опиши ОДИН короткий сон (1-2 предложения, "
+                "по-русски, от первого лица, образно): сон перемешивает пережитое — "
+                "людей, страхи, надежды. Без координат и чисел. Только сам сон."},
+            {"role": "user", "content":
+                f"Из чего соткан сон (пережитое):\n{mem_text}\n\nСон:"},
+        ]
+        try:
+            data = self._post_with_retry(agent.model, messages)
+            usage = data.get("usage", {}) or {}
+            self.budget.add(usage)
+            content = (data["choices"][0]["message"].get("content") or "").strip()
+            self._record_llm(agent, world, messages, content, usage, kind="dream")
+            return content.strip().strip('"').split("\n")[0][:240]
         except Exception:
             return ""
 

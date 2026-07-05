@@ -857,3 +857,12 @@ body {
 .prov-line { font-weight: 600; margin-top: 4px; }
 .prov-line.prov-ok { color: #7fddb0; }
 .prov-line.prov-warn { color: #e8b866; }
+
+/* ── Narrator saga (literary voice-over in the chronicle panel) ─────────────── */
+.saga-entry {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 8px 10px; margin-bottom: 6px; border-radius: 8px;
+  background: linear-gradient(135deg, rgba(188, 75, 43, 0.10), rgba(90, 60, 120, 0.10));
+  border-left: 3px solid rgba(188, 75, 43, 0.55);
+}
+.saga-text { font-style: italic; line-height: 1.45; opacity: 0.95; }

@@ -85,6 +85,7 @@ type WorldState = {
   structures: StructureState[];
   feed: FeedEntry[];
   chronicle?: ChronicleEntry[];
+  saga?: { tick: number; day: number; text: string }[];
   claims?: { node_id: string; owner_id: string; owner: string }[];
   metrics: {
     indicators: Record<string, number>;
@@ -1947,16 +1948,21 @@ function renderChrome() {
 function renderChronicle() {
   if (!chronicleEl) return;
   const ch = state?.chronicle ?? [];
-  if (!ch.length) {
+  const saga = state?.saga ?? [];
+  if (!ch.length && !saga.length) {
     chronicleEl.innerHTML = `<div class="chronicle-empty">Сага ещё не началась…</div>`;
     return;
   }
-  // newest first; the saga is short and high-signal
-  chronicleEl.innerHTML = [...ch].reverse().slice(0, 16).map((e) =>
+  // Narrator's literary voice on top (newest fragment first), then raw chronicle.
+  const sagaHtml = [...saga].reverse().slice(0, 3).map((s) =>
+    `<div class="saga-entry"><span class="ch-day">Дн.${s.day}</span>` +
+    `<span class="saga-text">${escapeHtml(s.text)}</span></div>`).join("");
+  const chHtml = [...ch].reverse().slice(0, 16).map((e) =>
     `<div class="chronicle-entry ch-${escapeAttr(e.kind)}">` +
       `<span class="ch-day">Дн.${e.day}</span>` +
       `<span class="ch-text">${escapeHtml(e.text)}</span>` +
     `</div>`).join("");
+  chronicleEl.innerHTML = sagaHtml + chHtml;
 }
 
 function pill(label: string, value: string) {

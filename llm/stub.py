@@ -540,3 +540,52 @@ class HeuristicLLM:
         if world.adjacent_to_structure(agent, site):
             return {"tool": "build", "args": {}, "thought": f"work on {esc.get('action', 'escape')}"}
         return self._goto(site, "go to the escape site")
+
+    # ── dialogue scenes (Sprint 1) ─────────────────────────────────────────────
+    # Short in-scene replies so conversation sub-loops work (and stay
+    # deterministic) even without a real LLM. Tone follows the relationship.
+    _SCENE_REPLIES = {
+        "ally": [
+            "Agreed. We stick together.",
+            "I was hoping you'd say that.",
+            "Count on me.",
+            "We'll get through this.",
+            "Tell me if you need anything.",
+        ],
+        "rival": [
+            "Hmph. We'll see.",
+            "Just stay on your side.",
+            "I don't trust you yet.",
+            "Words are cheap out here.",
+        ],
+        "neutral": [
+            "Maybe. Let's see how it goes.",
+            "Yeah... it's rough out here.",
+            "Good point.",
+            "I've been thinking the same.",
+            "We should talk more often.",
+        ],
+    }
+
+    def dialogue_reply(self, agent, world, partner, transcript: list) -> str | None:
+        """One in-scene reply, or None to end the conversation. Deterministic via
+        world.rng. Ends with rising probability as the scene grows."""
+        end_p = 0.25 + 0.15 * max(0, len(transcript) - 2)
+        if world.rng.random() < end_p:
+            return None
+        label = agent.relationships.get(partner.id).label
+        pool = self._SCENE_REPLIES.get(label, self._SCENE_REPLIES["neutral"])
+        return world.rng.choice(pool)
+
+    # ── dreams (Sprint 1) ──────────────────────────────────────────────────────
+    def dream(self, agent, world) -> str:
+        """A templated dream that recombines a real memory — cheap consolidation
+        stand-in for stub agents."""
+        pool = [e for e in agent.memory.entries[-40:] if e.kind in ("social", "observation")]
+        seed_mem = world.rng.choice(pool).text if pool else "волны и далёкий берег"
+        frames = [
+            f"мне снилось: {seed_mem} — но всё было не так, как наяву",
+            f"во сне я снова видел это: {seed_mem}",
+            f"сон перепутал всё: {seed_mem}, и кто-то звал меня по имени",
+        ]
+        return world.rng.choice(frames)

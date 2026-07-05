@@ -17,6 +17,10 @@ sim:
   # Default 2.0 preserves the tuned survival balance; RESEARCH RUNS should lower
   # this to ~1.2 (or 0 to disable) so emergent behaviour is attributable to the model.
   emergency_multiplier: 2.0
+  # Conversation scenes: a say_to that lands on an adjacent agent plays out up to
+  # N extra replies in the same tick (real dialogue instead of one line per tick).
+  # 0 = off. Real-LLM replies use a compact cheap prompt, stubs use a phrase pool.
+  dialogue_scene_lines: 4
   fog:
     home_radius: 10       # tiles each agent can see from spawn (per-agent sector)
     reveal_roles:         # structure roles always visible at spawn (survival infra)
@@ -59,6 +63,17 @@ llm:
   temperature: 0.85       # per-call sampling temperature (research: lower for stability)
   seed_requests: true     # forward `seed` to the provider for best-effort reproducibility
   reflect_with_llm: true  # periodic reflection is a real LLM synthesis, not a template
+  dreams: true            # night rest consolidates the day into a short dream
+
+# ── Narrator (saga voice-over) ────────────────────────────────────────────────
+# A separate LLM voice that retells the event stream as literary saga fragments,
+# shown in the observer's chronicle panel. Needs a real model + API key: with
+# model "" it borrows the first real agent's model, so stub-only worlds have no
+# narrator (free worlds stay free).
+narrator:
+  enabled: true
+  model: ""               # explicit model id, or "" = first real agent's model
+  every_ticks: 12         # one saga fragment per N ticks (12 = once per sim-day)
 
 # ── Research instrumentation ──────────────────────────────────────────────────
 research:

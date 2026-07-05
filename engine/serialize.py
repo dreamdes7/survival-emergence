@@ -110,6 +110,7 @@ def world_snapshot(world) -> dict:
         ],
         "feed": world.feed[-50:],
         "chronicle": world.chronicle[-60:],
+        "saga": list(getattr(world, "saga", []))[-12:],
         "placenames": [
             {"name": pn["name"], "x": pn["x"], "y": pn["y"],
              "by": pn["by"], "famous": pn.get("famous", False)}

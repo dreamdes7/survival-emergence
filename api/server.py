@@ -19,8 +19,9 @@ from fastapi.staticfiles import StaticFiles
 
 from engine.anomaly import place_anomaly
 from engine.events import EventScheduler
-from engine.orchestrator import (apply_runtime_policy, build_llm, build_recorder,
-                                 load_config, resolve_names, spawn_agents)
+from engine.orchestrator import (apply_runtime_policy, build_llm, build_narrator,
+                                 build_recorder, load_config, resolve_names,
+                                 spawn_agents)
 from engine.serialize import world_manifest, world_snapshot
 from engine.session_log import SessionLogger
 from engine.world import World
@@ -46,6 +47,7 @@ class SimulationRunner:
         self.paused = False
         self.logger: SessionLogger | None = None
         self.recorder = None
+        self.narrator = None
 
     def reset(self) -> None:
         if self.logger is not None:
@@ -69,6 +71,7 @@ class SimulationRunner:
         place_anomaly(self.world, self.overrides.get("anomaly"))
         self.logger = SessionLogger(self.world, self.cfg)
         self.recorder = build_recorder(self.world, self.cfg, scenario)
+        self.narrator = build_narrator(self.world, self.cfg, self.llm)
         self.reflect_with_llm = bool(self.cfg.get("llm", {}).get("reflect_with_llm", True))
         self.replay = [self.snapshot()]
         self.paused = False
@@ -161,6 +164,9 @@ class SimulationRunner:
                     print(f"[sim:{self.sim_id}] {agent.name} step failed: {exc!r}")
 
             self.world.end_tick()
+            if getattr(self, "narrator", None) is not None and t > 0:
+                # Narration is a blocking LLM call — keep it off the event loop.
+                await asyncio.to_thread(self.narrator.maybe_tick, self.world)
             if self.logger is not None:
                 self.logger.log_tick(self.world)
             if self.recorder is not None:

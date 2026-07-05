@@ -11,7 +11,12 @@ class LLMRouter:
         self.stub = stub
         self.openrouter = openrouter
 
-    def decide(self, agent, world) -> dict:
+    def brain_for(self, agent):
+        """The brain that speaks for this agent (used by dialogue scenes/dreams,
+        which call purpose-specific methods rather than .decide)."""
         if agent.model == "stub" or self.openrouter is None:
-            return self.stub.decide(agent, world)
-        return self.openrouter.decide(agent, world)
+            return self.stub
+        return self.openrouter
+
+    def decide(self, agent, world) -> dict:
+        return self.brain_for(agent).decide(agent, world)

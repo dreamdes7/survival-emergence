@@ -42,6 +42,7 @@ class World:
         self.chronicle: list[dict] = []   # significant emergent events (the saga)
         self.events: list[dict] = []      # typed event stream (bounded; mirrored to recorder)
         self.recorder = None              # RunRecorder, when a run is being logged
+        self.saga: list[dict] = []        # narrator's literary retelling of the run
 
         # Sprint 2 — commitments, culture, ritual
         self.commitments: list[dict] = []   # promises between agents
