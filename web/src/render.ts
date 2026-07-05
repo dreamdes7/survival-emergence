@@ -8,8 +8,8 @@ import { requiredProgress, store } from "./store";
 import { agentCssInk, agentIndex, agentTint } from "./utils";
 import { closeModal, openAgentModal, openStructModal, pushEvent, renderChrome, stageEl, viewportTools } from "./ui";
 import { controlSim } from "./api";
-import { buildMeeple, buildVectorProp, buildVectorTerrain, invalidateVectorTerrain,
-         makeCloudShadowCanvas } from "./vector";
+import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
+         invalidateVectorTerrain, makeCloudShadowCanvas } from "./vector";
 import type { StructureState, WorldState } from "./types";
 
 // Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
@@ -356,6 +356,7 @@ function syncAgents(): void {
         meeple.x = TILE_SIZE / 2 - AGENT_OFFX;
         meeple.y = TILE_SIZE - AGENT_OFFY;         // feet on the tile bottom
         sprite.visible = false;
+        shadow.visible = false;                    // the meeple draws its own
       } else if (island) {
         const set = pawnCache[pawnColor];
         sprite.texture = set ? set.idle[0] : Texture.EMPTY;
@@ -721,11 +722,11 @@ async function setupClouds(): Promise<void> {
   }
   if (!texs.length) return;
   const mapPx = state.map.size * TILE_SIZE;
-  const count = vectorMode() ? 8 : ISLAND_CLOUD_COUNT;
+  const count = vectorMode() ? 4 : ISLAND_CLOUD_COUNT;
   for (let i = 0; i < count; i += 1) {
     const tex = texs[Math.floor(Math.random() * texs.length)];
     const s = new Sprite(tex);
-    s.alpha = vectorMode() ? 0.5 : 0.26 + Math.random() * 0.08;
+    s.alpha = vectorMode() ? 0.30 : 0.26 + Math.random() * 0.08;
     s.scale.set((TILE_SIZE * (8 + Math.random() * 5)) / tex.frame.width);
     s.x = Math.random() * mapPx;
     s.y = Math.random() * mapPx;
@@ -1231,7 +1232,14 @@ export async function render() {
       sprite.x = px + pw / 2; sprite.y = py + ph;
       node = sprite;
     } else {
-      node = structurePlaceholder(s, px, py, pw, ph);
+      const drawn = vectorMode() ? buildVectorStructure(s, pw, ph) : null;
+      if (drawn) {
+        drawn.x = px + pw / 2;
+        drawn.y = py + ph;
+        node = drawn;
+      } else {
+        node = structurePlaceholder(s, px, py, pw, ph);
+      }
     }
     node.eventMode = "static";
     node.cursor = "pointer";
