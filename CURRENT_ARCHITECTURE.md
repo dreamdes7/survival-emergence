@@ -262,14 +262,35 @@ kind=dream + diary-строка «(сон) …» + morale +3 + dread −5 + со
 `world.saga` → snapshot → блок саги в панели хроники UI. Без real-модели/ключа
 narrator = None (stub-миры бесплатны). Вызовы пишутся в llm.jsonl как kind=saga.
 
-## Ближайшие слабые места (обновлено 2026-07-05)
+## Спринт 2 — «Зритель + долг» (added 2026-07-05, FRONTIER_IDEAS 4.2 + распил + replay)
 
-- Нет persistent restore из snapshot: `restart` пересобирает мир с нуля. (открыто)
-- `web/src/main.ts` всё ещё mono-file (~2050 строк): data-plumbing вынесено на
-  backend, но модульного распила renderer/net/ui пока нет. (открыто)
-- Replay UI поверх `/replay` не построен; таймлайн отношений считается из
-  `metrics.jsonl`, но своего экрана в UI пока нет. (открыто)
+### Интервью с выжившими
+`POST /sims/{id}/agents/{agent_id}/interview {question, history}` — агент отвечает
+из СВОЕЙ памяти/beliefs своим мозгом (`openrouter.interview`, kind=interview в
+llm.jsonl; stub даёт выжимку релевантных воспоминаний). Мёртвые агенты отвечают
+«как призраки». Чат-панель — секция «Интервью» в карточке агента
+(`web/src/interview.ts`), история per-agent на клиенте.
+
+### Распил main.ts (2107 строк → 10 модулей)
+`web/src/`: `types` (контракты) / `constants` / `utils` (чистые хелперы) /
+`store` (единый mutable-стор + manifest-кэш) / `api` (все HTTP) / `interview` /
+`ui` (модалки, панели, forge, sim bar) / `render` (весь Pixi) / `replay` /
+`net` (websockets + жизненный цикл симов) / `main` (композиция ~50 строк).
+Граф ацикличен: ui не импортирует net/render — навигация инжектится через
+`ui.nav` из main.ts.
+
+### Replay UI
+Кнопка ⏪ во viewport-tools → скраббер по снапшотам `GET /replay`
+(`web/src/replay.ts`): слайдер листает историю, live-поток продолжает наполнять
+store, выход возвращает в прямой эфир.
+
+## Ближайшие слабые места (обновлено 2026-07-05, после спринта 2)
+
+- Нет persistent restore из snapshot: `restart` пересобирает мир с нуля.
+  (закроется контрфактуальным форком — FRONTIER_IDEAS 3.1, спринт 5)
+- Таймлайн отношений считается из `metrics.jsonl`, но своего экрана в UI нет. (открыто)
 - LLM-scored importance пока не внедрён (importance всё ещё авторские константы) —
   сознательно отложено из-за стоимости токенов; hook под reflection есть. (открыто)
-- Проект не под git. (по просьбе — позже)
+- render.ts крупный (~900 строк), но изолирован — дальнейший распил на
+  render/terrain|agents|structures безопасен и не срочен. (низкий приоритет)
 

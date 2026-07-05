@@ -297,6 +297,52 @@ class OpenRouterLLM:
             return None
         return line
 
+    # ── survivor interview (Sprint 2) ──────────────────────────────────────────
+    def interview(self, agent, world, question: str, history: list | None = None) -> str:
+        """Talk to an agent as an outside interviewer. The agent answers from its
+        OWN subjective experience — memories retrieved by the question, beliefs
+        about the others, diary, current state. The observer's window into 'why
+        did you do that?'. Returns "" on failure (caller may fall back to stub)."""
+        if self.budget.exceeded():
+            return ""
+        mems = agent.memory.retrieve(question, n=10)
+        mem_text = "\n".join(f"- {m.text}" for m in mems) or "  (почти ничего не помню)"
+        diary_tail = "\n".join(t for _, t in agent.memory.diary[-4:]) or "(дневник пуст)"
+        bel_lines = []
+        for oid, b in getattr(agent, "beliefs", {}).items():
+            o = world.agent_by_id(oid)
+            if o is not None:
+                bel_lines.append(f"- {o.name}: {b.get('note', '')} ({', '.join(b.get('tags', []))})")
+        beliefs_txt = "\n".join(bel_lines) or "  (не составил мнения)"
+        status_line = ("я не выжил — говорю как призрак своей истории"
+                       if agent.status == "dead" else "я всё ещё здесь, живой")
+        convo = "\n".join(f"{h.get('role', '?')}: {h.get('text', '')}"
+                          for h in (history or [])[-8:])
+        messages = [
+            {"role": "system", "content":
+                f"Ты {agent.name} — один из выживших. С тобой говорит наблюдатель "
+                "(интервьюер извне). Отвечай от первого лица, ПО-РУССКИ, 2-4 живых "
+                "предложения, из СВОЕГО опыта: что помнишь, что чувствовал, кому "
+                "доверял. Не выдумывай событий, которых нет в памяти — если не "
+                "помнишь, так и скажи. Без координат и игровых терминов."},
+            {"role": "user", "content":
+                f"Твоё положение: {status_line}. День {world.day}.\n"
+                f"Что ты помнишь по теме вопроса:\n{mem_text}\n"
+                f"Твой дневник (последнее):\n{diary_tail}\n"
+                f"Что ты думаешь о людях:\n{beliefs_txt}\n\n"
+                + (f"Разговор до этого:\n{convo}\n\n" if convo else "")
+                + f"Вопрос наблюдателя: {question}\n\nТвой ответ:"},
+        ]
+        try:
+            data = self._post_with_retry(agent.model, messages)
+            usage = data.get("usage", {}) or {}
+            self.budget.add(usage)
+            content = (data["choices"][0]["message"].get("content") or "").strip()
+            self._record_llm(agent, world, messages, content, usage, kind="interview")
+            return content.strip().strip('"')[:1200]
+        except Exception:
+            return ""
+
     # ── dreams (Sprint 1) ──────────────────────────────────────────────────────
     def dream(self, agent, world) -> str:
         """Night-time memory consolidation: recombine recent memories into one

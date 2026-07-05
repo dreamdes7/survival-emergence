@@ -589,3 +589,16 @@ class HeuristicLLM:
             f"сон перепутал всё: {seed_mem}, и кто-то звал меня по имени",
         ]
         return world.rng.choice(frames)
+
+    # ── survivor interview (Sprint 2) ──────────────────────────────────────────
+    def interview(self, agent, world, question: str, history: list | None = None) -> str:
+        """Debug-grade interview answer: surface the memories most relevant to the
+        question plus the agent's current stance. Real depth needs a real LLM —
+        this keeps the endpoint alive in free worlds."""
+        mems = agent.memory.retrieve(question, n=3)
+        recalled = "; ".join(m.text for m in mems) if mems else "мало что вспоминается"
+        allies = sum(1 for r in agent.relationships.rel.values() if r.label == "ally")
+        rivals = sum(1 for r in agent.relationships.rel.values() if r.label == "rival")
+        return (f"Хм... если честно — вот что приходит на ум: {recalled}. "
+                f"Сейчас у меня {allies} союзник(ов) и {rivals} соперник(ов), "
+                f"держусь как могу.")

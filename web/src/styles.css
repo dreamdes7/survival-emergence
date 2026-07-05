@@ -866,3 +866,38 @@ body {
   border-left: 3px solid rgba(188, 75, 43, 0.55);
 }
 .saga-text { font-style: italic; line-height: 1.45; opacity: 0.95; }
+
+/* ── Survivor interview (chat inside the agent modal) ───────────────────────── */
+.cc-interview { display: flex; flex-direction: column; gap: 6px; }
+.cc-iv-log {
+  max-height: 180px; overflow-y: auto; display: flex; flex-direction: column;
+  gap: 6px; padding: 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.14);
+}
+.iv-turn { padding: 6px 10px; border-radius: 10px; font-size: 12.5px; line-height: 1.45; max-width: 92%; }
+.iv-q { align-self: flex-end; background: rgba(43, 209, 196, 0.16); }
+.iv-a { align-self: flex-start; background: rgba(188, 75, 43, 0.14); font-style: italic; }
+.iv-wait { opacity: 0.6; }
+.cc-iv-form { display: flex; gap: 6px; }
+.cc-iv-form input {
+  flex: 1; padding: 7px 10px; border-radius: 8px; border: 1px solid rgba(120, 90, 70, 0.35);
+  background: rgba(255, 255, 255, 0.06); color: inherit; font: inherit; font-size: 12.5px;
+}
+.cc-iv-form button {
+  padding: 6px 14px; border-radius: 8px; border: none; cursor: pointer;
+  background: rgba(43, 209, 196, 0.30); color: inherit; font-size: 14px;
+}
+.cc-iv-form button:disabled { opacity: 0.5; cursor: wait; }
+
+/* ── Replay scrubber ─────────────────────────────────────────────────────────── */
+.replay-bar {
+  position: absolute; left: 50%; bottom: 64px; transform: translateX(-50%);
+  display: flex; align-items: center; gap: 10px; padding: 8px 14px;
+  border-radius: 12px; z-index: 30; min-width: 420px;
+}
+.replay-tag { font-size: 12px; font-weight: 700; letter-spacing: 0.04em; color: #e8b866; }
+.replay-bar input[type="range"] { flex: 1; accent-color: #e8b866; }
+.replay-label { font-size: 12px; font-variant-numeric: tabular-nums; opacity: 0.9; min-width: 84px; }
+.replay-bar button {
+  border: none; background: rgba(255, 255, 255, 0.10); color: inherit;
+  border-radius: 7px; padding: 3px 9px; cursor: pointer;
+}

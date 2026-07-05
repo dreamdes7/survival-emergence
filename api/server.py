@@ -311,6 +311,31 @@ async def sim_manifest(sim_id: str) -> dict:
     return world_manifest(r.world)
 
 
+@app.post("/sims/{sim_id}/agents/{agent_id}/interview")
+async def sim_interview(sim_id: str, agent_id: str, body: dict) -> dict:
+    """Talk to a survivor (or a ghost — dead agents answer too). The agent
+    replies from its own memories/beliefs via its own brain; stub agents give a
+    plain memory readout. Works live or paused; the call is a pure read of agent
+    state plus one LLM request, so it never mutates the simulation."""
+    r = _get_runner(sim_id)
+    if r.world is None:
+        raise HTTPException(status_code=409, detail="Simulation not started")
+    agent = r.world.agent_by_id(agent_id)
+    if agent is None:
+        raise HTTPException(status_code=404, detail=f"Agent '{agent_id}' not found")
+    question = str(body.get("question", "")).strip()
+    if not question:
+        raise HTTPException(status_code=422, detail="question is required")
+    history = body.get("history") or []
+
+    brain = r.llm.brain_for(agent) if hasattr(r.llm, "brain_for") else r.llm.stub
+    answer = await asyncio.to_thread(brain.interview, agent, r.world, question, history)
+    if not answer:                      # real-LLM failure -> honest stub readout
+        from llm.stub import HeuristicLLM
+        answer = HeuristicLLM().interview(agent, r.world, question, history)
+    return {"agent": agent.name, "status": agent.status, "answer": answer}
+
+
 @app.get("/sims/{sim_id}/replay")
 async def sim_replay(sim_id: str) -> dict:
     return {"snapshots": _get_runner(sim_id).replay}

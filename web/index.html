@@ -21,6 +21,15 @@
         <button type="button" data-zoom="reset" title="Reset view">⤢</button>
         <span class="vt-sep"></span>
         <button type="button" id="pause-btn" data-control="pause" title="Pause / resume">⏸</button>
+        <button type="button" id="replay-btn" title="Replay — отмотать историю">⏪</button>
+      </div>
+
+      <!-- Replay scrubber (hidden until replay mode) -->
+      <div id="replay-bar" class="replay-bar floaty" hidden>
+        <span class="replay-tag">⏪ replay</span>
+        <input type="range" id="replay-slider" min="0" max="0" value="0">
+        <span id="replay-label" class="replay-label"></span>
+        <button type="button" id="replay-close" title="Вернуться в прямой эфир">✕</button>
       </div>
 
       <!-- LEFT dock — identity · simulations · activity (one cohesive panel) -->
@@ -78,6 +87,15 @@
           <div class="cc-beliefs" id="cc-beliefs"></div>
           <div class="cc-section-label">Diary</div>
           <div class="cc-diary" id="cc-diary"></div>
+          <div class="cc-section-label">Интервью</div>
+          <div class="cc-interview">
+            <div id="cc-iv-log" class="cc-iv-log"></div>
+            <form id="cc-iv-form" class="cc-iv-form">
+              <input id="cc-iv-input" type="text" autocomplete="off"
+                     placeholder="Спроси выжившего…">
+              <button type="submit" title="Спросить">→</button>
+            </form>
+          </div>
         </div>
         <div id="cc-struct-view" hidden>
           <div id="cc-struct-body"></div>
