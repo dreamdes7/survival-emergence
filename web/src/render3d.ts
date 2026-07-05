@@ -40,7 +40,12 @@ const GradeShader = {
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     void main() {
+      // subtle radial chromatic aberration — a lens, not a framebuffer
+      vec2 dir = vUv - 0.5;
+      vec2 off = dir * dot(dir, dir) * 0.012;
       vec4 c = texture2D(tDiffuse, vUv);
+      c.r = texture2D(tDiffuse, vUv - off).r;
+      c.b = texture2D(tDiffuse, vUv + off).b;
       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
 
       // split toning: shadows drift teal, highlights drift gold
@@ -62,8 +67,14 @@ const GradeShader = {
       float d = distance(vUv, vec2(0.5));
       c.rgb *= 1.0 - smoothstep(0.38, 0.9, d) * 0.38;
 
-      // live grain
-      c.rgb += (hash(vUv * vec2(1920.0, 1080.0) + fract(uTime) * 61.0) - 0.5) * 0.030;
+      // FILM grain (Dehancer-style): two octaves — fine sparkle + coarse
+      // clumps — living in shadows and mids, melting away in the highlights
+      float g1 = hash(vUv * vec2(1710.0, 1010.0) + fract(uTime) * 61.0) - 0.5;
+      float g2 = hash(floor(vUv * vec2(640.0, 380.0)) / vec2(640.0, 380.0)
+                      + fract(uTime * 0.73) * 17.0) - 0.5;
+      float grain = g1 * 0.62 + g2 * 0.38;
+      float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
+      c.rgb += grain * 0.052 * gw;
       gl_FragColor = c;
     }`,
 };
@@ -412,6 +423,39 @@ function pick(e: PointerEvent): void {
   }
 }
 
+// Hand-painted paper wash: soft irregular blotches stamped on a near-white
+// canvas, tiled in world space over the whole island. Multiplied under the
+// vertex colours it turns "coloured polygons" into one painted surface.
+let paintTex: THREE.Texture | null = null;
+
+function paintTexture(n: number): THREE.Texture {
+  if (!paintTex) {
+    const size = 256;
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = size;
+    const ctx = cv.getContext("2d")!;
+    ctx.fillStyle = "#ffffff";
+    ctx.fillRect(0, 0, size, size);
+    let s = 92821;
+    const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
+    for (let i = 0; i < 340; i += 1) {
+      const x = rnd() * size, y = rnd() * size, r = 6 + rnd() * 26;
+      const dark = rnd() < 0.5;
+      const a = 0.028 + rnd() * 0.05;
+      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+      grad.addColorStop(0, dark ? `rgba(96,116,102,${a})` : `rgba(255,252,238,${a * 1.2})`);
+      grad.addColorStop(1, "rgba(0,0,0,0)");
+      ctx.fillStyle = grad;
+      ctx.fillRect(x - r, y - r, r * 2, r * 2);
+    }
+    paintTex = new THREE.CanvasTexture(cv);
+    paintTex.wrapS = paintTex.wrapT = THREE.RepeatWrapping;
+    paintTex.colorSpace = THREE.SRGBColorSpace;
+  }
+  paintTex.repeat.set(n / 11, n / 11);
+  return paintTex;
+}
+
 // ── terrain ───────────────────────────────────────────────────────────────────
 function buildTerrain(st: WorldState): void {
   terrainGroup?.removeFromParent();
@@ -483,6 +527,8 @@ function buildTerrain(st: WorldState): void {
     const ySpan = Math.max(va.y, vb.y, vc.y) - Math.min(va.y, vb.y, vc.y);
     if (cy > 0.05 && slope < 0.6 && ySpan > 0.45) {
       col.copy(cCliff).lerp(cCliffDark, Math.max(0, Math.min(1, 1.6 - cy * 0.4)) * 0.5);
+      // painted strata: faint horizontal bands across the wall (Bad North cliffs)
+      if (Math.floor(cy / 0.42) % 2 === 0) col.offsetHSL(0, 0, 0.035);
     } else if (cy < 0.42) {
       col.copy(cSand);
     } else if (cy > 3.4) {
@@ -511,10 +557,48 @@ function buildTerrain(st: WorldState): void {
     }
   }
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
-  geo.computeVertexNormals();
+
+  // HYBRID normals — the cure for "flat-painted polygons". Gentle ground gets
+  // analytic smooth normals from the height field (matte airbrushed rolling
+  // meadows, no facet checker), while steep terrace walls keep their crisp
+  // per-face normals. Faceting survives only where it means something.
+  const normals = new Float32Array(p2.count * 3);
+  const smoothNormal = (wx: number, wz: number, out: THREE.Vector3): void => {
+    const e = 0.7;
+    const hx = heightAt(wx + e, wz) - heightAt(wx - e, wz);
+    const hz = heightAt(wx, wz + e) - heightAt(wx, wz - e);
+    out.set(-hx / (2 * e), 1, -hz / (2 * e)).normalize();
+  };
+  const sn = new THREE.Vector3();
+  for (let f = 0; f < p2.count; f += 3) {
+    va.fromBufferAttribute(p2, f);
+    vb.fromBufferAttribute(p2, f + 1);
+    vc.fromBufferAttribute(p2, f + 2);
+    ab.subVectors(vb, va);
+    ac.subVectors(vc, va);
+    nrm.crossVectors(ab, ac).normalize();
+    const crisp = nrm.y < 0.78;                    // terrace wall -> keep facet
+    for (let v = 0; v < 3; v += 1) {
+      if (crisp) {
+        normals[(f + v) * 3] = nrm.x;
+        normals[(f + v) * 3 + 1] = nrm.y;
+        normals[(f + v) * 3 + 2] = nrm.z;
+      } else {
+        smoothNormal(p2.getX(f + v), p2.getZ(f + v), sn);
+        normals[(f + v) * 3] = sn.x;
+        normals[(f + v) * 3 + 1] = sn.y;
+        normals[(f + v) * 3 + 2] = sn.z;
+      }
+    }
+  }
+  geo.setAttribute("normal", new THREE.BufferAttribute(normals, 3));
+
   const mesh = new THREE.Mesh(
     geo,
-    new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }),
+    new THREE.MeshLambertMaterial({
+      vertexColors: true,
+      map: paintTexture(n),        // hand-painted paper wash over everything
+    }),
   );
   mesh.castShadow = true;
   mesh.receiveShadow = true;
