@@ -231,6 +231,43 @@ const KuwaharaShader = {
     }`,
 };
 
+// Tilt-shift: a gentle gradient blur away from a horizontal focus band — the
+// classic miniature-diorama cue, and in watercolour terms the distance going
+// wet-on-wet soft while the subject stays crisp.
+const TiltShiftShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uRes: { value: new THREE.Vector2(1280, 720) },
+    uFocus: { value: 0.46 },
+    uMax: { value: 2.6 },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uRes;
+    uniform float uFocus;
+    uniform float uMax;
+    varying vec2 vUv;
+    void main() {
+      float band = smoothstep(0.10, 0.52, abs(vUv.y - uFocus));
+      vec4 c = texture2D(tDiffuse, vUv);
+      if (band < 0.02) { gl_FragColor = c; return; }
+      vec2 r = band * uMax / uRes;
+      vec4 acc = c * 0.24;
+      acc += texture2D(tDiffuse, vUv + vec2( 1.0,  0.3) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2(-1.0, -0.3) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2( 0.3, -1.0) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2(-0.3,  1.0) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2( 0.8, -0.8) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2(-0.8,  0.8) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2( 0.8,  0.8) * r) * 0.095;
+      acc += texture2D(tDiffuse, vUv + vec2(-0.8, -0.8) * r) * 0.095;
+      gl_FragColor = acc;
+    }`,
+};
+
 function lam(color: number): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ color, flatShading: true });
 }
@@ -303,12 +340,14 @@ const LIGHT_KEYS: LightKey[] = [
   { t: 0.50, sun: 0xff9a70, sunI: 0.95, elev: 0.07, azim: 1.6,
     sky: 0xd8b8c8, gnd: 0x585868, hemiI: 0.62,
     fog: 0xc9aab6, top: 0x5a6a9a, hor: 0xf0a888, water: 0x6f92a4, dark: 0.35 },
-  { t: 0.62, sun: 0x9db8dd, sunI: 0.35, elev: 0.5, azim: -0.9,
-    sky: 0x35507a, gnd: 0x1c2430, hemiI: 0.38,
-    fog: 0x0e1e34, top: 0x0a1526, hor: 0x24364e, water: 0x2e4a5c, dark: 1 },
-  { t: 0.90, sun: 0x9db8dd, sunI: 0.35, elev: 0.35, azim: -1.4,
-    sky: 0x35507a, gnd: 0x1c2430, hemiI: 0.38,
-    fog: 0x101f30, top: 0x0c1728, hor: 0x2a3850, water: 0x2e4a5c, dark: 1 },
+  // moonlit, not pitch-black: a strong cool moon + lifted blue ambient keep
+  // the island readable all night
+  { t: 0.62, sun: 0xb9cdec, sunI: 0.75, elev: 0.5, azim: -0.9,
+    sky: 0x4a648e, gnd: 0x2a3442, hemiI: 0.55,
+    fog: 0x1c2e46, top: 0x14233a, hor: 0x354864, water: 0x3c5a72, dark: 1 },
+  { t: 0.90, sun: 0xb9cdec, sunI: 0.75, elev: 0.35, azim: -1.4,
+    sky: 0x4a648e, gnd: 0x2a3442, hemiI: 0.55,
+    fog: 0x1e2f45, top: 0x16253c, hor: 0x394c68, water: 0x3c5a72, dark: 1 },
 ];
 // interpolated per frame into these (avoids per-frame allocations)
 const LC = {
@@ -366,13 +405,16 @@ let sun: THREE.DirectionalLight;
 let ambient: THREE.HemisphereLight;
 let waterMesh: THREE.Mesh;
 let waterShader: { uniforms: Record<string, { value: number }> } | null = null;
-let waterTexA: THREE.Texture | null = null;   // painted ripples on the surface
-let shimmerMesh: THREE.Mesh | null = null;    // counter-scrolling second layer
-let shimmerMat: THREE.MeshBasicMaterial | null = null;
 let cloudMats: THREE.MeshBasicMaterial[] = [];   // per cluster: occlusion fade
+let lumSprite: THREE.Sprite | null = null;       // sun by day, moon by night
+let cirrusMat: THREE.SpriteMaterial | null = null;
+let moonPath: THREE.Mesh | null = null;          // glimmering strip on the sea
+let rainMesh: THREE.LineSegments | null = null;
+let rainBase: Float32Array | null = null;        // (x, y0, z, speed) per drop
 let composer: EffectComposer;
 let gradePass: ShaderPass;
 let kuwaharaPass: ShaderPass;
+let tiltPass: ShaderPass;
 let fxaaPass: ShaderPass;
 let terrainGroup: THREE.Group | null = null;
 let propsGroup: THREE.Group | null = null;
@@ -578,6 +620,17 @@ function heightAt(wx: number, wz: number): number {
   return level < 0 ? SEA_FLOOR : PLATE_TOP[level];
 }
 
+// Placement height: near a plate rim the bevel dips below PLATE_TOP, so a
+// single-point sample let props and meeples sink into the lip. Take the max
+// over a small footprint instead — standing slightly proud beats being buried.
+function groundY(wx: number, wz: number): number {
+  return Math.max(
+    heightAt(wx, wz),
+    heightAt(wx + 0.16, wz), heightAt(wx - 0.16, wz),
+    heightAt(wx, wz + 0.16), heightAt(wx, wz - 0.16),
+  );
+}
+
 // ── scene bootstrap ───────────────────────────────────────────────────────────
 function ensureRenderer(stageEl: HTMLElement): void {
   if (renderer) return;
@@ -621,6 +674,41 @@ function ensureRenderer(stageEl: HTMLElement): void {
   markDecor(skyMesh);
   scene.add(skyMesh);
 
+  // one luminary: a soft disc riding the light direction — warm and wide by
+  // day (the sun), small and silver at night (the moon); bloom halos it
+  const disc = (() => {
+    const cv = document.createElement("canvas");
+    cv.width = cv.height = 128;
+    const ctx = cv.getContext("2d")!;
+    const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+    g.addColorStop(0, "rgba(255,255,255,1)");
+    g.addColorStop(0.42, "rgba(255,255,255,0.92)");
+    g.addColorStop(0.55, "rgba(255,255,255,0.25)");
+    g.addColorStop(1, "rgba(255,255,255,0)");
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, 128, 128);
+    return new THREE.CanvasTexture(cv);
+  })();
+  lumSprite = new THREE.Sprite(new THREE.SpriteMaterial({
+    map: disc, transparent: true, depthWrite: false, fog: false,
+  }));
+  lumSprite.scale.setScalar(26);
+  markDecor(lumSprite);
+  scene.add(lumSprite);
+
+  // moon path: an additive ripple strip pointing at the moon, night only
+  const mpGeo = new THREE.PlaneGeometry(34, 2.8);
+  mpGeo.rotateX(-Math.PI / 2);
+  const mpTex = rippleTexture(3);
+  mpTex.repeat.set(7, 1);
+  moonPath = new THREE.Mesh(mpGeo, new THREE.MeshBasicMaterial({
+    map: mpTex, color: 0xbcd8ff, transparent: true, opacity: 0,
+    blending: THREE.AdditiveBlending, depthWrite: false,
+  }));
+  moonPath.position.y = 0.03;
+  markDecor(moonPath);
+  scene.add(moonPath);
+
   camera = new THREE.PerspectiveCamera(32, 1, 0.1, 500);
   camera.layers.enable(1);                 // solids on 0, atmosphere on 1
 
@@ -661,7 +749,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
   // Painted ripples scroll slowly across it (map), with a counter-scrolling
   // shimmer layer above for parallax — texture and volume instead of a void.
-  waterTexA = rippleTexture(1);
+  const waterTexA = rippleTexture(1);
   waterTexA.repeat.set(26, 26);                // ~18 world units per tile
   const waterMatl = new THREE.MeshPhongMaterial({
     color: 0x7fb6ba, transparent: true, opacity: 0.5,
@@ -669,9 +757,14 @@ function ensureRenderer(stageEl: HTMLElement): void {
     map: waterTexA,
   });                                    // the shelf plate supplies the turquoise
   waterMat = waterMatl;                  // tinted per time-of-day in tick()
+  // The water ANIMATION is a breath, not a slide: two samples of the ripple
+  // sheet at different scales cross-fade with a spatially-varying weight, so
+  // strokes shimmer in place. (The old scrolling offset + a counter-scrolling
+  // second layer read as twitchy drifting blotches.) Vertex waves are near
+  // zero in calm weather — the surf shader owns the coastal motion now.
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
-    shader.uniforms.uAmp = { value: 0.03 };
+    shader.uniforms.uAmp = { value: 0.004 };
     shader.vertexShader = "uniform float uTime;\nuniform float uAmp;\n" +
       shader.vertexShader.replace(
         "#include <begin_vertex>",
@@ -680,25 +773,23 @@ function ensureRenderer(stageEl: HTMLElement): void {
                         + cos(position.y * 0.45 + uTime * 0.8) * uAmp
                         + sin((position.x + position.y) * 0.22 + uTime * 0.5) * uAmp * 1.4;`,
       );
+    shader.fragmentShader = "uniform float uTime;\n" +
+      shader.fragmentShader.replace(
+        "#include <map_fragment>",
+        `vec4 tA = texture2D(map, vMapUv);
+         vec4 tB = texture2D(map, vMapUv * 1.43 + vec2(0.37, 0.11));
+         float tw = 0.5 + 0.5 * sin(uTime * 0.55 + (tA.g - tB.g) * 7.0);
+         diffuseColor *= mix(tA, tB, tw);`,
+      );
     waterShader = shader as unknown as { uniforms: Record<string, { value: number }> };
   };
   waterMesh = new THREE.Mesh(new THREE.PlaneGeometry(480, 480, 110, 110), waterMatl);
   waterMesh.rotation.x = -Math.PI / 2;
   waterMesh.position.y = 0;
-  waterMesh.receiveShadow = true;
+  // no receiveShadow: cloud shadows on open water read as random dark
+  // blotches sliding around — the single ugliest thing in the old sea
   markDecor(waterMesh);
   scene.add(waterMesh);
-  const shimmerTex = rippleTexture(2);
-  shimmerTex.repeat.set(15, 15);               // coarser + opposite drift = depth
-  shimmerMat = new THREE.MeshBasicMaterial({
-    map: shimmerTex, transparent: true, opacity: 0.10,
-    color: 0xcdeee4, depthWrite: false,
-  });
-  shimmerMesh = new THREE.Mesh(new THREE.PlaneGeometry(480, 480), shimmerMat);
-  shimmerMesh.rotation.x = -Math.PI / 2;
-  shimmerMesh.position.y = 0.02;
-  markDecor(shimmerMesh);
-  scene.add(shimmerMesh);
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(1000, 1000),
     new THREE.MeshLambertMaterial({ color: C.seaDeep }),
@@ -741,6 +832,8 @@ function ensureRenderer(stageEl: HTMLElement): void {
   gradePass.uniforms.uPaper.value = paperTexture();
   gradePass.uniforms.uInk.value = inkTarget.texture;
   composer.addPass(gradePass);
+  tiltPass = new ShaderPass(TiltShiftShader);
+  composer.addPass(tiltPass);
   fxaaPass = new ShaderPass(FXAAShader);
   composer.addPass(fxaaPass);
 
@@ -1160,7 +1253,6 @@ function buildTerrain(st: WorldState): void {
 
   // Sea + sky furniture follows the island.
   waterMesh.position.set(cx, 0, cz);
-  shimmerMesh?.position.set(cx, 0.02, cz);
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildSurf(st);
   buildWaves(cx, cz, n);
@@ -1394,6 +1486,7 @@ function buildWaves(cx: number, cz: number, n: number): void {
 // soft moving shadows on the land below.
 function buildClouds(cx: number, cz: number, n: number): void {
   cloudsGroup?.removeFromParent();
+  rainMesh?.removeFromParent();
   cloudsGroup = new THREE.Group();
   // just below pure white: unlit slabs at 1.0 fed the bloom pass and glowed.
   // One material per cluster: tick() night-tints them AND fades any cloud
@@ -1429,7 +1522,58 @@ function buildClouds(cx: number, cz: number, n: number): void {
     cluster.userData.speed = 0.3 + hashStr(`cv${i}`) * 0.45;
     cloudsGroup.add(cluster);
   }
+  // cirrus: three flat painted streaks very high up — they fill the empty top
+  // third of the frame without competing with the slab clouds
+  const streak = (() => {
+    const cv = document.createElement("canvas");
+    cv.width = 256; cv.height = 64;
+    const ctx = cv.getContext("2d")!;
+    for (const [sx, sy, r, a] of [[70, 34, 60, 0.5], [140, 28, 80, 0.6], [200, 36, 50, 0.45]] as const) {
+      const g = ctx.createRadialGradient(sx, sy, 0, sx, sy, r);
+      g.addColorStop(0, `rgba(255,255,255,${a})`);
+      g.addColorStop(1, "rgba(255,255,255,0)");
+      ctx.save();
+      ctx.translate(sx, sy);
+      ctx.scale(1, 0.22);
+      ctx.translate(-sx, -sy);
+      ctx.fillStyle = g;
+      ctx.fillRect(sx - r, sy - r, r * 2, r * 2);
+      ctx.restore();
+    }
+    return new THREE.CanvasTexture(cv);
+  })();
+  cirrusMat = new THREE.SpriteMaterial({
+    map: streak, transparent: true, opacity: 0.3, depthWrite: false, fog: false,
+  });
+  for (let i = 0; i < 3; i += 1) {
+    const c = new THREE.Sprite(cirrusMat);
+    const a = i * 2.4 + 0.8;
+    c.position.set(cx + Math.cos(a) * n * (0.8 + i * 0.2), 27 + i * 5,
+      cz + Math.sin(a) * n * 0.9);
+    c.scale.set(30 + i * 9, 4 + i, 1);
+    cloudsGroup.add(c);
+  }
+  markDecor(cloudsGroup);
   scene.add(cloudsGroup);
+
+  // rain: slanted streaks over the island, alive only while a storm blows
+  const DROPS = 150;
+  rainBase = new Float32Array(DROPS * 4);
+  const rp = new Float32Array(DROPS * 6);
+  for (let i = 0; i < DROPS; i += 1) {
+    rainBase[i * 4] = cx + (hashStr(`rx${i}`) - 0.5) * n * 1.25;
+    rainBase[i * 4 + 1] = hashStr(`ry${i}`) * 14;
+    rainBase[i * 4 + 2] = cz + (hashStr(`rz${i}`) - 0.5) * n * 1.25;
+    rainBase[i * 4 + 3] = 9 + hashStr(`rv${i}`) * 5;
+  }
+  const rainGeo = new THREE.BufferGeometry();
+  rainGeo.setAttribute("position", new THREE.BufferAttribute(rp, 3));
+  rainMesh = new THREE.LineSegments(rainGeo, new THREE.LineBasicMaterial({
+    color: 0xd4e2ec, transparent: true, opacity: 0, depthWrite: false,
+  }));
+  rainMesh.frustumCulled = false;
+  markDecor(rainMesh);
+  scene.add(rainMesh);
 }
 
 // Sky life: gulls circling the island by day, butterflies over the meadows.
@@ -1693,6 +1837,10 @@ function makePool(): THREE.Group {
   return g;
 }
 
+const propReflMat = new THREE.MeshBasicMaterial({
+  color: 0x16323a, transparent: true, opacity: 0.1, depthWrite: false,
+});
+
 function buildProps(st: WorldState): void {
   propsGroup?.removeFromParent();
   propsGroup = new THREE.Group();
@@ -1711,8 +1859,22 @@ function buildProps(st: WorldState): void {
     else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
-    obj.position.set(wx, Math.max(0.02, heightAt(wx, wz)), wz);
+    const gy = Math.max(0.02, groundY(wx, wz));
+    obj.position.set(wx, gy, wz);
     propsGroup.add(obj);
+
+    // shoreline trees lay a still dark reflection on the water (Bad North)
+    if ((k === "wood" || k === "fruit_tree") && gy < 0.75) {
+      const refl = obj.clone(true);
+      refl.traverse((o) => {
+        const mm = o as THREE.Mesh;
+        if (mm.isMesh) { mm.material = propReflMat; mm.castShadow = false; }
+      });
+      refl.scale.y = -1;
+      refl.position.set(wx, -gy - 0.05, wz);
+      markDecor(refl);
+      propsGroup.add(refl);
+    }
   }
 
   // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
@@ -1729,7 +1891,7 @@ function buildProps(st: WorldState): void {
         const ox = hash01(tx, ty, 92 + k) * 0.8 + 0.1;
         const oz = hash01(tx, ty, 95 + k) * 0.8 + 0.1;
         const wx = tx + ox, wz = ty + oz;
-        const gy = heightAt(wx, wz);
+        const gy = groundY(wx, wz);
         if (gy < 0.15) continue;
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
         const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
@@ -2230,7 +2392,7 @@ function buildStructs(st: WorldState): void {
   for (const s of st.structures) {
     const obj = makeStructure(s);
     const wx = s.x + 0.5, wz = s.y + 0.5;
-    const gy = Math.max(0.02, heightAt(wx, wz));
+    const gy = Math.max(0.02, groundY(wx, wz));
     obj.position.set(wx, gy, wz);
     obj.userData.structId = s.id;
     structsGroup.add(obj);
@@ -2335,10 +2497,12 @@ function makeMeeple3d(a: AgentState): THREE.Group {
   return g;
 }
 
-function syncAgents3d(st: WorldState): void {
-  const seen = new Set<string>();
-  // Agents sharing a tile fan out around its centre (deterministic order by
-  // id) so meeples never merge into one another while chatting face to face.
+// Stage-manage the meeples: fan out tile-mates, push everyone OUT of structure
+// footprints (nobody stands inside a burning campfire), then relax pairwise
+// distances so the crowd forms a loose circle AROUND a point of interest
+// instead of a single merged blob (this also un-stacks the speech bubbles).
+function placeAgents(st: WorldState): Map<string, { x: number; z: number }> {
+  const targets = new Map<string, { x: number; z: number }>();
   const byTile = new Map<string, string[]>();
   for (const a of st.agents) {
     const key = `${a.x},${a.y}`;
@@ -2348,20 +2512,69 @@ function syncAgents3d(st: WorldState): void {
   }
   for (const list of byTile.values()) list.sort();
   for (const a of st.agents) {
-    seen.add(a.id);
-    let v = agents3d.get(a.id);
     let tx = a.x + 0.5, tz = a.y + 0.5;
     const mates = byTile.get(`${a.x},${a.y}`)!;
     if (mates.length > 1) {
       const i = mates.indexOf(a.id);
       const ang = (i / mates.length) * Math.PI * 2 + hashStr(`${a.x},${a.y}`) * 6.28;
-      const rad = mates.length === 2 ? 0.17 : 0.26;
+      const rad = mates.length === 2 ? 0.24 : 0.36;
       tx += Math.cos(ang) * rad;
       tz += Math.sin(ang) * rad;
     }
+    targets.set(a.id, { x: tx, z: tz });
+  }
+  // out of every structure footprint, with breathing room
+  for (const s of st.structures) {
+    const w = s.w || 1, h = s.h || 1;
+    const cx = s.x + w / 2, cz = s.y + h / 2;
+    const clearR = Math.max(w, h) / 2 + 0.52;
+    for (const [id, t] of targets) {
+      if (t.x < s.x - 0.2 || t.x > s.x + w + 0.2
+        || t.z < s.y - 0.2 || t.z > s.y + h + 0.2) continue;
+      let dx = t.x - cx, dz = t.z - cz;
+      let len = Math.hypot(dx, dz);
+      if (len < 0.01) {
+        const ang = hashStr(id + s.id) * Math.PI * 2;
+        dx = Math.cos(ang); dz = Math.sin(ang); len = 1;
+      }
+      t.x = cx + (dx / len) * clearR;
+      t.z = cz + (dz / len) * clearR;
+    }
+  }
+  // pairwise relaxation: everyone keeps personal space (readable bubbles)
+  const ids = [...targets.keys()].sort();
+  const MIN = 0.5;
+  for (let pass = 0; pass < 3; pass += 1) {
+    for (let i = 0; i < ids.length; i += 1) {
+      for (let j = i + 1; j < ids.length; j += 1) {
+        const p = targets.get(ids[i])!, q = targets.get(ids[j])!;
+        let dx = q.x - p.x, dz = q.z - p.z;
+        let len = Math.hypot(dx, dz);
+        if (len >= MIN) continue;
+        if (len < 0.01) {
+          const ang = hashStr(ids[i] + ids[j]) * Math.PI * 2;
+          dx = Math.cos(ang); dz = Math.sin(ang); len = 1;
+        }
+        const push = (MIN - Math.min(len, MIN)) / 2;
+        p.x -= (dx / len) * push; p.z -= (dz / len) * push;
+        q.x += (dx / len) * push; q.z += (dz / len) * push;
+      }
+    }
+  }
+  return targets;
+}
+
+function syncAgents3d(st: WorldState): void {
+  const seen = new Set<string>();
+  const targets = placeAgents(st);
+  for (const a of st.agents) {
+    seen.add(a.id);
+    let v = agents3d.get(a.id);
+    const t = targets.get(a.id)!;
+    const tx = t.x, tz = t.z;
     if (!v) {
       const group = makeMeeple3d(a);
-      group.position.set(tx, Math.max(0.02, heightAt(tx, tz)), tz);
+      group.position.set(tx, Math.max(0.02, groundY(tx, tz)), tz);
       group.userData.agentId = a.id;
       scene.add(group);
       v = { group, x: tx, z: tz, tx, tz, status: a.status };
@@ -2444,7 +2657,9 @@ export function agentScreen3d(id: string): { x: number; y: number } | null {
 // ── per-frame ─────────────────────────────────────────────────────────────────
 const stormGrey = new THREE.Color(0x8f9aa0);
 const nightCloud = new THREE.Color(0x39485a);
+const moonTint = new THREE.Color(0xe4edff);
 const tmpColor = new THREE.Color();
+const tmpVecA = new THREE.Vector3();
 const clock = new THREE.Clock();
 
 function tick(): void {
@@ -2465,6 +2680,7 @@ function tick(): void {
         .set(1 / (w * pr), 1 / (h * pr));
       (gradePass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       (kuwaharaPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
+      (tiltPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       inkTarget?.setSize(Math.max(1, Math.round(w * pr)), Math.max(1, Math.round(h * pr)));
       camera.aspect = w / Math.max(1, h);
       camera.updateProjectionMatrix();
@@ -2482,7 +2698,7 @@ function tick(): void {
     }
     const walking = dist > 0.05;
     const bob = walking ? Math.abs(Math.sin(performance.now() / 90)) * 0.05 : 0;
-    v.group.position.set(v.x, Math.max(0.02, heightAt(v.x, v.z)) + bob, v.z);
+    v.group.position.set(v.x, Math.max(0.02, groundY(v.x, v.z)) + bob, v.z);
     if (walking) v.group.rotation.y = Math.atan2(dx, dz);
     // arm swing while walking, relaxed at rest
     const arms = v.group.userData.arms as THREE.Mesh[] | undefined;
@@ -2526,6 +2742,59 @@ function tick(): void {
   if (waterMat) waterMat.color.copy(LC.water).lerp(stormGrey, stormMix * 0.3);
   for (const l of fireLights) {
     l.intensity = (4.5 + Math.sin(performance.now() / 120) * 1.2) * (0.4 + nightMix * 0.9);
+  }
+
+  const skyNow = performance.now() / 1000;
+  // the luminary rides the light direction: warm wide sun ↔ small silver moon
+  if (lumSprite) {
+    tmpVecA.copy(sun.position);
+    tmpVecA.x -= islandCX; tmpVecA.z -= islandCZ;
+    tmpVecA.normalize();
+    lumSprite.position.set(
+      islandCX + tmpVecA.x * 320,
+      Math.max(14, tmpVecA.y * 320),
+      islandCZ + tmpVecA.z * 320,
+    );
+    const m = lumSprite.material as THREE.SpriteMaterial;
+    m.color.setHex(0xffedb2).lerp(moonTint, nightMix);
+    m.opacity = (0.9 - stormMix * 0.6);
+    lumSprite.scale.setScalar(26 - nightMix * 13);
+  }
+  if (moonPath && state) {
+    const mat = moonPath.material as THREE.MeshBasicMaterial;
+    mat.opacity = Math.max(0, nightMix - 0.3) * 0.4 * (1 - stormMix * 0.7);
+    moonPath.visible = mat.opacity > 0.01;
+    if (moonPath.visible) {
+      const dx = sun.position.x - islandCX, dz = sun.position.z - islandCZ;
+      const dl = Math.hypot(dx, dz) || 1;
+      moonPath.position.set(
+        islandCX + (dx / dl) * (state.map.size * 0.5 + 14), 0.03,
+        islandCZ + (dz / dl) * (state.map.size * 0.5 + 14) * 0.9,
+      );
+      moonPath.rotation.y = Math.atan2(-dz / dl, dx / dl);
+      if (mat.map) mat.map.offset.x = skyNow * 0.015;   // the glimmer crawls
+    }
+  }
+  if (cirrusMat) cirrusMat.opacity = (0.3 - nightMix * 0.18) * (1 - stormMix * 0.8);
+
+  // rain, storm only: recompute streak endpoints while it falls
+  if (rainMesh && rainBase) {
+    const mat = rainMesh.material as THREE.LineBasicMaterial;
+    mat.opacity = stormMix * 0.45;
+    rainMesh.visible = stormMix > 0.02;
+    if (rainMesh.visible) {
+      const attr = rainMesh.geometry.getAttribute("position") as THREE.BufferAttribute;
+      const arr = attr.array as Float32Array;
+      const drops = rainBase.length / 4;
+      for (let i = 0; i < drops; i += 1) {
+        const bx = rainBase[i * 4], by = rainBase[i * 4 + 1];
+        const bz = rainBase[i * 4 + 2], sp = rainBase[i * 4 + 3];
+        const y = 14 - ((by + skyNow * sp) % 14);
+        arr[i * 6] = bx; arr[i * 6 + 1] = y; arr[i * 6 + 2] = bz;
+        arr[i * 6 + 3] = bx + 0.28; arr[i * 6 + 4] = y - 0.85; arr[i * 6 + 5] = bz + 0.06;
+      }
+      attr.needsUpdate = true;
+    }
   }
 
   // selection halo follows the selected agent
@@ -2572,7 +2841,7 @@ function tick(): void {
   stormMix += (storm - stormMix) * Math.min(1, dt * 1.2);
   if (waterShader) {
     waterShader.uniforms.uTime.value = now;
-    waterShader.uniforms.uAmp.value = 0.03 + stormMix * 0.1;
+    waterShader.uniforms.uAmp.value = 0.004 + stormMix * 0.09;
   }
   if (surfMat) {
     surfMat.uniforms.uTime.value = now;
@@ -2605,14 +2874,6 @@ function tick(): void {
         mat.opacity = (0.92 - nightMix * 0.18) * THREE.MathUtils.smoothstep(near, 12, 26);
       }
     }
-  }
-
-  // painted water drifts; the shimmer layer counter-scrolls for parallax depth
-  if (waterTexA) { waterTexA.offset.x = now * 0.0045; waterTexA.offset.y = now * 0.0016; }
-  if (shimmerMat && shimmerMat.map) {
-    shimmerMat.map.offset.x = -now * 0.003;
-    shimmerMat.map.offset.y = now * 0.0022;
-    shimmerMat.opacity = 0.10 - nightMix * 0.05 + stormMix * 0.04;
   }
 
   // wind: fronds swing, canopies breathe — faster and wider in a storm

@@ -9,7 +9,8 @@ import { agentCssInk, agentIndex, agentTint } from "./utils";
 import { closeModal, openAgentModal, openStructModal, pushEvent, renderChrome, stageEl, viewportTools } from "./ui";
 import { controlSim } from "./api";
 import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
-         invalidateVectorTerrain, makeCloudShadowCanvas } from "./vector";
+         invalidateVectorTerrain, makeFogCanvas, makeGrainCanvas, makeVignetteCanvas,
+         V } from "./vector";
 import { agentScreen3d, invalidate3d, setActive3d, sync3d } from "./render3d";
 import type { StructureState, WorldState } from "./types";
 
@@ -41,7 +42,16 @@ const nightOverlay = new Graphics();                // blue darkening at night
 let nightAlpha = 0;
 let glowTex: Texture | null = null;                 // additive glow for lit fires
 const glowSprites: { sprite: Sprite; base: number }[] = [];
+const beamSprites: { c: Container; v: number }[] = [];   // rotating lighthouse beams
 let glowT = 0;
+// The Lighthouse film layer (vector mode only): grain, vignette, lamp flicker.
+let filmGrain: TilingSprite | null = null;
+let filmVignette: Sprite | null = null;
+let filmFlicker: Graphics | null = null;
+let flickerAlpha = 0;
+let flickerTarget = 0;
+let flickerT = 0;
+let grainT = 0;
 let renderSeq = 0;
 let fittedMapKey = "";
 let isDragging = false;
@@ -70,12 +80,60 @@ export async function initPixi(): Promise<void> {
   app.ticker.add(animateClouds);
   app.ticker.add(animateNight);
   app.ticker.add(animateGlow);
+  app.ticker.add(animateFilm);
   glowTex = makeGlowTexture();
+
+  // Screen-space film layer above the world (visible only in vector mode).
+  filmGrain = new TilingSprite({ texture: Texture.from(makeGrainCanvas()),
+    width: stageEl.clientWidth || 800, height: stageEl.clientHeight || 600 });
+  filmGrain.blendMode = "multiply";
+  filmGrain.alpha = 0.42;
+  filmVignette = new Sprite(Texture.from(makeVignetteCanvas()));
+  filmVignette.blendMode = "multiply";
+  filmFlicker = new Graphics();
+  for (const o of [filmGrain, filmVignette, filmFlicker]) {
+    o.eventMode = "none";
+    o.visible = false;
+    app.stage.addChild(o);
+  }
+  sizeFilmLayer();
+
   bindViewportControls();
   new ResizeObserver(() => {
     fitCamera(true);
+    sizeFilmLayer();
     void render();
   }).observe(stageEl);
+}
+
+function sizeFilmLayer(): void {
+  const w = Math.max(1, stageEl.clientWidth), h = Math.max(1, stageEl.clientHeight);
+  if (filmGrain) { filmGrain.width = w; filmGrain.height = h; }
+  if (filmVignette) { filmVignette.width = w; filmVignette.height = h; }
+  filmFlicker?.clear().rect(0, 0, w, h).fill(0x000000);
+  if (filmFlicker) filmFlicker.alpha = 0;
+}
+
+// Live grain jitter + the uneasy lantern flicker of the whole frame.
+function animateFilm(): void {
+  const on = vectorMode();
+  if (filmGrain) filmGrain.visible = on;
+  if (filmVignette) filmVignette.visible = on;
+  if (filmFlicker) filmFlicker.visible = on;
+  if (!on) return;
+  const dt = app.ticker.deltaMS / 1000;
+  grainT += dt;
+  if (grainT > 0.09 && filmGrain) {
+    grainT = 0;
+    filmGrain.tilePosition.set(Math.floor(Math.random() * 96), Math.floor(Math.random() * 96));
+  }
+  flickerT += dt;
+  if (flickerT > 0.14) {
+    flickerT = 0;
+    flickerTarget = Math.random() < 0.82 ? Math.random() * 0.02 : 0.03 + Math.random() * 0.035;
+  }
+  flickerAlpha += (flickerTarget - flickerAlpha) * Math.min(1, dt * 14);
+  if (filmFlicker) filmFlicker.alpha = flickerAlpha * (0.6 + nightAlpha);
 }
 
 // New-world housekeeping, extracted from applyState: when the map identity
@@ -235,6 +293,63 @@ async function tinyTexture(name: string): Promise<Texture | null> {
   } catch {
     return null;
   }
+}
+
+// Low-poly structure cutouts served by Vite from web/public/vector-structures/.
+async function vectorStructureTexture(name: string): Promise<Texture | null> {
+  const url = `/vector-structures/${name}?v=${ASSET_VERSION}`;
+  const cached = textureCache.get(url);
+  if (cached) return cached;
+  try {
+    const loaded = await Assets.load<Texture>(url);
+    textureCache.set(url, loaded);
+    return loaded;
+  } catch {
+    return null;
+  }
+}
+
+// Nature prop cutouts (palms, boulders, bushes…) from web/public/vector-props/.
+async function vectorPropTexture(name: string): Promise<Texture | null> {
+  const url = `/vector-props/${name}?v=${ASSET_VERSION}`;
+  const cached = textureCache.get(url);
+  if (cached) return cached;
+  try {
+    const loaded = await Assets.load<Texture>(url);
+    textureCache.set(url, loaded);
+    return loaded;
+  } catch {
+    return null;
+  }
+}
+
+// Sprite spec for a resource node in the noir vector world. `size` = height in
+// tiles; `flip` mirrors by id hash for variety (palms have real L/R variants).
+type PropSpec = { file: string; size: number; anchorY: number; flip: boolean; shadowW: number };
+const PALM_FILES = ["palm_tree_left.png", "palm_tree_bent.png", "palm_tree_right.png"];
+
+function vectorPropSpec(kind: string, id: string): PropSpec | null {
+  const r = hashStr(id);
+  if (kind === "wood" || kind === "fruit_tree") {
+    return { file: PALM_FILES[Math.floor(r * PALM_FILES.length) % PALM_FILES.length],
+             size: 1.9 + r * 0.5, anchorY: 0.97, flip: false, shadowW: 0.52 };
+  }
+  if (kind === "rocks") {
+    return { file: "boulder.png", size: 0.85 + r * 0.3, anchorY: 0.93,
+             flip: r > 0.5, shadowW: 0.46 };
+  }
+  if (kind === "thicket") {
+    return r < 0.55
+      ? { file: "tall_grass_clump.png", size: 0.8 + r * 0.25, anchorY: 0.92,
+          flip: r > 0.75, shadowW: 0.3 }
+      : { file: "spiky_bush.png", size: 0.85 + r * 0.25, anchorY: 0.9,
+          flip: r > 0.8, shadowW: 0.38 };
+  }
+  if (kind === "spring") {
+    return { file: "spring_waterfall.png", size: 1.45, anchorY: 0.9,
+             flip: r > 0.5, shadowW: 0.5 };
+  }
+  return null;   // fishing / shell_bed / orerock keep their own path
 }
 
 async function silentTexture(path: string): Promise<Texture | null> {
@@ -509,10 +624,13 @@ function syncAgentDom(state: WorldState): void {
 }
 
 // Position each agent's name + bubble just above its head, in screen space.
+// In 3D, labels then push each other apart vertically (front-most keeps its
+// anchor) so overlapping speech bubbles stay readable when agents cluster.
 function updateOverlay(): void {
   const dt = app.ticker.deltaMS / 1000;
   const in3d = mode3d();
   const sc = camera.scale;
+  const items: { d: AgentDom; x: number; y: number }[] = [];
   for (const [id, d] of agentDom) {
     if (d.ttl > 0) {
       d.ttl -= dt;
@@ -521,7 +639,7 @@ function updateOverlay(): void {
     if (in3d) {
       const p = agentScreen3d(id);
       if (!p) { d.wrap.style.transform = "translate(-9999px, -9999px)"; continue; }
-      d.wrap.style.transform = `translate(${p.x}px, ${p.y}px) translate(-50%, -100%)`;
+      items.push({ d, x: p.x, y: p.y });
       continue;
     }
     const vis = agentVis.get(id);
@@ -529,6 +647,25 @@ function updateOverlay(): void {
     const sx = mapRoot.position.x + (vis.px + 16) * sc;
     const sy = mapRoot.position.y + (vis.py + (vis.isPawn ? -14 : -2)) * sc;
     d.wrap.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%)`;
+  }
+  if (!items.length) return;
+  // greedy de-overlap: closest to the camera (largest y) anchors first, the
+  // rest climb above whatever is already placed
+  items.sort((a, b) => b.y - a.y);
+  const placed: { x: number; top: number; bottom: number; w: number }[] = [];
+  for (const it of items) {
+    const w = it.d.wrap.offsetWidth || 60;
+    const h = it.d.wrap.offsetHeight || 26;
+    let y = it.y;                              // element rect: [y-h, y]
+    for (let guard = 0; guard < 16; guard += 1) {
+      const hit = placed.find((r) =>
+        Math.abs(it.x - r.x) < (w + r.w) / 2 - 10
+        && y - h < r.bottom - 4 && y > r.top + 4);
+      if (!hit) break;
+      y = hit.top + 2;                         // step onto the shoulders above
+    }
+    placed.push({ x: it.x, top: y - h, bottom: y, w });
+    it.d.wrap.style.transform = `translate(${it.x}px, ${y}px) translate(-50%, -100%)`;
   }
 }
 
@@ -618,6 +755,31 @@ function structureSpriteCandidates(s: StructureState): string[] {
   }
   if (building) out.push(`${sc}_scaffold.png`);   // generic under-construction
   out.push(`${sc}_${s.kind}.png`);
+  return out;
+}
+
+function vectorStructureSpriteCandidates(s: StructureState): string[] {
+  const st = s.state || {};
+  const building = st.buildable_kind !== undefined && !st.complete;
+  const out: string[] = [];
+  if (s.kind === "campfire") {
+    if (building) out.push("campfire_unlit.png");
+    else out.push((st.fuel as number ?? 0) > 0 ? "campfire_lit.png" : "campfire_unlit.png");
+  } else if (s.kind === "signal_fire") out.push("campfire_lit.png");
+  else if (s.kind === "cave") out.push("cave_entrance.png");
+  else if (s.kind === "garden") out.push("garden_plot.png");
+  else if (s.kind === "hatch") out.push("sealed_hatch.png");
+  else if (s.kind === "hotspring") out.push("hot_spring.png");
+  else if (s.kind === "idol") out.push("idol_totem.png");
+  else if (s.kind === "lighthouse") out.push(st.active ? "lighthouse_lit.png" : "lighthouse_unlit.png");
+  else if (s.kind === "monolith" || s.kind === "whisperzone") out.push("stone_obelisk.png");
+  else if (s.kind === "plane_wreckage") out.push("plane_wreckage.png");
+  else if (s.kind === "radiotower") out.push("radio_tower.png");
+  else if (s.kind === "raft") out.push("raft.png");
+  else if (s.kind === "relic") out.push("ancient_tablet.png");
+  else if (s.kind === "signpost") out.push("signpost.png");
+  else if (s.kind === "watchtower") out.push("watchtower.png");
+  else if (s.kind === "well" || s.kind === "water_still") out.push("water_well.png");
   return out;
 }
 
@@ -733,7 +895,7 @@ function animateBushes(): void {
   }
 }
 
-let cloudShadowTex: Texture | null = null;
+let fogTex: Texture | null = null;
 
 async function setupClouds(): Promise<void> {
   const state = store.state;
@@ -746,9 +908,9 @@ async function setupClouds(): Promise<void> {
 
   let texs: Texture[];
   if (vectorMode()) {
-    // Diorama: no cloud sprites — just soft shadow blobs drifting over the land.
-    if (!cloudShadowTex) cloudShadowTex = Texture.from(makeCloudShadowCanvas());
-    texs = [cloudShadowTex];
+    // The Lighthouse: no cloud shadows — pale fog banks crawling over the rock.
+    if (!fogTex) fogTex = Texture.from(makeFogCanvas());
+    texs = [fogTex];
   } else {
     if (!cloudTex.length) {
       for (let i = 1; i <= 8; i += 1) {
@@ -760,16 +922,22 @@ async function setupClouds(): Promise<void> {
   }
   if (!texs.length) return;
   const mapPx = state.map.size * TILE_SIZE;
-  const count = vectorMode() ? 4 : ISLAND_CLOUD_COUNT;
+  const count = vectorMode() ? 6 : ISLAND_CLOUD_COUNT;
   for (let i = 0; i < count; i += 1) {
     const tex = texs[Math.floor(Math.random() * texs.length)];
     const s = new Sprite(tex);
-    s.alpha = vectorMode() ? 0.30 : 0.26 + Math.random() * 0.08;
-    s.scale.set((TILE_SIZE * (8 + Math.random() * 5)) / tex.frame.width);
+    if (vectorMode()) {
+      s.alpha = 0.10 + Math.random() * 0.08;
+      s.blendMode = "screen";
+      s.scale.set((TILE_SIZE * (11 + Math.random() * 7)) / tex.frame.width);
+    } else {
+      s.alpha = 0.26 + Math.random() * 0.08;
+      s.scale.set((TILE_SIZE * (8 + Math.random() * 5)) / tex.frame.width);
+    }
     s.x = Math.random() * mapPx;
     s.y = Math.random() * mapPx;
     cloudLayer.addChild(s);
-    cloudSprites.push({ sprite: s, vx: 4 + Math.random() * 6 });
+    cloudSprites.push({ sprite: s, vx: vectorMode() ? 2 + Math.random() * 3.5 : 4 + Math.random() * 6 });
   }
 }
 
@@ -790,20 +958,26 @@ function makeGlowTexture(): Texture {
   c.width = c.height = size;
   const ctx = c.getContext("2d")!;
   const g = ctx.createRadialGradient(size / 2, size / 2, 0, size / 2, size / 2, size / 2);
-  g.addColorStop(0, "rgba(255,220,140,0.95)");
-  g.addColorStop(0.35, "rgba(255,160,50,0.55)");
-  g.addColorStop(1, "rgba(255,120,0,0)");
+  g.addColorStop(0, "rgba(245,240,222,0.95)");
+  g.addColorStop(0.38, "rgba(196,190,174,0.52)");
+  g.addColorStop(1, "rgba(90,90,84,0)");
   ctx.fillStyle = g;
   ctx.fillRect(0, 0, size, size);
   return Texture.from(c);
 }
 
-// Warm flicker on every lit fire's glow sprite.
+// Warm flicker on every lit fire's glow sprite; at night the pools of light
+// become the only thing left alive in the frame. The lighthouse beam sweeps.
 function animateGlow(): void {
-  if (!glowSprites.length) return;
-  glowT += app.ticker.deltaMS / 1000;
+  const dt = app.ticker.deltaMS / 1000;
+  glowT += dt;
   const f = 0.8 + Math.sin(glowT * 7) * 0.12 + Math.sin(glowT * 13) * 0.06;
-  for (const g of glowSprites) g.sprite.alpha = g.base * f;
+  const nightBoost = vectorMode() ? 0.55 + nightAlpha * 0.9 : 1;
+  for (const g of glowSprites) g.sprite.alpha = Math.min(1, g.base * f * nightBoost);
+  for (const b of beamSprites) {
+    b.c.rotation += b.v * dt;
+    b.c.alpha = 0.10 + nightAlpha * 0.75 + Math.sin(glowT * 9) * 0.02;
+  }
 }
 
 function sizeNight(): void {
@@ -812,15 +986,16 @@ function sizeNight(): void {
   // Cover the whole tiled ocean, not just the island grid, so night falls on the sea too.
   const pad = OCEAN_PAD * TILE_SIZE;
   const span = state.map.size * TILE_SIZE + pad * 2;
-  nightOverlay.clear().rect(-pad, -pad, span, span).fill(0x0a1838);
+  nightOverlay.clear().rect(-pad, -pad, span, span).fill(0x020304);
 }
 
-// Smoothly darken to a blue night (and dim a little during storms).
+// Smoothly darken to a hard monochrome night (and dim a little during storms).
 function animateNight(): void {
   const state = store.state;
   if (!state) { nightOverlay.alpha = 0; return; }
   const dt = app.ticker.deltaMS / 1000;
-  const target = state.is_night ? 0.5 : (state.weather === "storm" ? 0.22 : 0);
+  const nightDeep = vectorMode() ? 0.64 : 0.5;       // noir night falls harder
+  const target = state.is_night ? nightDeep : (state.weather === "storm" ? 0.26 : 0);
   nightAlpha += (target - nightAlpha) * Math.min(1, dt * 1.2);   // dusk/dawn ramp
   nightOverlay.alpha = nightAlpha;
 }
@@ -1125,6 +1300,9 @@ export async function render() {
   }
   setActive3d(false);
   app.canvas.style.display = "";
+  // Ink-black sea for the noir vector island; original tones elsewhere.
+  app.renderer.background.color = vectorMode() ? V.seaDeep
+    : state.scenario === "island" ? OCEAN_COLOR : VOID_COLOR;
 
   const seq = ++renderSeq;
   worldLayer.removeChildren();
@@ -1182,12 +1360,54 @@ export async function render() {
 
   if (state.scenario === "island") {
     if (vectorMode()) {
+      // Directional contact shadow shared by all noir props (falls SE, hard).
+      const propShadow = (cx: number, base: number, w: number) => {
+        const g = new Graphics()
+          .ellipse(0, 0, TILE_SIZE * w, TILE_SIZE * w * 0.32)
+          .fill({ color: 0x050606, alpha: 0.3 });
+        g.x = cx + TILE_SIZE * w * 0.35; g.y = base - 2; g.zIndex = base - 0.5;
+        objectLayer.addChild(g); propSprites.push(g);
+      };
       for (const node of state.resources) {
         if (node.quantity <= 0) continue;
+        const base = node.y * TILE_SIZE + TILE_SIZE;
+        const cx = node.x * TILE_SIZE + TILE_SIZE / 2;
+        // hand-cut prop sprites (palms, boulders, bushes, springs)
+        const spec = vectorPropSpec(node.kind, node.id);
+        if (spec) {
+          const tex = await vectorPropTexture(spec.file);
+          if (seq !== renderSeq) return;
+          if (tex) {
+            propShadow(cx, base, spec.shadowW);
+            const sprite = new Sprite(tex);
+            sprite.anchor.set(0.5, spec.anchorY);
+            const s = (spec.size * TILE_SIZE) / tex.height;
+            sprite.scale.set(spec.flip ? -s : s, s);
+            sprite.x = cx; sprite.y = base;
+            sprite.tint = 0xf2eee3;
+            sprite.zIndex = base;
+            objectLayer.addChild(sprite); propSprites.push(sprite);
+            continue;
+          }
+        }
+        if (node.kind === "orerock") {
+          const tex = await vectorStructureTexture("ore_rock.png");
+          if (seq !== renderSeq) return;
+          if (tex) {
+            propShadow(cx, base, 0.5);
+            const sprite = new Sprite(tex);
+            sprite.anchor.set(0.5, 1);
+            sprite.scale.set(Math.min((TILE_SIZE * 1.45) / tex.width, (TILE_SIZE * 1.45) / tex.height));
+            sprite.x = cx; sprite.y = base;
+            sprite.tint = 0xf2eee3;
+            sprite.zIndex = base;
+            objectLayer.addChild(sprite); propSprites.push(sprite);
+            continue;
+          }
+        }
         const prop = buildVectorProp(node);
         if (!prop) continue;
-        const base = node.y * TILE_SIZE + TILE_SIZE;
-        prop.x = node.x * TILE_SIZE + TILE_SIZE / 2;
+        prop.x = cx;
         prop.y = base;
         prop.zIndex = base;
         objectLayer.addChild(prop);
@@ -1217,6 +1437,7 @@ export async function render() {
   }
 
   glowSprites.length = 0;
+  beamSprites.length = 0;
   for (const s of state.structures) {
     const w = Math.max(1, s.w || 1);
     const h = Math.max(1, s.h || 1);
@@ -1228,11 +1449,15 @@ export async function render() {
     const pw = w * TILE_SIZE;
     const ph = h * TILE_SIZE;
 
-    // Contact shadow grounding the structure.
+    // Contact shadow grounding the structure. In the noir vector world every
+    // shadow falls the same way — long, hard, to the south-east.
+    const vecShadow = vectorMode();
     const shadow = new Graphics()
-      .ellipse(0, 0, pw * 0.36, pw * 0.16).fill({ color: 0x10240f, alpha: 0.22 });
+      .ellipse(0, 0, pw * (vecShadow ? 0.44 : 0.36), pw * (vecShadow ? 0.14 : 0.16))
+      .fill({ color: 0x050606, alpha: vecShadow ? 0.34 : 0.28 });
     const shadowLift = STRUCT_SHADOW_LIFT[s.kind] ?? 3;
-    shadow.x = px + pw / 2; shadow.y = py + ph - shadowLift; shadow.zIndex = py + ph - 0.5;
+    shadow.x = px + pw / 2 + (vecShadow ? pw * 0.16 : 0);
+    shadow.y = py + ph - shadowLift; shadow.zIndex = py + ph - 0.5;
     objectLayer.addChild(shadow); propSprites.push(shadow);
 
     // Warm additive glow over a lit campfire.
@@ -1264,7 +1489,13 @@ export async function render() {
     }
 
     let t: Texture | null = null;
-    if (!vectorMode()) {          // vector mode: themed placeholders (asset-free)
+    if (vectorMode()) {
+      for (const cand of vectorStructureSpriteCandidates(s)) {
+        t = await vectorStructureTexture(cand);
+        if (seq !== renderSeq) return;
+        if (t) break;
+      }
+    } else {
       for (const cand of structureSpriteCandidates(s)) {
         t = await silentTexture(`structures/${cand}`);
         if (seq !== renderSeq) return;
@@ -1277,7 +1508,13 @@ export async function render() {
       const sprite = new Sprite(t);
       const scale = STRUCT_RENDER_SCALE[s.kind] ?? 1.0;
       sprite.anchor.set(0.5, 1);                       // bottom-centre on the footprint
-      sprite.width = pw * scale; sprite.height = ph * scale;
+      if (vectorMode()) {
+        const fit = Math.min((pw * scale) / t.width, (ph * scale) / t.height);
+        sprite.scale.set(fit);
+        sprite.tint = 0xf2eee3;   // near-white: keep the assets' own contrast
+      } else {
+        sprite.width = pw * scale; sprite.height = ph * scale;
+      }
       sprite.x = px + pw / 2; sprite.y = py + ph;
       node = sprite;
     } else {
@@ -1301,6 +1538,33 @@ export async function render() {
     node.zIndex = py + ph;                    // depth-sort by the structure's base
     objectLayer.addChild(node);
     propSprites.push(node);
+
+    // The shot the whole style builds toward: a white beam sweeping from the
+    // relit lighthouse, barely-there by day, cutting the dark at night.
+    if (glowTex && vectorMode() && s.kind === "lighthouse" && st.active) {
+      const lampY = node instanceof Sprite
+        ? py + ph - node.height * 0.86
+        : py + ph - Math.max(pw, TILE_SIZE * 1.4) * 1.02;
+      const beam = new Container();
+      for (const dir of [0, Math.PI]) {
+        const ray = new Sprite(glowTex);
+        ray.anchor.set(0, 0.5);
+        ray.rotation = dir;
+        ray.width = TILE_SIZE * 10;
+        ray.height = TILE_SIZE * 1.35;
+        ray.blendMode = "add";
+        beam.addChild(ray);
+      }
+      beam.x = px + pw / 2;
+      beam.y = lampY;
+      beam.rotation = hashStr(s.id) * Math.PI;
+      beam.alpha = 0.1;
+      beam.zIndex = 1e8;                      // above everything but selection
+      beam.eventMode = "none";
+      objectLayer.addChild(beam);
+      propSprites.push(beam);
+      beamSprites.push({ c: beam, v: 0.4 });
+    }
 
     if (s.id === store.selectedStructureId) {
       const hl = new Graphics().rect(px, py, pw, ph)
