@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<!-- dev-only GLB viewer: /viewer.html?m=campfire.glb&az=0.7 -->
+<html><body style="margin:0">
+<script type="importmap">
+{ "imports": { "three": "https://unpkg.com/three@0.170.0/build/three.module.js",
+               "three/addons/": "https://unpkg.com/three@0.170.0/examples/jsm/" } }
+</script>
+<script type="module">
+import * as THREE from "three";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+const q = new URLSearchParams(location.search);
+const r = new THREE.WebGLRenderer({ antialias: true });
+r.setSize(innerWidth, innerHeight);
+document.body.appendChild(r.domElement);
+const scene = new THREE.Scene();
+scene.background = new THREE.Color(0xdde8e0);
+scene.add(new THREE.HemisphereLight(0xffffff, 0x667755, 1.1));
+const sun = new THREE.DirectionalLight(0xfff2dd, 1.6);
+sun.position.set(5, 10, 4);
+scene.add(sun);
+scene.add(new THREE.GridHelper(10, 10));
+const cam = new THREE.PerspectiveCamera(40, innerWidth / innerHeight, 0.1, 100);
+new GLTFLoader().load("/models/" + (q.get("m") || "campfire.glb"), (g) => {
+  scene.add(g.scene);
+  const bb = new THREE.Box3().setFromObject(g.scene);
+  const c = bb.getCenter(new THREE.Vector3()), s = bb.getSize(new THREE.Vector3());
+  const d = Math.max(s.x, s.y, s.z) * 1.4;
+  const az = Number(q.get("az") || 0.7);
+  cam.position.set(c.x + Math.sin(az) * d, c.y + d * 0.7, c.z + Math.cos(az) * d);
+  cam.lookAt(c);
+  document.title = `bbox ${s.x.toFixed(2)}x${s.y.toFixed(2)}x${s.z.toFixed(2)}`;
+  r.render(scene, cam);
+});
+</script>
+</body></html>

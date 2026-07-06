@@ -16,21 +16,178 @@ import { ShaderPass } from "three/examples/jsm/postprocessing/ShaderPass.js";
 import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
+import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
-// The "film preset" (Dehancer-style): a technically clean render becomes a
-// mood through split toning (teal shadows / golden highlights), a gentle
-// filmic S-curve, haze-lifted blacks, vignette and live grain. Bloom (added as
-// a separate pass) supplies the halation glow around fire and sky.
+// The watercolour preset: the whole frame is re-read as paint on paper.
+// A static hand-tremor (paper-field UV wobble) bends every straight CG line;
+// a REAL ink outline is drawn from a normals+depth prepass (uInk) — object
+// silhouettes and creases, not just luminance steps — and only that line
+// "boils" (its wobble re-rolls a few times a second, hand-drawn style) while
+// the fills stay still; pigment pools at wash boundaries; luminance settles
+// into soft layered bands; granulation sinks pigment into the paper's clumps.
 const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
+    uInk: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
     uPaper: { value: null as THREE.Texture | null },
+    uRes: { value: new THREE.Vector2(1280, 720) },
+    uInvVP: { value: new THREE.Matrix4() },
+    uCamPos: { value: new THREE.Vector3() },
+    uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform sampler2D uInk;
+    uniform sampler2D uPaper;
+    uniform vec2 uRes;
+    uniform float uTime;
+    uniform mat4 uInvVP;
+    uniform vec3 uCamPos;
+    uniform vec3 uCamFwd;
+    varying vec2 vUv;
+    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+    // Bousseau's pigment-density equation: d>1 deposits pigment, d<1 lifts it.
+    // Nonlinear in C, so near-white paper barely moves while mids granulate —
+    // the reason this reads as paint instead of a multiplied overlay.
+    vec3 pigment(vec3 C, float d) { return C - (C - C * C) * (d - 1.0); }
+    float vn(vec2 p) {
+      vec2 i = floor(p), f = fract(p);
+      vec2 u = f * f * (3.0 - 2.0 * f);
+      return mix(mix(hash(i), hash(i + vec2(1.0, 0.0)), u.x),
+                 mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+    }
+    void main() {
+      vec2 asp = vec2(uRes.x / uRes.y, 1.0);
+
+      // hand tremor: the paper's smooth field (G channel) nudges every sample,
+      // so straight CG edges come out gently hand-wavy. STATIC — an animated
+      // wobble makes the whole frame swim without reading as art.
+      float wA = texture2D(uPaper, vUv * asp * 1.35).g;
+      float wB = texture2D(uPaper, vUv * asp * 1.35 + vec2(0.31, 0.47)).g;
+      vec2 uv = vUv + (vec2(wA, wB) - 0.5) * (2.0 / uRes);
+      vec4 c = texture2D(tDiffuse, uv);
+
+      // INK LINE from the normals+depth prepass: Roberts cross over view-space
+      // normals (creases, silhouettes) + relative depth jumps (overlaps).
+      // Only this line boils: its wobble field re-rolls at 6 fps, so the
+      // contour is alive the way a hand-drawn line is, while fills hold still.
+      float t6 = floor(uTime * 6.0) / 6.0;
+      vec2 roll = vec2(hash(vec2(t6, 3.1)), hash(vec2(t6, 7.7))) * 0.5;
+      vec2 bo = (vec2(texture2D(uPaper, uv * asp * 2.2 + roll).g,
+                      texture2D(uPaper, uv * asp * 2.2 + roll + vec2(0.53, 0.29)).g)
+                 - 0.5) * (3.0 / uRes);
+      vec2 iuv = uv + bo;
+      vec2 ip = 1.3 / uRes;
+      vec4 s0 = texture2D(uInk, iuv + vec2(-ip.x, -ip.y));
+      vec4 s1 = texture2D(uInk, iuv + vec2( ip.x,  ip.y));
+      vec4 s2 = texture2D(uInk, iuv + vec2( ip.x, -ip.y));
+      vec4 s3 = texture2D(uInk, iuv + vec2(-ip.x,  ip.y));
+      float far0 = 400.0;
+      float d0 = s0.a <= 0.0 ? far0 : s0.a, d1 = s1.a <= 0.0 ? far0 : s1.a;
+      float d2 = s2.a <= 0.0 ? far0 : s2.a, d3 = s3.a <= 0.0 ? far0 : s3.a;
+      float dn = length(s0.xyz - s1.xyz) + length(s2.xyz - s3.xyz);
+      float dmin = min(min(d0, d1), min(d2, d3));
+      float dd = (abs(d0 - d1) + abs(d2 - d3)) / max(dmin, 4.0);
+      float ink = smoothstep(0.5, 1.1, dn) * 0.55 + smoothstep(0.030, 0.10, dd) * 0.6;
+      ink = min(ink, 1.0);
+      // the line is deposited pigment, not a drawn stroke: pigment-equation
+      // darkening (saturates mids, spares highlights) with a cool ink cast
+      c.rgb = pigment(c.rgb, 1.0 + ink * 0.85);
+      c.rgb *= mix(vec3(1.0), vec3(0.93, 0.985, 1.04), ink * 0.5);
+
+      // ink pooling: soft luminance edges still pool a little pigment (kept
+      // gentle now that the real contour line exists)
+      vec2 px = 1.5 / uRes;
+      float gx = luma(texture2D(tDiffuse, uv + vec2(px.x, 0.0)).rgb)
+               - luma(texture2D(tDiffuse, uv - vec2(px.x, 0.0)).rgb);
+      float gy = luma(texture2D(tDiffuse, uv + vec2(0.0, px.y)).rgb)
+               - luma(texture2D(tDiffuse, uv - vec2(0.0, px.y)).rgb);
+      float edge = min(0.18, (abs(gx) + abs(gy)) * 0.55);
+      c.rgb = pow(max(c.rgb, 0.0), vec3(1.0 + edge * 1.5));
+
+      // pigment turbulence anchored in WORLD space: reconstruct the surface
+      // point from the prepass depth and sample noise there, so granulation
+      // travels with the terrain under camera motion instead of riding the
+      // screen like a static overlay (the Bousseau/Cyanilux trick).
+      float vDepth = texture2D(uInk, uv).a;
+      if (vDepth > 0.0) {
+        vec4 hp = uInvVP * vec4(uv * 2.0 - 1.0, 1.0, 1.0);
+        vec3 rayDir = normalize(hp.xyz / hp.w - uCamPos);
+        vec3 wp = uCamPos + rayDir * (vDepth / max(0.05, dot(rayDir, uCamFwd)));
+        float turb = vn(wp.xz * 0.9 + wp.y * 0.5) * 0.6 + vn(wp.xz * 2.4 + 7.7) * 0.4;
+        c.rgb = pigment(c.rgb, 1.0 + (turb - 0.5) * 0.30);
+      }
+
+      float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+
+      // layered washes: luminance settles into soft bands, as if the scene were
+      // built from a few flat washes instead of continuous CG shading
+      float lq = floor(l * 6.0 + 0.5) / 6.0;
+      c.rgb *= mix(1.0, (lq + 0.001) / (l + 0.001), 0.13);
+
+      // split toning: shadows drift teal, highlights drift gold
+      vec3 shadowTint = vec3(0.86, 1.02, 1.04);
+      vec3 highTint  = vec3(1.08, 1.01, 0.88);
+      l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb *= mix(shadowTint, highTint, smoothstep(0.15, 0.85, l));
+
+      // filmic S-curve: rolled shadows, soft shoulder — the "one preset" feel
+      c.rgb = mix(c.rgb, c.rgb * c.rgb * (3.0 - 2.0 * c.rgb), 0.38);
+
+      // saturation with a little life back after the curve
+      l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+      c.rgb = mix(vec3(l), c.rgb, 1.14);
+
+      // haze-lifted blacks: nothing is ever pure dark
+      c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
+
+      // screen-space granulation: barely-there (world-space turbulence above
+      // is the real pigment layer), and through the pigment equation so it
+      // melts out of the highlights by construction
+      float gran = texture2D(uPaper, vUv * asp * 5.0).b - 0.5;
+      c.rgb = pigment(c.rgb, 1.0 + gran * 0.10);
+
+      // vignette as UNPAINTED paper: toward the corners colours thin out and
+      // lift slightly — the wash runs dry — instead of a photographic darken
+      float d = distance(vUv, vec2(0.5));
+      float vig = smoothstep(0.42, 0.94, d);
+      c.rgb *= 1.0 - vig * 0.14;
+      c.rgb = mix(c.rgb, vec3(dot(c.rgb, vec3(0.299, 0.587, 0.114))), vig * 0.10);
+
+      // fine film grain, dialed back — granulation carries the texture now
+      float g1 = hash(vUv * vec2(1710.0, 1010.0) + fract(uTime) * 61.0) - 0.5;
+      float g2 = hash(floor(vUv * vec2(640.0, 380.0)) / vec2(640.0, 380.0)
+                      + fract(uTime * 0.73) * 17.0) - 0.5;
+      float grain = g1 * 0.62 + g2 * 0.38;
+      float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
+      c.rgb += grain * 0.034 * gw;
+      // paper tooth: the whole frame sits on one sheet — quiet, and through
+      // the pigment equation (paper is flat relative to the image plane, so
+      // screen space is actually correct here; loudness was the overlay tell)
+      float paper = texture2D(uPaper, vUv * asp * 2.4).r;
+      c.rgb = pigment(c.rgb, 1.0 + (0.91 - paper) * 0.55);
+      gl_FragColor = c;
+    }`,
+};
+
+// Generalized (Papari) Kuwahara — THE Susurrus pass. Eight overlapping
+// directional sectors over a disc; each pixel takes the weighted blend of the
+// least-varying sectors. Shading flattens into soft washes with painterly
+// edges between them: the abstraction step of watercolour rendering
+// (Bousseau 2006), and the single filter Susurrus builds its whole look on.
+const KuwaharaShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
     uRes: { value: new THREE.Vector2(1280, 720) },
   },
   vertexShader: `
@@ -38,63 +195,39 @@ const GradeShader = {
     void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
-    uniform sampler2D uPaper;
     uniform vec2 uRes;
-    uniform float uTime;
     varying vec2 vUv;
-    float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
-    float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+    const int R = 4;
     void main() {
-      // subtle radial chromatic aberration — a lens, not a framebuffer
-      vec2 dir = vUv - 0.5;
-      vec2 off = dir * dot(dir, dir) * 0.012;
-      vec4 c = texture2D(tDiffuse, vUv);
-      c.r = texture2D(tDiffuse, vUv - off).r;
-      c.b = texture2D(tDiffuse, vUv + off).b;
-
-      // ink pooling: watercolour pigment gathers at shape boundaries — a soft
-      // luminance-Sobel darkens edges, giving the frame a hand-inked cohesion
+      vec3 m[8]; vec3 s[8]; float w[8];
+      for (int k = 0; k < 8; k++) { m[k] = vec3(0.0); s[k] = vec3(0.0); w[k] = 0.0; }
       vec2 px = 1.0 / uRes;
-      float gx = luma(texture2D(tDiffuse, vUv + vec2(px.x, 0.0)).rgb)
-               - luma(texture2D(tDiffuse, vUv - vec2(px.x, 0.0)).rgb);
-      float gy = luma(texture2D(tDiffuse, vUv + vec2(0.0, px.y)).rgb)
-               - luma(texture2D(tDiffuse, vUv - vec2(0.0, px.y)).rgb);
-      float edge = min(0.13, (abs(gx) + abs(gy)) * 0.55);
-      c.rgb *= 1.0 - edge;
-
-      float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-
-      // split toning: shadows drift teal, highlights drift gold
-      vec3 shadowTint = vec3(0.86, 1.02, 1.04);
-      vec3 highTint  = vec3(1.08, 1.01, 0.88);
-      c.rgb *= mix(shadowTint, highTint, smoothstep(0.15, 0.85, l));
-
-      // filmic S-curve: rolled shadows, soft shoulder — the "one preset" feel
-      c.rgb = mix(c.rgb, c.rgb * c.rgb * (3.0 - 2.0 * c.rgb), 0.42);
-
-      // saturation with a little life back after the curve
-      l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-      c.rgb = mix(vec3(l), c.rgb, 1.12);
-
-      // haze-lifted blacks: nothing is ever pure dark
-      c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
-
-      // vignette, slightly stronger — pulls the eye to the island
-      float d = distance(vUv, vec2(0.5));
-      c.rgb *= 1.0 - smoothstep(0.38, 0.9, d) * 0.38;
-
-      // FILM grain (Dehancer-style): two octaves — fine sparkle + coarse
-      // clumps — living in shadows and mids, melting away in the highlights
-      float g1 = hash(vUv * vec2(1710.0, 1010.0) + fract(uTime) * 61.0) - 0.5;
-      float g2 = hash(floor(vUv * vec2(640.0, 380.0)) / vec2(640.0, 380.0)
-                      + fract(uTime * 0.73) * 17.0) - 0.5;
-      float grain = g1 * 0.62 + g2 * 0.38;
-      float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
-      c.rgb += grain * 0.052 * gw;
-      // paper: the whole frame sits on one sheet (Susurrus's quiet trick)
-      float paper = texture2D(uPaper, vUv * vec2(uRes.x / uRes.y, 1.0) * 2.4).r;
-      c.rgb *= 0.955 + paper * 0.075;
-      gl_FragColor = c;
+      for (int y = -R; y <= R; y++) {
+        for (int x = -R; x <= R; x++) {
+          vec2 v = vec2(float(x), float(y)) / float(R);
+          float d2 = dot(v, v);
+          if (d2 > 1.0) continue;
+          vec3 col = texture2D(tDiffuse, vUv + vec2(float(x), float(y)) * px).rgb;
+          float g = exp(-3.0 * d2);                    // gaussian falloff
+          vec2 vd = d2 > 0.0 ? normalize(v) : vec2(1.0, 0.0);
+          for (int k = 0; k < 8; k++) {
+            float a = float(k) * 0.7853981634;
+            float dw = dot(vd, vec2(cos(a), sin(a)));
+            float wk = g * pow(max(0.0, dw), 8.0);
+            if (d2 == 0.0) wk = g * 0.125;             // centre feeds all sectors
+            m[k] += col * wk; s[k] += col * col * wk; w[k] += wk;
+          }
+        }
+      }
+      vec3 outC = vec3(0.0); float wSum = 0.0;
+      for (int k = 0; k < 8; k++) {
+        vec3 mean = m[k] / max(1e-5, w[k]);
+        vec3 varc = s[k] / max(1e-5, w[k]) - mean * mean;
+        float sigma = abs(varc.r) + abs(varc.g) + abs(varc.b);
+        float wk = 1.0 / (1.0 + pow(255.0 * sigma, 4.0));  // hard q: flat washes
+        outC += mean * wk; wSum += wk;
+      }
+      gl_FragColor = vec4(outC / max(1e-5, wSum), 1.0);
     }`,
 };
 
@@ -105,6 +238,22 @@ function lam(color: number): THREE.MeshLambertMaterial {
 // Smooth-shaded variant for sculpted surfaces (plate tops and walls).
 function lamS(color: number): THREE.MeshLambertMaterial {
   return new THREE.MeshLambertMaterial({ color });
+}
+
+// Per-instance hue/sat/lightness jitter — no two greens on the island are the
+// same paint mix, the cheapest and strongest "mixed by hand" cue there is.
+function jitter(color: number, seed: string, amt = 0.05): THREE.Color {
+  const c = new THREE.Color(color);
+  c.offsetHSL(
+    (hashStr(seed + "h") - 0.5) * amt,
+    (hashStr(seed + "s") - 0.5) * 0.12,
+    (hashStr(seed + "l") - 0.5) * 0.07,
+  );
+  return c;
+}
+
+function lamJ(color: number, seed: string, amt = 0.05): THREE.MeshLambertMaterial {
+  return new THREE.MeshLambertMaterial({ color: jitter(color, seed, amt), flatShading: true });
 }
 
 // ── palette (shared spirit with vector.ts, tuned for lit 3D) ──────────────────
@@ -151,6 +300,7 @@ let waterMesh: THREE.Mesh;
 let waterShader: { uniforms: Record<string, { value: number }> } | null = null;
 let composer: EffectComposer;
 let gradePass: ShaderPass;
+let kuwaharaPass: ShaderPass;
 let fxaaPass: ShaderPass;
 let terrainGroup: THREE.Group | null = null;
 let propsGroup: THREE.Group | null = null;
@@ -161,6 +311,12 @@ let cloudsGroup: THREE.Group | null = null;
 let skyMesh: THREE.Mesh | null = null;
 let skyMat: THREE.ShaderMaterial | null = null;
 let fireLights: THREE.PointLight[] = [];
+let inkTarget: THREE.WebGLRenderTarget | null = null;
+let inkMat: THREE.ShaderMaterial | null = null;
+type Swayer = { m: THREE.Object3D; phase: number; amp: number; base: number };
+let swayers: Swayer[] = [];
+let breathers: Swayer[] = [];               // canopy blobs pulsing in the wind
+let waveGroup: THREE.Group | null = null;
 let active = false;
 let rafId = 0;
 let builtMapKey = "";
@@ -177,6 +333,50 @@ type Agent3d = {
   status: string;
 };
 const agents3d = new Map<string, Agent3d>();
+
+// Decorative objects (sky, water, foam, clouds, flames, reflections) live on
+// layer 1 only: the main camera renders layers 0+1, the ink prepass renders
+// layer 0 alone, so atmosphere never grows an outline.
+function markDecor(obj: THREE.Object3D): void {
+  obj.traverse((o) => o.layers.set(1));
+}
+
+// ── hand-modelled GLB assets (user's own models > primitive assemblies) ───────
+// Each model is normalised on load: recentred in XZ, foot at y=0, scaled to a
+// target world size — tall props fit by height, ground props (fire pit, hatch)
+// by footprint width; `sink` buries base plugs slightly into the ground.
+const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; sink: number }> = {
+  campfire: { url: "models/campfire.glb", size: 1.0, axis: "xz", sink: 0.05 },
+  lighthouse: { url: "models/lighthouse.glb", size: 3.1, axis: "y", sink: 0.02 },
+  bunker: { url: "models/bunker2.glb", size: 1.1, axis: "xz", sink: 0.05 },
+};
+const models = new Map<string, THREE.Group>();
+
+function loadModels(): void {
+  const loader = new GLTFLoader();
+  for (const [key, def] of Object.entries(MODEL_DEFS)) {
+    loader.load(def.url, (gltf) => {
+      const root = gltf.scene;
+      root.traverse((o) => {
+        if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; }
+      });
+      const bb = new THREE.Box3().setFromObject(root);
+      const size = bb.getSize(new THREE.Vector3());
+      const fit = def.axis === "y" ? size.y : Math.max(size.x, size.z);
+      const s = def.size / Math.max(0.001, fit);
+      const wrap = new THREE.Group();
+      wrap.add(root);
+      root.scale.setScalar(s);
+      root.position.set(
+        -(bb.min.x + bb.max.x) / 2 * s,
+        -bb.min.y * s - def.sink,
+        -(bb.min.z + bb.max.z) / 2 * s,
+      );
+      models.set(key, wrap);
+      if (state && heightGrid.length) buildStructs(state);   // swap in live
+    }, undefined, (err) => console.error(`[render3d] model FAILED: ${key}`, err));
+  }
+}
 
 // ── height sampling ───────────────────────────────────────────────────────────
 // Two-octave value noise on a hashed lattice (deterministic, seedless).
@@ -327,9 +527,33 @@ function ensureRenderer(stageEl: HTMLElement): void {
       }`,
   });
   skyMesh = new THREE.Mesh(new THREE.SphereGeometry(420, 20, 14), skyMat);
+  markDecor(skyMesh);
   scene.add(skyMesh);
 
   camera = new THREE.PerspectiveCamera(32, 1, 0.1, 500);
+  camera.layers.enable(1);                 // solids on 0, atmosphere on 1
+
+  // Ink prepass: view-space normals in RGB + linear depth in A, rendered with
+  // one override material into a half-float target the grade shader reads.
+  inkMat = new THREE.ShaderMaterial({
+    vertexShader: `
+      varying vec3 vN; varying float vD;
+      void main() {
+        vN = normalMatrix * normal;
+        vec4 mv = modelViewMatrix * vec4(position, 1.0);
+        vD = -mv.z;
+        gl_Position = projectionMatrix * mv;
+      }`,
+    fragmentShader: `
+      varying vec3 vN; varying float vD;
+      void main() { gl_FragColor = vec4(normalize(vN), vD); }`,
+  });
+  inkTarget = new THREE.WebGLRenderTarget(1, 1, {
+    type: THREE.HalfFloatType,
+    minFilter: THREE.NearestFilter,
+    magFilter: THREE.NearestFilter,
+  });
+  loadModels();
 
   sun = new THREE.DirectionalLight(0xfff2dd, 1.9);
   sun.castShadow = true;
@@ -350,7 +574,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   });                                    // the shelf plate supplies the turquoise
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
-    shader.uniforms.uAmp = { value: 0.05 };
+    shader.uniforms.uAmp = { value: 0.03 };
     shader.vertexShader = "uniform float uTime;\nuniform float uAmp;\n" +
       shader.vertexShader.replace(
         "#include <begin_vertex>",
@@ -365,6 +589,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   waterMesh.rotation.x = -Math.PI / 2;
   waterMesh.position.y = 0;
   waterMesh.receiveShadow = true;
+  markDecor(waterMesh);
   scene.add(waterMesh);
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(1000, 1000),
@@ -372,6 +597,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   );
   floor.rotation.x = -Math.PI / 2;
   floor.position.y = -1.45;
+  markDecor(floor);
   scene.add(floor);
 
   controls = new OrbitControls(camera, renderer.domElement);
@@ -389,6 +615,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   );
   selRing.rotation.x = -Math.PI / 2;
   selRing.visible = false;
+  markDecor(selRing);
   scene.add(selRing);
 
   // Post: render -> bloom (halation for fire/sky) -> tone-map/sRGB output ->
@@ -396,15 +623,31 @@ function ensureRenderer(stageEl: HTMLElement): void {
   // without it the frame stays linear and looks crushed-dark.
   composer = new EffectComposer(renderer);
   composer.addPass(new RenderPass(scene, camera));
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.32, 0.7, 0.82));
+  kuwaharaPass = new ShaderPass(KuwaharaShader);
+  composer.addPass(kuwaharaPass);            // abstraction first, on linear HDR
+  // bloom kept for fire/lamp halation only: high threshold + modest strength
+  // so flat white clouds and bright sand stop glowing like neon
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.22, 0.6, 0.92));
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
   gradePass.uniforms.uPaper.value = paperTexture();
+  gradePass.uniforms.uInk.value = inkTarget.texture;
   composer.addPass(gradePass);
   fxaaPass = new ShaderPass(FXAAShader);
   composer.addPass(fxaaPass);
 
   bindPicking(renderer.domElement);
+
+  // debug handle for screenshot tooling (camera framing from Playwright)
+  (window as unknown as Record<string, unknown>).__r3d = {
+    lookAt(x: number, z: number, dist = 12, azimuth = 0.6): void {
+      const y = Math.max(0.02, heightAt(x, z));
+      controls.target.set(x, y, z);
+      camera.position.set(
+        x + Math.sin(azimuth) * dist, y + dist * 0.62, z + Math.cos(azimuth) * dist);
+      controls.update();
+    },
+  };
 }
 
 // ── picking: tap = select, double-tap = open the card ─────────────────────────
@@ -463,8 +706,10 @@ function pick(e: PointerEvent): void {
   }
 }
 
-// Screen-space paper: fine fibrous grain + faint blotches, sampled by the grade
-// shader so the whole frame reads as one sheet of cold-press paper.
+// Screen-space paper, one texture with three INDEPENDENT channels the grade
+// shader reads separately: R = fine cold-press tooth (multiplied over the
+// frame), G = smooth low-frequency field (drives the hand-tremor UV wobble),
+// B = mid-frequency pigment clumps (granulation in mids/shadows).
 let paperTex: THREE.Texture | null = null;
 
 function paperTexture(): THREE.Texture {
@@ -473,78 +718,128 @@ function paperTexture(): THREE.Texture {
   const cv = document.createElement("canvas");
   cv.width = cv.height = size;
   const ctx = cv.getContext("2d")!;
-  ctx.fillStyle = "#ffffff";
-  ctx.fillRect(0, 0, size, size);
-  let s = 31337;
-  const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
-  // per-pixel tooth
-  const img = ctx.getImageData(0, 0, size, size);
-  for (let i = 0; i < img.data.length; i += 4) {
-    const v = 246 + Math.floor(rnd() * 10);
-    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v;
+  // Periodic value noise so the RepeatWrapping texture tiles with no seam —
+  // a seam in the tremor field would tear the frame along a visible line.
+  const pnoise = (x: number, y: number, cell: number, salt: number): number => {
+    const period = size / cell;
+    const gx = x / cell, gy = y / cell;
+    const x0 = Math.floor(gx), y0 = Math.floor(gy);
+    const fx = gx - x0, fy = gy - y0;
+    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const m = (v: number) => ((v % period) + period) % period;
+    const v00 = hash01(m(x0), m(y0), salt), v10 = hash01(m(x0 + 1), m(y0), salt);
+    const v01 = hash01(m(x0), m(y0 + 1), salt), v11 = hash01(m(x0 + 1), m(y0 + 1), salt);
+    return (v00 * (1 - sx) + v10 * sx) * (1 - sy) + (v01 * (1 - sx) + v11 * sx) * sy;
+  };
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const i = (y * size + x) * 4;
+      // R: per-pixel tooth + a whisper of fibre streaking
+      const tooth = hash01(x, y, 3) * 0.7 + hash01(x >> 2, y, 5) * 0.3;
+      img.data[i] = 232 + Math.round((tooth - 0.5) * 40);
+      // G: two octaves of smooth noise — the tremor field must be continuous
+      const w = (pnoise(x, y, 64, 41) - 0.5) * 1.5 + (pnoise(x, y, 32, 43) - 0.5) * 0.6;
+      img.data[i + 1] = Math.max(0, Math.min(255, Math.round(128 + w * 170)));
+      // B: clumpy granulation — sharpened mid-scale noise plus fine speckle
+      const cl = (pnoise(x, y, 8, 47) - 0.5) * 2.1 + (hash01(x, y, 53) - 0.5) * 0.5;
+      img.data[i + 2] = Math.max(0, Math.min(255, Math.round(128 + cl * 150)));
+      img.data[i + 3] = 255;
+    }
   }
   ctx.putImageData(img, 0, 0);
-  // short horizontal fibres
-  ctx.strokeStyle = "rgba(190,196,190,0.05)";
-  for (let i = 0; i < 1400; i += 1) {
-    const x = rnd() * size, y = rnd() * size, len = 3 + rnd() * 9;
-    ctx.beginPath();
-    ctx.moveTo(x, y);
-    ctx.lineTo(x + len, y + (rnd() - 0.5) * 2);
-    ctx.stroke();
-  }
-  // large soft blotches
-  for (let i = 0; i < 60; i += 1) {
-    const x = rnd() * size, y = rnd() * size, r = 24 + rnd() * 60;
-    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-    grad.addColorStop(0, `rgba(226,230,222,${0.02 + rnd() * 0.03})`);
-    grad.addColorStop(1, "rgba(0,0,0,0)");
-    ctx.fillStyle = grad;
-    ctx.fillRect(x - r, y - r, r * 2, r * 2);
-  }
   paperTex = new THREE.CanvasTexture(cv);
   paperTex.wrapS = paperTex.wrapT = THREE.RepeatWrapping;
   return paperTex;
 }
 
-// Hand-painted paper wash: soft irregular blotches stamped on a near-white
-// canvas, tiled in world space over the whole island. Multiplied under the
-// vertex colours it turns "coloured polygons" into one painted surface.
-let paintTex: THREE.Texture | null = null;
+// Hand-painted wash v2: layered directional BRUSH STROKES — soft elongated
+// gradient stamps with hue jitter (ochre / sage / teal casts), a broad
+// diagonal flow crossed by shorter counter-strokes, then a granulation pass.
+// Stamped 3×3 so the tile is seamless. Multiplied under the plate colours it
+// reads as paint applied by hand, where the old radial blotches read as stains.
+let brushTex: THREE.Texture | null = null;
 
-function paintTexture(n: number): THREE.Texture {
-  if (!paintTex) {
-    const size = 256;
-    const cv = document.createElement("canvas");
-    cv.width = cv.height = size;
-    const ctx = cv.getContext("2d")!;
-    ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, size, size);
-    let s = 92821;
-    const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
-    for (let i = 0; i < 340; i += 1) {
-      const x = rnd() * size, y = rnd() * size, r = 6 + rnd() * 26;
-      const dark = rnd() < 0.5;
-      const a = 0.028 + rnd() * 0.05;
-      const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-      grad.addColorStop(0, dark ? `rgba(96,116,102,${a})` : `rgba(255,252,238,${a * 1.2})`);
-      grad.addColorStop(1, "rgba(0,0,0,0)");
-      ctx.fillStyle = grad;
-      ctx.fillRect(x - r, y - r, r * 2, r * 2);
+function brushTexture(): THREE.Texture {
+  if (brushTex) return brushTex;
+  const size = 512;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d")!;
+  ctx.fillStyle = "#f8f6ef";
+  ctx.fillRect(0, 0, size, size);
+  let s = 40503;
+  const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
+  const stroke = (x: number, y: number, ang: number, len: number, w: number,
+                  hue: number, sat: number, lit: number, a: number): void => {
+    for (const ox of [-size, 0, size]) {
+      for (const oy of [-size, 0, size]) {
+        if (x + ox < -len || x + ox > size + len ||
+            y + oy < -len || y + oy > size + len) continue;
+        ctx.save();
+        ctx.translate(x + ox, y + oy);
+        ctx.rotate(ang);
+        ctx.scale(len, w);
+        const grad = ctx.createRadialGradient(0, 0, 0, 0, 0, 1);
+        grad.addColorStop(0, `hsla(${hue},${sat}%,${lit}%,${a})`);
+        grad.addColorStop(0.7, `hsla(${hue},${sat}%,${lit}%,${a * 0.5})`);
+        grad.addColorStop(1, `hsla(${hue},${sat}%,${lit}%,0)`);
+        ctx.fillStyle = grad;
+        ctx.fillRect(-1, -1, 2, 2);
+        ctx.restore();
+      }
     }
-    paintTex = new THREE.CanvasTexture(cv);
-    paintTex.wrapS = paintTex.wrapT = THREE.RepeatWrapping;
-    paintTex.colorSpace = THREE.SRGBColorSpace;
+  };
+  const FLOW = 0.62;                        // one dominant brush direction
+  // layer 1: long broad washes along the flow
+  for (let i = 0; i < 72; i += 1) {
+    stroke(rnd() * size, rnd() * size, FLOW + (rnd() - 0.5) * 0.5,
+      60 + rnd() * 95, 9 + rnd() * 15,
+      40 + (rnd() - 0.5) * 150, 16 + rnd() * 15, rnd() < 0.5 ? 88 : 48,
+      0.06 + rnd() * 0.05);
   }
-  paintTex.repeat.set(n / 11, n / 11);
-  return paintTex;
+  // layer 2: shorter counter-strokes across the flow
+  for (let i = 0; i < 58; i += 1) {
+    stroke(rnd() * size, rnd() * size, FLOW + Math.PI / 2 + (rnd() - 0.5) * 0.7,
+      22 + rnd() * 42, 4.5 + rnd() * 8,
+      40 + (rnd() - 0.5) * 170, 18 + rnd() * 16, rnd() < 0.5 ? 90 : 45,
+      0.05 + rnd() * 0.045);
+  }
+  // granulation: clumped pixel noise so flats never read as vector fills
+  const img = ctx.getImageData(0, 0, size, size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      const i = (y * size + x) * 4;
+      const g = (hash01(x >> 1, y >> 1, 7) * 0.55 + hash01(x >> 3, y >> 3, 13) * 0.45 - 0.5) * 13;
+      img.data[i] += g; img.data[i + 1] += g; img.data[i + 2] += g;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  brushTex = new THREE.CanvasTexture(cv);
+  brushTex.wrapS = brushTex.wrapT = THREE.RepeatWrapping;
+  brushTex.colorSpace = THREE.SRGBColorSpace;
+  brushTex.repeat.set(1 / 9, 1 / 9);        // plate UVs are world units: 9 u/tile
+  return brushTex;
 }
 
-// Same wash for plate tops, whose UVs are in WORLD units (Extrude shape coords).
-function platePaint(): THREE.Texture {
-  const t = paintTexture(1);
-  t.repeat.set(1 / 9, 1 / 9);
-  return t;
+// Macro wash baked into vertices: a very-low-frequency warm/cool drift and a
+// gentle lightness gradient across the island, plus darkening down the walls
+// toward each plate's foot (grounding). This is the "one big brush" pass that
+// kills flat-poly uniformity at the scale the tiled texture can't reach.
+function tintGeometry(geo: THREE.BufferGeometry, topY: number): void {
+  const pos = geo.getAttribute("position");
+  const colors = new Float32Array(pos.count * 3);
+  for (let i = 0; i < pos.count; i += 1) {
+    const x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+    const warm = vnoise(x, z, 17, 71) - 0.5;            // warm/cool cast drift
+    const light = 0.95 + (vnoise(x, z, 9, 83) - 0.5) * 0.10;
+    const drop = Math.max(0, Math.min(1, (topY - y) / 2.2));
+    const shade = light * (1 - drop * 0.16);
+    colors[i * 3] = shade * (1 + warm * 0.07);
+    colors[i * 3 + 1] = shade;
+    colors[i * 3 + 2] = shade * (1 - warm * 0.07);
+  }
+  geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
 // ── loop classification for extrusion (outer shells vs holes) ─────────────────
@@ -638,8 +933,15 @@ function buildTerrain(st: WorldState): void {
   // One plate per level: smooth contour -> Shape (with holes) -> extrusion with
   // a soft bevel lip. Flat tops, smooth vertical walls, authored silhouette.
   const topColors = [0xe9ddb6, 0x9fc37e, 0x93bb74, 0x89ad84, 0xaaa69e];
-  const wallLow = lamS(0xcfbf9a);              // wet-sand base walls
-  const wallHigh = lamS(0x9aa1a5);             // grey rock walls above
+  // every terrain surface shares the brush wash + per-vertex macro tint
+  const washed = (color: number): THREE.MeshLambertMaterial => {
+    const m = lamS(color);
+    m.map = brushTexture();
+    m.vertexColors = true;
+    return m;
+  };
+  const wallLow = washed(0xcfbf9a);            // wet-sand base walls
+  const wallHigh = washed(0x9aa1a5);           // grey rock walls above
   const BEV = 0.12;
   const dress = new THREE.Group();             // rim grass + wall-foot rocks
   const tuftMat = lamS(0x7ba763);
@@ -655,8 +957,7 @@ function buildTerrain(st: WorldState): void {
 
     const baseY = k === 0 ? -1.3 : PLATE_TOP[k - 1] - 0.08;
     const depth = PLATE_TOP[k] - baseY - BEV * 2;
-    const topMat = lamS(topColors[k]);
-    topMat.map = platePaint();                 // hand-painted wash on the calm top
+    const topMat = washed(topColors[k]);
     for (const shell of classifyLoops(loops)) {
       const shape = new THREE.Shape(
         shell.outer.map(([x, z]) => new THREE.Vector2(x, -z)));
@@ -670,6 +971,7 @@ function buildTerrain(st: WorldState): void {
       });
       geo.rotateX(-Math.PI / 2);               // shape XY -> world XZ, depth -> +Y
       geo.translate(0, baseY + BEV, 0);
+      tintGeometry(geo, PLATE_TOP[k]);         // macro wash + wall-foot shading
       const mesh = new THREE.Mesh(geo, [topMat, k === 0 ? wallLow : wallHigh]);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
@@ -721,6 +1023,7 @@ function buildTerrain(st: WorldState): void {
   }
   refl.scale.y = -1;
   refl.position.y = -0.15;
+  markDecor(refl);
   terrainGroup.add(refl);
   scene.add(terrainGroup);
 
@@ -738,6 +1041,7 @@ function buildTerrain(st: WorldState): void {
   waterMesh.position.set(cx, 0, cz);
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildFoam(st);
+  buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
 
   // First-time camera framing: pulled back so the island floats in open sea.
@@ -792,7 +1096,65 @@ function buildFoam(st: WorldState): void {
   const loops = maskLoops(n + 1, land).map((l) => chaikin(l, 2));
   ribbonFor(loops, 0.85, glowMat, 0.035);     // wide soft halo
   ribbonFor(loops, 0.2, foamMat, 0.05);       // crisp foam line
+  markDecor(foamGroup);
   scene.add(foamGroup);
+}
+
+// Painted sea: sparse hand-drawn wave dashes floating on the water around the
+// island — the picture-book signature — each one slowly surfacing, drifting a
+// little, and sinking away on its own phase (animated in tick()).
+let waveTex: THREE.Texture | null = null;
+
+function waveStrokeTexture(): THREE.Texture {
+  if (waveTex) return waveTex;
+  const w = 128, h = 32;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d")!;
+  // a tapered arc dash: thick soft centre, thin dry ends
+  ctx.strokeStyle = "rgba(255,255,255,0.9)";
+  ctx.lineCap = "round";
+  for (let pass = 0; pass < 3; pass += 1) {
+    ctx.lineWidth = 7 - pass * 2.4;
+    ctx.globalAlpha = 0.35 + pass * 0.25;
+    ctx.beginPath();
+    ctx.moveTo(8 + pass * 6, h * 0.62);
+    ctx.quadraticCurveTo(w / 2, h * (0.30 + pass * 0.05), w - 8 - pass * 6, h * 0.62);
+    ctx.stroke();
+  }
+  waveTex = new THREE.CanvasTexture(cv);
+  return waveTex;
+}
+
+function buildWaves(cx: number, cz: number, n: number): void {
+  waveGroup?.removeFromParent();
+  waveGroup = new THREE.Group();
+  const geo = new THREE.PlaneGeometry(1.6, 0.4);
+  for (let i = 0; i < 44; i += 1) {
+    // rejection-sample open sea in a ring around the island
+    let x = 0, z = 0, ok = false;
+    for (let t = 0; t < 12 && !ok; t += 1) {
+      const a = hashStr(`wa${i}t${t}`) * Math.PI * 2;
+      const r = n * (0.18 + hashStr(`wr${i}t${t}`) * 0.5);
+      x = cx + Math.cos(a) * r; z = cz + Math.sin(a) * r * 0.9;
+      ok = heightAt(x, z) <= SEA_FLOOR + 0.01;
+    }
+    if (!ok) continue;
+    const m = new THREE.Mesh(geo, new THREE.MeshBasicMaterial({
+      map: waveStrokeTexture(), transparent: true, opacity: 0,
+      depthWrite: false, color: 0xeafaf2,
+    }));
+    m.rotation.x = -Math.PI / 2;
+    m.rotation.z = (hashStr(`wg${i}`) - 0.5) * 0.5;
+    const sc = 0.8 + hashStr(`ws${i}`) * 1.3;
+    m.scale.setScalar(sc);
+    m.position.set(x, 0.06, z);
+    m.userData.phase = hashStr(`wp${i}`) * Math.PI * 2;
+    m.userData.speed = 0.25 + hashStr(`wv${i}`) * 0.3;
+    waveGroup.add(m);
+  }
+  markDecor(waveGroup);
+  scene.add(waveGroup);
 }
 
 // Islanders-style clouds: flat white unlit slabs drifting high, still casting
@@ -800,8 +1162,9 @@ function buildFoam(st: WorldState): void {
 function buildClouds(cx: number, cz: number, n: number): void {
   cloudsGroup?.removeFromParent();
   cloudsGroup = new THREE.Group();
+  // just below pure white: unlit slabs at 1.0 fed the bloom pass and glowed
   const mat = new THREE.MeshBasicMaterial({
-    color: 0xffffff, transparent: true, opacity: 0.94,
+    color: 0xdfe6e2, transparent: true, opacity: 0.92,
   });
   for (let i = 0; i < 5; i += 1) {
     const cluster = new THREE.Group();
@@ -886,7 +1249,8 @@ function makePalm(id: string): THREE.Group {
     const blade = new THREE.Mesh(
       frondGeometry(0.72 + fr * 0.25, 0.2 + fr * 0.06, 0.5 + fr * 0.25),
       new THREE.MeshLambertMaterial({
-        color: i % 2 ? C.leaf : C.leafDark, flatShading: true, side: THREE.DoubleSide,
+        color: jitter(i % 2 ? C.leaf : C.leafDark, id, 0.06),
+        flatShading: true, side: THREE.DoubleSide,
       }),
     );
     blade.position.set(topX, crownY, 0);
@@ -894,6 +1258,8 @@ function makePalm(id: string): THREE.Group {
     blade.rotation.z = 0.15 + fr * 0.2;            // initial upward tilt, then the arc droops
     blade.castShadow = true;
     g.add(blade);
+    // each frond rides the wind on its own phase (animated in tick)
+    swayers.push({ m: blade, phase: fr * 17, amp: 0.05 + fr * 0.04, base: blade.rotation.z });
   }
   for (let i = 0; i < 2; i += 1) {
     const nut = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 4), lam(0x6d4c2c));
@@ -913,11 +1279,12 @@ function makeFruitTree(id: string): THREE.Group {
   trunk.position.y = h / 2;
   trunk.castShadow = true;
   g.add(trunk);
-  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.4 + r * 0.1, 0), lam(C.leaf));
+  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.4 + r * 0.1, 0), lamJ(C.leaf, id, 0.07));
   crown.position.y = h + 0.16;
   crown.scale.y = 0.8;
   crown.castShadow = true;
   g.add(crown);
+  breathers.push({ m: crown, phase: r * 23, amp: 0.02, base: 1 });
   for (let i = 0; i < 3; i += 1) {
     const fruit = new THREE.Mesh(new THREE.SphereGeometry(0.045, 5, 4), lam(0xe8842e));
     const a = r * 7 + i * 2.1;
@@ -947,7 +1314,7 @@ function makeBush(id: string): THREE.Group {
   const r = hashStr(id);
   const bush = new THREE.Mesh(
     new THREE.IcosahedronGeometry(0.22 + r * 0.08, 0),
-    new THREE.MeshLambertMaterial({ color: C.bush, flatShading: true }),
+    lamJ(C.bush, id, 0.07),
   );
   bush.position.y = 0.14;
   bush.scale.y = 0.75;
@@ -976,6 +1343,8 @@ function makePool(): THREE.Group {
 function buildProps(st: WorldState): void {
   propsGroup?.removeFromParent();
   propsGroup = new THREE.Group();
+  swayers = [];
+  breathers = [];
   for (const node of st.resources) {
     if (node.quantity <= 0) continue;
     let obj: THREE.Group | null = null;
@@ -996,7 +1365,7 @@ function buildProps(st: WorldState): void {
   // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
   // read as MASSES (references cluster; a lawn with lone lollipops reads cheap).
   const n = st.map.size;
-  const canopyMats = [lam(0x5f8f52), lam(0x6f9c5f), lam(0x557d49)];
+  const canopyMats = Array.from({ length: 6 }, (_, i) => lamJ(0x628f54, `canopy${i}`, 0.1));
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
       if (!st.map.grid[ty][tx].includes("foliage")) continue;
@@ -1011,10 +1380,11 @@ function buildProps(st: WorldState): void {
         if (gy < 0.15) continue;
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
         const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0),
-          canopyMats[(tx + ty + k) % 3]);
+          canopyMats[(tx * 7 + ty * 13 + k) % 6]);
         blob.position.set(wx, gy + s * 0.9, wz);
         blob.scale.y = 0.8;
         blob.castShadow = true;
+        breathers.push({ m: blob, phase: hash01(tx, ty, 99 + k) * 20, amp: 0.02, base: 1 });
         const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, s, 4), lam(C.trunk));
         stem.position.set(wx, gy + s * 0.4, wz);
         propsGroup.add(stem, blob);
@@ -1096,6 +1466,7 @@ function makeFire(s: number, y: number): THREE.Group {
     e.position.set(Math.cos(a) * s * 0.3, y + s * 0.06, Math.sin(a) * s * 0.3);
     g.add(e);
   }
+  markDecor(g);                            // flames never grow an ink outline
   return g;
 }
 
@@ -1109,6 +1480,19 @@ function makeStructure(s: StructureState): THREE.Group {
   const building = st.buildable_kind !== undefined && !st.complete;
   const fp = Math.max(s.w || 1, s.h || 1);        // footprint in tiles
   const lit = Boolean(st.complete) && ((st.fuel as number) ?? 0) > 0;
+  const scale = 0.8 + fp * 0.35;                  // applied to the group below
+
+  // Hand-modelled GLB when we have one; k rescales relative to the model's
+  // normalised height, and the group scale is pre-divided out so the model
+  // keeps its authored absolute size.
+  const useModel = (key: string, k = 1): boolean => {
+    const mdl = models.get(key);
+    if (!mdl) return false;
+    const inst = mdl.clone(true);
+    inst.scale.multiplyScalar(k / scale);
+    g.add(inst);
+    return true;
+  };
 
   if (building) {
     // Scaffold: four posts + a crossbar, ghost of the future building inside.
@@ -1125,6 +1509,10 @@ function makeStructure(s: StructureState): THREE.Group {
 
   switch (s.kind) {
     case "campfire": {
+      if (useModel("campfire")) {
+        if (lit) g.add(makeFire(0.42, 0.1));
+        break;
+      }
       // irregular stone ring
       for (let i = 0; i < 7; i += 1) {
         const a = (i / 7) * Math.PI * 2 + 0.4;
@@ -1204,6 +1592,7 @@ function makeStructure(s: StructureState): THREE.Group {
       const puff = new THREE.Mesh(new THREE.SphereGeometry(0.09, 5, 4),
         new THREE.MeshLambertMaterial({ color: 0xcccccc, transparent: true, opacity: 0.5 }));
       puff.position.set(0.06, 0.82, 0);
+      markDecor(puff);
       g.add(puff);
       break;
     }
@@ -1252,11 +1641,22 @@ function makeStructure(s: StructureState): THREE.Group {
         const steam = new THREE.Mesh(new THREE.SphereGeometry(0.07 - i * 0.015, 5, 4),
           new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 - i * 0.08 }));
         steam.position.set(0.1 - i * 0.08, 0.3 + i * 0.2, 0);
+        markDecor(steam);
         g.add(steam);
       }
       break;
     }
     case "lighthouse": {
+      if (useModel("lighthouse")) {
+        if (st.active) {
+          const lamp = new THREE.Mesh(new THREE.SphereGeometry(0.16 / scale, 8, 6),
+            new THREE.MeshBasicMaterial({ color: 0xffd166 }));
+          lamp.position.y = 2.82 / scale;
+          markDecor(lamp);                 // pure glow, no outline
+          g.add(lamp);
+        }
+        break;
+      }
       const bands = 4;
       for (let i = 0; i < bands; i += 1) {
         const t = i / bands;
@@ -1317,11 +1717,107 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "hatch": {
+      if (useModel("bunker", 0.8)) break;
       g.add(cyl(0.3, 0.34, 0.08, 8, METAL_D, 0, 0.04, 0));
       const btn = new THREE.Mesh(new THREE.SphereGeometry(0.04, 5, 4),
         new THREE.MeshBasicMaterial({ color: 0xc0574f }));
       btn.position.set(0.14, 0.1, 0);
       g.add(btn);
+      break;
+    }
+    // ── mars kinds: no more default-box placeholders ──────────────────────────
+    case "sealed_bunker": {
+      if (useModel("bunker", 1.4)) break;
+      g.add(box(0.8, 0.55, 0.7, 0x8d9295, 0, 0.28, 0));
+      g.add(box(0.3, 0.4, 0.06, 0x4b5257, 0, 0.2, 0.36));   // sealed door
+      g.add(cyl(0.03, 0.03, 0.5, 4, METAL_D, 0.32, 0.8, -0.2));
+      break;
+    }
+    case "oxygen_generator": {
+      g.add(cyl(0.22, 0.26, 0.5, 8, METAL, 0, 0.25, 0));
+      for (const sx of [-0.3, 0.3]) {
+        const tank = new THREE.Mesh(new THREE.CapsuleGeometry(0.11, 0.2, 3, 8), lam(0x7fd0d8));
+        tank.position.set(sx, 0.24, 0.05);
+        tank.castShadow = true;
+        g.add(tank);
+      }
+      g.add(cone(0.1, 0.18, 6, METAL_D, 0, 0.6, 0));
+      const vent = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 4),
+        new THREE.MeshBasicMaterial({ color: 0x9fe8ef, transparent: true, opacity: 0.6 }));
+      vent.position.set(0, 0.78, 0);
+      markDecor(vent);
+      g.add(vent);
+      break;
+    }
+    case "shuttle_wreckage": {
+      const hull = cyl(0.14, 0.3, 1.2, 8, METAL, 0, 0.34, 0);
+      hull.rotation.z = 1.15;                               // nose buried, tail up
+      hull.rotation.y = 0.5;
+      g.add(hull);
+      const fin = box(0.05, 0.4, 0.26, 0xc0574f, -0.42, 0.62, -0.1);
+      fin.rotation.z = 0.5;
+      g.add(fin);
+      g.add(box(0.7, 0.05, 0.24, METAL_D, 0.3, 0.1, 0.3));  // torn wing on the ground
+      for (let i = 0; i < 3; i += 1) {
+        const r = hashStr(`${s.id}d${i}`);
+        const deb = new THREE.Mesh(new THREE.DodecahedronGeometry(0.07 + r * 0.06, 0), lam(METAL_D));
+        deb.position.set(Math.cos(r * 9) * 0.5, 0.06, Math.sin(r * 9) * 0.5);
+        g.add(deb);
+      }
+      break;
+    }
+    case "habitat_dome": {
+      const dome = new THREE.Mesh(
+        new THREE.SphereGeometry(0.55, 10, 6, 0, Math.PI * 2, 0, Math.PI * 0.5),
+        new THREE.MeshLambertMaterial({ color: 0xd8d2c4, flatShading: true }));
+      dome.castShadow = true;
+      g.add(dome);
+      const airlock = box(0.26, 0.24, 0.34, METAL, 0, 0.12, 0.6);
+      g.add(airlock);
+      g.add(cyl(0.02, 0.02, 0.4, 4, METAL_D, -0.3, 0.75, -0.2));  // antenna
+      break;
+    }
+    case "distress_pod": {
+      const pod = new THREE.Mesh(new THREE.CapsuleGeometry(0.18, 0.4, 3, 8), lam(0xd8d2c4));
+      pod.rotation.z = Math.PI / 2 - 0.2;                   // crashed on its side
+      pod.position.y = 0.18;
+      pod.castShadow = true;
+      g.add(pod);
+      const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.05, 5, 4),
+        new THREE.MeshBasicMaterial({ color: 0xff5040 }));
+      beacon.position.set(0.3, 0.42, 0);
+      markDecor(beacon);
+      g.add(beacon);
+      break;
+    }
+    case "anomaly": {
+      const core = new THREE.Mesh(new THREE.OctahedronGeometry(0.22, 0),
+        new THREE.MeshLambertMaterial({ color: 0x2b2440, emissive: 0x5a3f8a, emissiveIntensity: 0.6 }));
+      core.position.y = 0.55;                               // hovers — clearly unnatural
+      core.rotation.set(0.4, 0.8, 0.2);
+      g.add(core);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(0.34, 0.02, 4, 18),
+        new THREE.MeshBasicMaterial({ color: 0x9a7fb8, transparent: true, opacity: 0.5 }));
+      ring.rotation.x = Math.PI / 2;
+      ring.position.y = 0.55;
+      markDecor(ring);
+      g.add(ring);
+      break;
+    }
+    case "hazard_zone": {
+      g.add(cyl(0.55, 0.6, 0.03, 9, 0x4a4038, 0, 0.015, 0));   // scorched ground
+      for (let i = 0; i < 3; i += 1) {
+        const a = i * 2.1 + 0.5;
+        const post = cyl(0.025, 0.03, 0.4, 5, i % 2 ? 0xc0574f : 0xd8d2c4,
+          Math.cos(a) * 0.45, 0.2, Math.sin(a) * 0.45);
+        post.rotation.z = (hashStr(`${s.id}p${i}`) - 0.5) * 0.3;
+        g.add(post);
+      }
+      const haze = new THREE.Mesh(new THREE.SphereGeometry(0.4, 8, 6),
+        new THREE.MeshLambertMaterial({ color: 0x9fd870, transparent: true, opacity: 0.16 }));
+      haze.position.y = 0.3;
+      markDecor(haze);
+      g.add(haze);
       break;
     }
     case "whisperzone": {
@@ -1346,8 +1842,7 @@ function makeStructure(s: StructureState): THREE.Group {
     }
   }
   g.traverse((o) => { o.receiveShadow = true; });
-  // Bigger footprints scale their assembly up.
-  const scale = 0.8 + fp * 0.35;
+  // Bigger footprints scale their assembly up (models pre-divided this out).
   g.scale.set(scale, scale, scale);
   return g;
 }
@@ -1560,6 +2055,8 @@ function tick(): void {
       (fxaaPass.material.uniforms.resolution.value as THREE.Vector2)
         .set(1 / (w * pr), 1 / (h * pr));
       (gradePass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
+      (kuwaharaPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
+      inkTarget?.setSize(Math.max(1, Math.round(w * pr)), Math.max(1, Math.round(h * pr)));
       camera.aspect = w / Math.max(1, h);
       camera.updateProjectionMatrix();
     }
@@ -1622,7 +2119,7 @@ function tick(): void {
   stormMix += (storm - stormMix) * Math.min(1, dt * 1.2);
   if (waterShader) {
     waterShader.uniforms.uTime.value = now;
-    waterShader.uniforms.uAmp.value = 0.05 + stormMix * 0.12;
+    waterShader.uniforms.uAmp.value = 0.03 + stormMix * 0.1;
   }
   if (foamMat) foamMat.opacity = 0.42 + Math.sin(now * 1.7) * 0.14;
   // living fire: each flame layer breathes on its own phase
@@ -1640,11 +2137,62 @@ function tick(): void {
       if (cl.position.x > n / 2 + n) cl.position.x = n / 2 - n;
     }
   }
+
+  // wind: fronds swing, canopies breathe — faster and wider in a storm
+  const wind = 1 + stormMix * 2.2;
+  const windT = now * (1.5 + stormMix * 1.2);
+  for (const sw of swayers) {
+    sw.m.rotation.z = sw.base + Math.sin(windT + sw.phase) * sw.amp * wind;
+  }
+  for (const b of breathers) {
+    const k = 1 + Math.sin(now * 1.1 + b.phase) * b.amp * wind;
+    b.m.scale.x = b.base * k;
+    b.m.scale.z = b.base * (2 - k);
+  }
+
+  // painted wave dashes surface, hold, and sink on their own phases
+  if (waveGroup) {
+    for (const w of waveGroup.children) {
+      const t = now * (w.userData.speed as number) + (w.userData.phase as number);
+      const vis = Math.max(0, Math.sin(t));
+      const mat = (w as THREE.Mesh).material as THREE.MeshBasicMaterial;
+      mat.opacity = vis * vis * (0.5 + stormMix * 0.3);
+    }
+  }
+
   const fog = scene.fog as THREE.Fog;
   fog.near = 70 - stormMix * 35;
   fog.far = 210 - stormMix * 90;
-  if (gradePass) gradePass.uniforms.uTime.value = now;
+  if (gradePass) {
+    gradePass.uniforms.uTime.value = now;
+    (gradePass.uniforms.uInvVP.value as THREE.Matrix4)
+      .multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
+    (gradePass.uniforms.uCamPos.value as THREE.Vector3).copy(camera.position);
+    camera.getWorldDirection(gradePass.uniforms.uCamFwd.value as THREE.Vector3);
+  }
 
   controls.update();
+
+  // ink prepass: solids only (layer 0), one override material, into the
+  // half-float normals+depth target the grade shader reads. Shadow updates
+  // are deferred to the main render so they aren't paid twice per frame.
+  if (inkTarget && inkMat) {
+    renderer.shadowMap.autoUpdate = false;
+    const oldBg = scene.background;
+    scene.background = null;
+    scene.overrideMaterial = inkMat;
+    camera.layers.set(0);
+    renderer.setRenderTarget(inkTarget);
+    renderer.setClearColor(0x000000, 0);
+    renderer.clear();
+    renderer.render(scene, camera);
+    renderer.setRenderTarget(null);
+    scene.overrideMaterial = null;
+    scene.background = oldBg;
+    camera.layers.set(0);
+    camera.layers.enable(1);
+    renderer.shadowMap.autoUpdate = true;
+  }
+
   composer.render();
 }
