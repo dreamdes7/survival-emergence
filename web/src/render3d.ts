@@ -298,6 +298,10 @@ let sun: THREE.DirectionalLight;
 let ambient: THREE.HemisphereLight;
 let waterMesh: THREE.Mesh;
 let waterShader: { uniforms: Record<string, { value: number }> } | null = null;
+let waterTexA: THREE.Texture | null = null;   // painted ripples on the surface
+let shimmerMesh: THREE.Mesh | null = null;    // counter-scrolling second layer
+let shimmerMat: THREE.MeshBasicMaterial | null = null;
+let cloudMat: THREE.MeshBasicMaterial | null = null;
 let composer: EffectComposer;
 let gradePass: ShaderPass;
 let kuwaharaPass: ShaderPass;
@@ -325,6 +329,10 @@ let mapN = 0;
 let state: WorldState | null = null;
 let nightMix = 0;                          // 0 = day, 1 = night (lerped)
 let stormMix = 0;                          // 0 = clear, 1 = storm (lerped)
+let followId: string | null = null;        // camera-follow state
+let followDollyT = 1e9;                    // seconds since the follow started
+const followGoal = new THREE.Vector3();
+const followDelta = new THREE.Vector3();
 
 type Agent3d = {
   group: THREE.Group;
@@ -568,9 +576,14 @@ function ensureRenderer(stageEl: HTMLElement): void {
   scene.add(ambient);
 
   // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
+  // Painted ripples scroll slowly across it (map), with a counter-scrolling
+  // shimmer layer above for parallax — texture and volume instead of a void.
+  waterTexA = rippleTexture(1);
+  waterTexA.repeat.set(26, 26);                // ~18 world units per tile
   const waterMatl = new THREE.MeshPhongMaterial({
-    color: 0x76aeb2, transparent: true, opacity: 0.5,
+    color: 0x7fb6ba, transparent: true, opacity: 0.5,
     shininess: 14, specular: 0x1e3a44,   // sky-toned matte water (Bad North void);
+    map: waterTexA,
   });                                    // the shelf plate supplies the turquoise
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
@@ -591,6 +604,17 @@ function ensureRenderer(stageEl: HTMLElement): void {
   waterMesh.receiveShadow = true;
   markDecor(waterMesh);
   scene.add(waterMesh);
+  const shimmerTex = rippleTexture(2);
+  shimmerTex.repeat.set(15, 15);               // coarser + opposite drift = depth
+  shimmerMat = new THREE.MeshBasicMaterial({
+    map: shimmerTex, transparent: true, opacity: 0.10,
+    color: 0xcdeee4, depthWrite: false,
+  });
+  shimmerMesh = new THREE.Mesh(new THREE.PlaneGeometry(480, 480), shimmerMat);
+  shimmerMesh.rotation.x = -Math.PI / 2;
+  shimmerMesh.position.y = 0.02;
+  markDecor(shimmerMesh);
+  scene.add(shimmerMesh);
   const floor = new THREE.Mesh(
     new THREE.PlaneGeometry(1000, 1000),
     new THREE.MeshLambertMaterial({ color: C.seaDeep }),
@@ -605,7 +629,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   controls.dampingFactor = 0.08;
   controls.maxPolarAngle = Math.PI * 0.44;    // never below the horizon
   controls.minPolarAngle = Math.PI * 0.12;
-  controls.minDistance = 14;
+  controls.minDistance = 6;
   controls.maxDistance = 140;
 
   // Selection halo that follows the selected agent.
@@ -646,6 +670,9 @@ function ensureRenderer(stageEl: HTMLElement): void {
       camera.position.set(
         x + Math.sin(azimuth) * dist, y + dist * 0.62, z + Math.cos(azimuth) * dist);
       controls.update();
+    },
+    follow(id: string | null): void {
+      store.selectedAgentId = id;
     },
   };
 }
@@ -704,6 +731,10 @@ function pick(e: PointerEvent): void {
       o = o.parent;
     }
   }
+  // clicked open scenery: release the selection (and the camera follow)
+  store.selectedAgentId = null;
+  store.selectedStructureId = null;
+  renderChrome();
 }
 
 // Screen-space paper, one texture with three INDEPENDENT channels the grade
@@ -1039,6 +1070,7 @@ function buildTerrain(st: WorldState): void {
 
   // Sea + sky furniture follows the island.
   waterMesh.position.set(cx, 0, cz);
+  shimmerMesh?.position.set(cx, 0.02, cz);
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildFoam(st);
   buildWaves(cx, cz, n);
@@ -1100,9 +1132,50 @@ function buildFoam(st: WorldState): void {
   scene.add(foamGroup);
 }
 
-// Painted sea: sparse hand-drawn wave dashes floating on the water around the
-// island — the picture-book signature — each one slowly surfacing, drifting a
-// little, and sinking away on its own phase (animated in tick()).
+// Painted water surface: seamless canvas of soft horizontal ripple strokes —
+// sine-periodic in x (wraps exactly), stamped ±size in y. Multiplied under the
+// water colour and slowly scrolled it gives the sea its brushwork; a second
+// counter-scrolling layer above adds the parallax "depth" of moving washes.
+function rippleTexture(salt: number): THREE.Texture {
+  const size = 512;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d")!;
+  ctx.fillStyle = "#f2f2ee";
+  ctx.fillRect(0, 0, size, size);
+  let s = 7433 + salt * 1013;
+  const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
+  ctx.lineCap = "round";
+  for (let i = 0; i < 46; i += 1) {
+    const y0 = rnd() * size;
+    const amp = 2 + rnd() * 7;
+    const k = 1 + Math.floor(rnd() * 3);        // whole waves per tile = seamless
+    const ph = rnd() * Math.PI * 2;
+    const dark = rnd() < 0.62;
+    const alpha = 0.05 + rnd() * 0.09;
+    ctx.strokeStyle = dark
+      ? `rgba(96, 128, 128, ${alpha})` : `rgba(255, 255, 252, ${alpha * 1.4})`;
+    ctx.lineWidth = 2.5 + rnd() * 5;
+    const x0 = rnd() * size, len = size * (0.25 + rnd() * 0.5);
+    for (const oy of [-size, 0, size]) {
+      for (const ox of [-size, 0]) {          // second stamp wraps the right edge
+        ctx.beginPath();
+        for (let x = 0; x <= len; x += 8) {
+          const y = y0 + oy + Math.sin(((x0 + x) / size) * Math.PI * 2 * k + ph) * amp;
+          if (x === 0) ctx.moveTo(x0 + x + ox, y); else ctx.lineTo(x0 + x + ox, y);
+        }
+        ctx.stroke();
+      }
+    }
+  }
+  const tex = new THREE.CanvasTexture(cv);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  tex.colorSpace = THREE.SRGBColorSpace;
+  return tex;
+}
+
+// Sparse hand-drawn wave dashes floating on the water around the island —
+// each one slowly surfacing, holding, and sinking away on its own phase.
 let waveTex: THREE.Texture | null = null;
 
 function waveStrokeTexture(): THREE.Texture {
@@ -1162,28 +1235,36 @@ function buildWaves(cx: number, cz: number, n: number): void {
 function buildClouds(cx: number, cz: number, n: number): void {
   cloudsGroup?.removeFromParent();
   cloudsGroup = new THREE.Group();
-  // just below pure white: unlit slabs at 1.0 fed the bloom pass and glowed
-  const mat = new THREE.MeshBasicMaterial({
+  // just below pure white: unlit slabs at 1.0 fed the bloom pass and glowed.
+  // The material is shared and night-tinted in tick() — paper-white clouds
+  // over a midnight sea read as glowing billboards otherwise.
+  cloudMat = new THREE.MeshBasicMaterial({
     color: 0xdfe6e2, transparent: true, opacity: 0.92,
   });
-  for (let i = 0; i < 5; i += 1) {
+  for (let i = 0; i < 7; i += 1) {
     const cluster = new THREE.Group();
     const r = hashStr(`cloud${i}`);
-    const slabs = 2 + Math.floor(r * 2);
+    const slabs = 2 + Math.floor(hashStr(`cs${i}`) * 3);
     for (let b = 0; b < slabs; b += 1) {
       const rb = hashStr(`cloud${i}b${b}`);
       const slab = new THREE.Mesh(
-        new THREE.BoxGeometry(2.6 + rb * 2.6, 0.5 + rb * 0.3, 1.4 + rb * 1.2), mat);
-      slab.position.set(b * 1.6 - slabs * 0.8 + rb, b * 0.42, (rb - 0.5) * 1.4);
+        new THREE.BoxGeometry(2.2 + rb * 3.2, 0.45 + rb * 0.35, 1.3 + rb * 1.3), cloudMat);
+      slab.position.set(b * 1.5 - slabs * 0.75 + rb, b * 0.4, (rb - 0.5) * 1.8);
       slab.castShadow = true;
       cluster.add(slab);
     }
+    // golden-angle scatter with jitter: decorrelated positions, no more
+    // clouds marching in a diagonal row (one hash drove x AND z before)
+    const a = i * 2.39996 + hashStr(`ca${i}`) * 1.1;
+    const rad = n * (0.12 + 0.52 * Math.sqrt((i + hashStr(`crr${i}`)) / 7));
+    const sc = 0.7 + hashStr(`csz${i}`) * 0.8;
+    cluster.scale.setScalar(sc);
     cluster.position.set(
-      cx + (r - 0.5) * n * 1.4,
-      14 + r * 5,
-      cz + (hashStr(`cz${i}`) - 0.5) * n * 1.2,
+      cx + Math.cos(a) * rad,
+      12.5 + hashStr(`ch${i}`) * 7,
+      cz + Math.sin(a) * rad * 0.85,
     );
-    cluster.userData.speed = 0.35 + r * 0.4;
+    cluster.userData.speed = 0.3 + hashStr(`cv${i}`) * 0.45;
     cloudsGroup.add(cluster);
   }
   scene.add(cloudsGroup);
@@ -1271,20 +1352,43 @@ function makePalm(id: string): THREE.Group {
 }
 
 function makeFruitTree(id: string): THREE.Group {
-  // Round-crown tree with visible fruit — food sources read at a glance.
+  // Fruit trees in three silhouettes — round, stacked-tall, umbrella — so an
+  // orchard reads as a mixed stand, not a row of identical lollipops.
   const g = new THREE.Group();
   const r = hashStr(id);
-  const h = 0.8 + r * 0.3;
+  const v = hashStr(id + "var");
+  const h = (0.8 + r * 0.3) * (v > 0.66 ? 0.85 : v > 0.33 ? 1.25 : 1);
   const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.05, 0.08, h, 5), lam(C.trunk));
   trunk.position.y = h / 2;
+  trunk.rotation.z = (r - 0.5) * 0.16;
   trunk.castShadow = true;
   g.add(trunk);
-  const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.4 + r * 0.1, 0), lamJ(C.leaf, id, 0.07));
-  crown.position.y = h + 0.16;
-  crown.scale.y = 0.8;
-  crown.castShadow = true;
-  g.add(crown);
-  breathers.push({ m: crown, phase: r * 23, amp: 0.02, base: 1 });
+  const mat = lamJ(C.leaf, id, 0.07);
+  const crowns: THREE.Mesh[] = [];
+  if (v > 0.66) {
+    // umbrella: one wide flattened crown
+    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.5 + r * 0.12, 0), mat);
+    crown.position.y = h + 0.14;
+    crown.scale.y = 0.55;
+    crowns.push(crown);
+  } else if (v > 0.33) {
+    // stacked: two blobs, big under small — a taller silhouette
+    const lo = new THREE.Mesh(new THREE.IcosahedronGeometry(0.36 + r * 0.08, 0), mat);
+    lo.position.y = h + 0.05;
+    const hi = new THREE.Mesh(new THREE.IcosahedronGeometry(0.24 + r * 0.06, 0), mat);
+    hi.position.set((r - 0.5) * 0.14, h + 0.42, (r - 0.5) * 0.1);
+    crowns.push(lo, hi);
+  } else {
+    const crown = new THREE.Mesh(new THREE.IcosahedronGeometry(0.4 + r * 0.1, 0), mat);
+    crown.position.y = h + 0.16;
+    crown.scale.y = 0.8;
+    crowns.push(crown);
+  }
+  for (const crown of crowns) {
+    crown.castShadow = true;
+    g.add(crown);
+    breathers.push({ m: crown, phase: r * 23, amp: 0.02, base: crown.scale.x });
+  }
   for (let i = 0; i < 3; i += 1) {
     const fruit = new THREE.Mesh(new THREE.SphereGeometry(0.045, 5, 4), lam(0xe8842e));
     const a = r * 7 + i * 2.1;
@@ -1310,16 +1414,36 @@ function makeRock(id: string, tint = C.stone): THREE.Group {
 }
 
 function makeBush(id: string): THREE.Group {
+  // Bushes in three reads: single mound, three-blob cluster, berry bush.
   const g = new THREE.Group();
   const r = hashStr(id);
-  const bush = new THREE.Mesh(
-    new THREE.IcosahedronGeometry(0.22 + r * 0.08, 0),
-    lamJ(C.bush, id, 0.07),
-  );
-  bush.position.y = 0.14;
-  bush.scale.y = 0.75;
-  bush.castShadow = true;
-  g.add(bush);
+  const v = hashStr(id + "var");
+  const mat = lamJ(C.bush, id, 0.07);
+  if (v > 0.6) {
+    for (let i = 0; i < 3; i += 1) {
+      const ri = hashStr(id + "b" + i);
+      const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(0.12 + ri * 0.09, 0), mat);
+      const a = ri * 9 + i * 2.1;
+      blob.position.set(Math.cos(a) * 0.13, 0.1 + ri * 0.05, Math.sin(a) * 0.13);
+      blob.scale.y = 0.75;
+      blob.castShadow = true;
+      g.add(blob);
+    }
+  } else {
+    const bush = new THREE.Mesh(new THREE.IcosahedronGeometry(0.22 + r * 0.08, 0), mat);
+    bush.position.y = 0.14;
+    bush.scale.y = 0.75;
+    bush.castShadow = true;
+    g.add(bush);
+    if (v > 0.3) {
+      for (let i = 0; i < 4; i += 1) {
+        const a = r * 11 + i * 1.65;
+        const berry = new THREE.Mesh(new THREE.SphereGeometry(0.022, 4, 3), lam(0xb2496a));
+        berry.position.set(Math.cos(a) * 0.18, 0.15 + (i % 2) * 0.09, Math.sin(a) * 0.18);
+        g.add(berry);
+      }
+    }
+  }
   return g;
 }
 
@@ -1379,15 +1503,25 @@ function buildProps(st: WorldState): void {
         const gy = heightAt(wx, wz);
         if (gy < 0.15) continue;
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
+        const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
+        const stemH = tall ? s * 1.7 : s;
         const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0),
           canopyMats[(tx * 7 + ty * 13 + k) % 6]);
-        blob.position.set(wx, gy + s * 0.9, wz);
+        blob.position.set(wx, gy + stemH + s * 0.35, wz);
         blob.scale.y = 0.8;
         blob.castShadow = true;
         breathers.push({ m: blob, phase: hash01(tx, ty, 99 + k) * 20, amp: 0.02, base: 1 });
-        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, s, 4), lam(C.trunk));
-        stem.position.set(wx, gy + s * 0.4, wz);
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, stemH, 4), lam(C.trunk));
+        stem.position.set(wx, gy + stemH * 0.5, wz);
         propsGroup.add(stem, blob);
+        if (tall) {
+          const top = new THREE.Mesh(new THREE.IcosahedronGeometry(s * 0.55, 0),
+            canopyMats[(tx * 7 + ty * 13 + k + 3) % 6]);
+          top.position.set(wx + 0.08, gy + stemH + s * 0.95, wz);
+          top.castShadow = true;
+          breathers.push({ m: top, phase: hash01(tx, ty, 103 + k) * 20, amp: 0.02, base: 1 });
+          propsGroup.add(top);
+        }
       }
     }
   }
@@ -1945,10 +2079,28 @@ function makeMeeple3d(a: AgentState): THREE.Group {
 
 function syncAgents3d(st: WorldState): void {
   const seen = new Set<string>();
+  // Agents sharing a tile fan out around its centre (deterministic order by
+  // id) so meeples never merge into one another while chatting face to face.
+  const byTile = new Map<string, string[]>();
+  for (const a of st.agents) {
+    const key = `${a.x},${a.y}`;
+    const list = byTile.get(key) ?? [];
+    list.push(a.id);
+    byTile.set(key, list);
+  }
+  for (const list of byTile.values()) list.sort();
   for (const a of st.agents) {
     seen.add(a.id);
     let v = agents3d.get(a.id);
-    const tx = a.x + 0.5, tz = a.y + 0.5;
+    let tx = a.x + 0.5, tz = a.y + 0.5;
+    const mates = byTile.get(`${a.x},${a.y}`)!;
+    if (mates.length > 1) {
+      const i = mates.indexOf(a.id);
+      const ang = (i / mates.length) * Math.PI * 2 + hashStr(`${a.x},${a.y}`) * 6.28;
+      const rad = mates.length === 2 ? 0.17 : 0.26;
+      tx += Math.cos(ang) * rad;
+      tz += Math.sin(ang) * rad;
+    }
     if (!v) {
       const group = makeMeeple3d(a);
       group.position.set(tx, Math.max(0.02, heightAt(tx, tz)), tz);
@@ -2113,6 +2265,35 @@ function tick(): void {
     selRing.visible = false;
   }
 
+  // CINEMATIC FOLLOW: while an agent is selected the camera tracks them —
+  // orbit target glides onto the meeple (camera moves in parallel, so the
+  // user's orbit angle and zoom are preserved), with a one-shot dolly-in and
+  // a telephoto squeeze for the film look. Click open water to break free.
+  if (store.selectedAgentId !== followId) {
+    followId = store.selectedAgentId;
+    followDollyT = followId ? 0 : 1e9;
+  }
+  if (sel) {
+    followDollyT += dt;
+    followGoal.set(sel.x, sel.group.position.y + 0.35, sel.z);
+    followDelta.copy(followGoal).sub(controls.target);
+    const k = Math.min(1, dt * 3.2);
+    controls.target.addScaledVector(followDelta, k);
+    camera.position.addScaledVector(followDelta, k);
+    if (followDollyT < 1.5) {                       // approach, then hands off
+      followDelta.copy(camera.position).sub(controls.target);
+      const len = followDelta.length();
+      const want = Math.min(len, 11);
+      const nl = len + (want - len) * Math.min(1, dt * 2.2);
+      camera.position.copy(controls.target).addScaledVector(followDelta.normalize(), nl);
+    }
+  }
+  const wantFov = sel ? 24 : 32;                    // telephoto while following
+  if (Math.abs(camera.fov - wantFov) > 0.05) {
+    camera.fov += (wantFov - camera.fov) * Math.min(1, dt * 2.5);
+    camera.updateProjectionMatrix();
+  }
+
   // atmosphere: waves, drifting clouds, breathing foam, storm front
   const now = performance.now() / 1000;
   const storm = state.weather === "storm" ? 1 : 0;
@@ -2134,8 +2315,25 @@ function tick(): void {
     const n = state.map.size;
     for (const cl of cloudsGroup.children) {
       cl.position.x += (cl.userData.speed as number) * dt * (1 + stormMix * 2.5);
-      if (cl.position.x > n / 2 + n) cl.position.x = n / 2 - n;
+      if (cl.position.x > n / 2 + n) {
+        cl.position.x = n / 2 - n;
+        cl.position.z = n / 2 + (Math.random() - 0.5) * n * 1.1;   // fresh lane
+        cl.position.y = 12.5 + Math.random() * 7;
+      }
     }
+  }
+  if (cloudMat) {
+    cloudMat.color.setHex(0xdfe6e2).lerp(new THREE.Color(0x39485a), nightMix)
+      .lerp(stormGrey, stormMix * 0.5);
+    cloudMat.opacity = 0.92 - nightMix * 0.18;
+  }
+
+  // painted water drifts; the shimmer layer counter-scrolls for parallax depth
+  if (waterTexA) { waterTexA.offset.x = now * 0.0045; waterTexA.offset.y = now * 0.0016; }
+  if (shimmerMat && shimmerMat.map) {
+    shimmerMat.map.offset.x = -now * 0.003;
+    shimmerMat.map.offset.y = now * 0.0022;
+    shimmerMat.opacity = 0.10 - nightMix * 0.05 + stormMix * 0.04;
   }
 
   // wind: fronds swing, canopies breathe — faster and wider in a storm
