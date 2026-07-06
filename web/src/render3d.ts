@@ -30,15 +30,20 @@ const GradeShader = {
   uniforms: {
     tDiffuse: { value: null as THREE.Texture | null },
     uTime: { value: 0 },
+    uPaper: { value: null as THREE.Texture | null },
+    uRes: { value: new THREE.Vector2(1280, 720) },
   },
   vertexShader: `
     varying vec2 vUv;
     void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
   fragmentShader: `
     uniform sampler2D tDiffuse;
+    uniform sampler2D uPaper;
+    uniform vec2 uRes;
     uniform float uTime;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+    float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
     void main() {
       // subtle radial chromatic aberration — a lens, not a framebuffer
       vec2 dir = vUv - 0.5;
@@ -46,6 +51,17 @@ const GradeShader = {
       vec4 c = texture2D(tDiffuse, vUv);
       c.r = texture2D(tDiffuse, vUv - off).r;
       c.b = texture2D(tDiffuse, vUv + off).b;
+
+      // ink pooling: watercolour pigment gathers at shape boundaries — a soft
+      // luminance-Sobel darkens edges, giving the frame a hand-inked cohesion
+      vec2 px = 1.0 / uRes;
+      float gx = luma(texture2D(tDiffuse, vUv + vec2(px.x, 0.0)).rgb)
+               - luma(texture2D(tDiffuse, vUv - vec2(px.x, 0.0)).rgb);
+      float gy = luma(texture2D(tDiffuse, vUv + vec2(0.0, px.y)).rgb)
+               - luma(texture2D(tDiffuse, vUv - vec2(0.0, px.y)).rgb);
+      float edge = min(0.13, (abs(gx) + abs(gy)) * 0.55);
+      c.rgb *= 1.0 - edge;
+
       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
 
       // split toning: shadows drift teal, highlights drift gold
@@ -75,6 +91,9 @@ const GradeShader = {
       float grain = g1 * 0.62 + g2 * 0.38;
       float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
       c.rgb += grain * 0.052 * gw;
+      // paper: the whole frame sits on one sheet (Susurrus's quiet trick)
+      float paper = texture2D(uPaper, vUv * vec2(uRes.x / uRes.y, 1.0) * 2.4).r;
+      c.rgb *= 0.955 + paper * 0.075;
       gl_FragColor = c;
     }`,
 };
@@ -326,9 +345,9 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   // Sea: a segmented surface plane with GPU waves + an opaque deep floor.
   const waterMatl = new THREE.MeshPhongMaterial({
-    color: 0x3fa7ad, transparent: true, opacity: 0.55,
-    shininess: 18, specular: 0x1e3a44,        // matte emerald water, no glare
-  });
+    color: 0x76aeb2, transparent: true, opacity: 0.5,
+    shininess: 14, specular: 0x1e3a44,   // sky-toned matte water (Bad North void);
+  });                                    // the shelf plate supplies the turquoise
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uAmp = { value: 0.05 };
@@ -380,6 +399,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
   composer.addPass(new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.32, 0.7, 0.82));
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
+  gradePass.uniforms.uPaper.value = paperTexture();
   composer.addPass(gradePass);
   fxaaPass = new ShaderPass(FXAAShader);
   composer.addPass(fxaaPass);
@@ -443,6 +463,50 @@ function pick(e: PointerEvent): void {
   }
 }
 
+// Screen-space paper: fine fibrous grain + faint blotches, sampled by the grade
+// shader so the whole frame reads as one sheet of cold-press paper.
+let paperTex: THREE.Texture | null = null;
+
+function paperTexture(): THREE.Texture {
+  if (paperTex) return paperTex;
+  const size = 512;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d")!;
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(0, 0, size, size);
+  let s = 31337;
+  const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
+  // per-pixel tooth
+  const img = ctx.getImageData(0, 0, size, size);
+  for (let i = 0; i < img.data.length; i += 4) {
+    const v = 246 + Math.floor(rnd() * 10);
+    img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v;
+  }
+  ctx.putImageData(img, 0, 0);
+  // short horizontal fibres
+  ctx.strokeStyle = "rgba(190,196,190,0.05)";
+  for (let i = 0; i < 1400; i += 1) {
+    const x = rnd() * size, y = rnd() * size, len = 3 + rnd() * 9;
+    ctx.beginPath();
+    ctx.moveTo(x, y);
+    ctx.lineTo(x + len, y + (rnd() - 0.5) * 2);
+    ctx.stroke();
+  }
+  // large soft blotches
+  for (let i = 0; i < 60; i += 1) {
+    const x = rnd() * size, y = rnd() * size, r = 24 + rnd() * 60;
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, `rgba(226,230,222,${0.02 + rnd() * 0.03})`);
+    grad.addColorStop(1, "rgba(0,0,0,0)");
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - r, y - r, r * 2, r * 2);
+  }
+  paperTex = new THREE.CanvasTexture(cv);
+  paperTex.wrapS = paperTex.wrapT = THREE.RepeatWrapping;
+  return paperTex;
+}
+
 // Hand-painted paper wash: soft irregular blotches stamped on a near-white
 // canvas, tiled in world space over the whole island. Multiplied under the
 // vertex colours it turns "coloured polygons" into one painted surface.
@@ -474,6 +538,13 @@ function paintTexture(n: number): THREE.Texture {
   }
   paintTex.repeat.set(n / 11, n / 11);
   return paintTex;
+}
+
+// Same wash for plate tops, whose UVs are in WORLD units (Extrude shape coords).
+function platePaint(): THREE.Texture {
+  const t = paintTexture(1);
+  t.repeat.set(1 / 9, 1 / 9);
+  return t;
 }
 
 // ── loop classification for extrusion (outer shells vs holes) ─────────────────
@@ -540,12 +611,39 @@ function buildTerrain(st: WorldState): void {
   const n = st.map.size;
   buildHeights(st);
 
+  // Submerged shelf: a turquoise plate just under the surface — the glowing
+  // shallows ring that reads through the translucent water (Islanders shore).
+  {
+    const solid = (x: number, y: number) =>
+      x >= 0 && y >= 0 && x <= n && y <= n && heightGrid[y]?.[x] > -0.65;
+    let loops = maskLoops(n + 1, solid).map((l) => chaikin(l, 2));
+    loops = loops.map((l) => l.filter((_, i) => i % 2 === 0));
+    loops = loops.filter((l) => Math.abs(polyArea(l)) > 4);
+    for (const shell of classifyLoops(loops)) {
+      const shape = new THREE.Shape(shell.outer.map(([x, z]) => new THREE.Vector2(x, -z)));
+      for (const h of shell.holes) {
+        shape.holes.push(new THREE.Path(h.map(([x, z]) => new THREE.Vector2(x, -z))));
+      }
+      const geo = new THREE.ExtrudeGeometry(shape, {
+        depth: 1.0, steps: 1, bevelEnabled: false,
+      });
+      geo.rotateX(-Math.PI / 2);
+      geo.translate(0, -1.32, 0);
+      const mesh = new THREE.Mesh(geo, [lamS(0x83c9be), lamS(0x63a9a0)]);
+      mesh.receiveShadow = true;
+      terrainGroup.add(mesh);
+    }
+  }
+
   // One plate per level: smooth contour -> Shape (with holes) -> extrusion with
   // a soft bevel lip. Flat tops, smooth vertical walls, authored silhouette.
   const topColors = [0xe9ddb6, 0x9fc37e, 0x93bb74, 0x89ad84, 0xaaa69e];
   const wallLow = lamS(0xcfbf9a);              // wet-sand base walls
   const wallHigh = lamS(0x9aa1a5);             // grey rock walls above
   const BEV = 0.12;
+  const dress = new THREE.Group();             // rim grass + wall-foot rocks
+  const tuftMat = lamS(0x7ba763);
+  const rockMat = lam(0x9d9890);
   for (let k = 0; k < PLATE_THRESH.length; k += 1) {
     const thr = PLATE_THRESH[k];
     const solid = (x: number, y: number) =>
@@ -558,6 +656,7 @@ function buildTerrain(st: WorldState): void {
     const baseY = k === 0 ? -1.3 : PLATE_TOP[k - 1] - 0.08;
     const depth = PLATE_TOP[k] - baseY - BEV * 2;
     const topMat = lamS(topColors[k]);
+    topMat.map = platePaint();                 // hand-painted wash on the calm top
     for (const shell of classifyLoops(loops)) {
       const shape = new THREE.Shape(
         shell.outer.map(([x, z]) => new THREE.Vector2(x, -z)));
@@ -575,8 +674,42 @@ function buildTerrain(st: WorldState): void {
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       terrainGroup.add(mesh);
+
+      // SET DRESSING along this shell's rim: grass tufts just inside the edge
+      // (life at the silhouette) and small rocks at the wall's foot below.
+      const loop = shell.outer;
+      for (let i = 0; i < loop.length; i += 6) {
+        const [px, pz] = loop[i];
+        const [qx, qz] = loop[(i + 3) % loop.length];
+        const tx = qx - px, tz = qz - pz;
+        const len = Math.hypot(tx, tz) || 1;
+        let nx = -tz / len, nz = tx / len;     // candidate inward normal
+        if (!pointInLoop(px + nx * 0.8, pz + nz * 0.8, loop)) { nx = -nx; nz = -nz; }
+        const r = hashStr(`d${k}:${i}:${Math.round(px)}`);
+        if (r < 0.5) {
+          // tuft: three tiny leaning cones on the rim
+          for (let b = 0; b < 3; b += 1) {
+            const cone3 = new THREE.Mesh(
+              new THREE.ConeGeometry(0.035, 0.16 + (b % 2) * 0.06, 4), tuftMat);
+            cone3.position.set(
+              px + nx * (0.5 + r * 0.5) + (b - 1) * 0.09,
+              PLATE_TOP[k] + 0.07, pz + nz * (0.5 + r * 0.5) + ((b + 1) % 2) * 0.07);
+            cone3.rotation.z = (b - 1) * 0.22;
+            dress.add(cone3);
+          }
+        } else if (r < 0.68 && k >= 1) {
+          // rock at the foot of the wall on the plate below
+          const rock = new THREE.Mesh(
+            new THREE.DodecahedronGeometry(0.1 + r * 0.12, 0), rockMat);
+          rock.position.set(px - nx * 0.55, PLATE_TOP[k - 1] + 0.08, pz - nz * 0.55);
+          rock.rotation.set(r * 7, r * 3, r * 5);
+          rock.castShadow = true;
+          dress.add(rock);
+        }
+      }
     }
   }
+  terrainGroup.add(dress);
 
   // Bad North: the island mirrored as a dark still silhouette in the water.
   const reflMat = new THREE.MeshBasicMaterial({
@@ -868,8 +1001,8 @@ function buildProps(st: WorldState): void {
     for (let tx = 0; tx < n; tx += 1) {
       if (!st.map.grid[ty][tx].includes("foliage")) continue;
       const r = hash01(tx, ty, 91);
-      if (r > 0.55) continue;
-      const count = r < 0.18 ? 2 : 1;
+      if (r > 0.4) continue;               // sparser, chunkier groves
+      const count = r < 0.14 ? 2 : 1;
       for (let k = 0; k < count; k += 1) {
         const ox = hash01(tx, ty, 92 + k) * 0.8 + 0.1;
         const oz = hash01(tx, ty, 95 + k) * 0.8 + 0.1;
@@ -1426,6 +1559,7 @@ function tick(): void {
       composer.setPixelRatio(pr);
       (fxaaPass.material.uniforms.resolution.value as THREE.Vector2)
         .set(1 / (w * pr), 1 / (h * pr));
+      (gradePass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       camera.aspect = w / Math.max(1, h);
       camera.updateProjectionMatrix();
     }
