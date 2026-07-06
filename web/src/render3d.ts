@@ -40,6 +40,7 @@ const GradeShader = {
     uInvVP: { value: new THREE.Matrix4() },
     uCamPos: { value: new THREE.Vector3() },
     uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
+    uStorm: { value: 0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -53,6 +54,7 @@ const GradeShader = {
     uniform mat4 uInvVP;
     uniform vec3 uCamPos;
     uniform vec3 uCamFwd;
+    uniform float uStorm;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -150,6 +152,14 @@ const GradeShader = {
 
       // haze-lifted blacks: nothing is ever pure dark
       c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
+
+      // storm grade: colour drains toward cold slate, highlights come down —
+      // the whole frame turns bruised while the weather lasts
+      if (uStorm > 0.01) {
+        float sl = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+        c.rgb = mix(c.rgb, vec3(sl) * vec3(0.90, 0.97, 1.06), uStorm * 0.32);
+        c.rgb *= 1.0 - uStorm * 0.06;
+      }
 
       // screen-space granulation: barely-there (world-space turbulence above
       // is the real pigment layer), and through the pigment equation so it
@@ -456,6 +466,8 @@ let waterMat: THREE.MeshPhongMaterial | null = null;
 let islandCX = 30, islandCZ = 30;          // sun orbits this
 let followId: string | null = null;        // camera-follow state
 let followDollyT = 1e9;                    // seconds since the follow started
+let nextFlash = 0;                         // lightning scheduler (storm only)
+let flashStart = -10;
 const followGoal = new THREE.Vector3();
 const followDelta = new THREE.Vector3();
 
@@ -1285,6 +1297,7 @@ function buildTerrain(st: WorldState): void {
   buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
   buildSkyLife(cx, cz, n);
+  buildGrass(st);
 
   // First-time camera framing: pulled back so the island floats in open sea.
   camera.position.set(cx + n * 0.12, n * 1.1, cz + n * 1.25);
@@ -1584,7 +1597,7 @@ function buildClouds(cx: number, cz: number, n: number): void {
   scene.add(cloudsGroup);
 
   // rain: slanted streaks over the island, alive only while a storm blows
-  const DROPS = 150;
+  const DROPS = 300;
   rainBase = new Float32Array(DROPS * 4);
   const rp = new Float32Array(DROPS * 6);
   for (let i = 0; i < DROPS; i += 1) {
@@ -1601,6 +1614,95 @@ function buildClouds(cx: number, cz: number, n: number): void {
   rainMesh.frustumCulled = false;
   markDecor(rainMesh);
   scene.add(rainMesh);
+}
+
+// GRASS: one InstancedMesh of small blade fans scattered over every meadow
+// tile — the plains stop being flat green felt. The wind lives in the vertex
+// shader (tips bend by height, phase from the instance's world position), so
+// thousands of tufts sway for the cost of one draw call.
+let grassMesh: THREE.InstancedMesh | null = null;
+let grassShader: { uniforms: Record<string, { value: number }> } | null = null;
+
+function bladeGeometry(): THREE.BufferGeometry {
+  const pos: number[] = [];
+  const BLADES = 5;
+  for (let i = 0; i < BLADES; i += 1) {
+    const a = (i / BLADES) * Math.PI * 2 + i * 0.7;
+    const bx = Math.cos(a) * 0.03, bz = Math.sin(a) * 0.03;
+    const h = 0.13 + (i % 3) * 0.045;
+    const lean = 0.05 + (i % 2) * 0.03;
+    const tx = bx + Math.cos(a) * lean, tz = bz + Math.sin(a) * lean;
+    const wx = -Math.sin(a) * 0.014, wz = Math.cos(a) * 0.014;
+    pos.push(bx - wx, 0, bz - wz, bx + wx, 0, bz + wz, tx, h, tz);
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.computeVertexNormals();
+  return geo;
+}
+
+function buildGrass(st: WorldState): void {
+  grassMesh?.removeFromParent();
+  grassMesh = null;
+  const n = st.map.size;
+  const spots: { x: number; y: number; z: number; s: number; c: THREE.Color }[] = [];
+  const base = new THREE.Color(0x7fb35c);
+  for (let ty = 0; ty < n; ty += 1) {
+    for (let tx = 0; tx < n; tx += 1) {
+      const t = st.map.grid[ty][tx];
+      const isGrass = t.includes("grass") && !t.includes("water");
+      const isFol = t.includes("foliage");
+      if (!isGrass && !isFol) continue;
+      const per = isFol ? 2 : 4;               // groves stay sparser
+      for (let k = 0; k < per; k += 1) {
+        if (hash01(tx, ty, 130 + k) > 0.68) continue;
+        const wx = tx + hash01(tx, ty, 140 + k);
+        const wz = ty + hash01(tx, ty, 150 + k);
+        const gy = heightAt(wx, wz);
+        if (gy < 0.6) continue;                // no grass on the beach skirt
+        const c = base.clone();
+        const flower = hash01(tx, ty, 160 + k) < 0.045;
+        if (flower) c.setHex(hash01(tx, ty, 161 + k) < 0.5 ? 0xf2e2b8 : 0xe8b8c8);
+        else c.offsetHSL((hash01(tx, ty, 162 + k) - 0.5) * 0.07, 0,
+          (hash01(tx, ty, 163 + k) - 0.5) * 0.12);
+        spots.push({ x: wx, y: gy, z: wz, s: 0.95 + hash01(tx, ty, 170 + k) * 0.85, c });
+      }
+    }
+  }
+  if (!spots.length) return;
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  mat.onBeforeCompile = (shader) => {
+    shader.uniforms.uTime = { value: 0 };
+    shader.uniforms.uWind = { value: 0.4 };
+    shader.vertexShader = "uniform float uTime;\nuniform float uWind;\n" +
+      shader.vertexShader.replace(
+        "#include <begin_vertex>",
+        `#include <begin_vertex>
+         #ifdef USE_INSTANCING
+         float iph = instanceMatrix[3][0] * 0.9 + instanceMatrix[3][2] * 0.7;
+         transformed.x += sin(uTime * 1.7 + iph) * transformed.y * uWind;
+         transformed.z += cos(uTime * 1.3 + iph * 1.4) * transformed.y * uWind * 0.6;
+         #endif`,
+      );
+    grassShader = shader as unknown as { uniforms: Record<string, { value: number }> };
+  };
+  grassMesh = new THREE.InstancedMesh(bladeGeometry(), mat, spots.length);
+  const m4 = new THREE.Matrix4();
+  const q = new THREE.Quaternion();
+  const up = new THREE.Vector3(0, 1, 0);
+  const sc = new THREE.Vector3();
+  for (let i = 0; i < spots.length; i += 1) {
+    const sp = spots[i];
+    q.setFromAxisAngle(up, hashStr(`ga${i}`) * Math.PI * 2);
+    sc.setScalar(sp.s);
+    m4.compose(new THREE.Vector3(sp.x, sp.y, sp.z), q, sc);
+    grassMesh.setMatrixAt(i, m4);
+    grassMesh.setColorAt(i, sp.c);
+  }
+  grassMesh.receiveShadow = true;
+  grassMesh.frustumCulled = false;           // geometry bounds ≠ instance bounds
+  markDecor(grassMesh);                      // no ink outlines on 1000 tufts
+  scene.add(grassMesh);
 }
 
 // Sky life: gulls circling the island by day, butterflies over the meadows.
@@ -1828,6 +1930,7 @@ function makeBush(id: string): THREE.Group {
       blob.scale.y = 0.75;
       blob.castShadow = true;
       g.add(blob);
+      breathers.push({ m: blob, phase: ri * 21, amp: 0.015, base: 1 });
     }
   } else {
     const bush = new THREE.Mesh(new THREE.IcosahedronGeometry(0.22 + r * 0.08, 0), mat);
@@ -1835,6 +1938,7 @@ function makeBush(id: string): THREE.Group {
     bush.scale.y = 0.75;
     bush.castShadow = true;
     g.add(bush);
+    breathers.push({ m: bush, phase: r * 19, amp: 0.015, base: 1 });
     if (v > 0.3) {
       for (let i = 0; i < 4; i += 1) {
         const a = r * 11 + i * 1.65;
@@ -1981,9 +2085,10 @@ function cone(r: number, h: number, seg: number, color: number,
 }
 
 // Live fire: three additive cones (orange shell, amber body, pale core) that
-// flicker in tick(), plus glowing embers at the base. Registered globally so
-// the animation loop can breathe life into every fire on the island.
+// flicker in tick() — plus rising SPARKS and glowing embers. Registered
+// globally so the animation loop can breathe life into every fire at once.
 let flames: THREE.Mesh[] = [];
+let sparks: THREE.Mesh[] = [];
 
 function makeFire(s: number, y: number): THREE.Group {
   const g = new THREE.Group();
@@ -2005,6 +2110,21 @@ function makeFire(s: number, y: number): THREE.Group {
     cone.userData.baseY = cone.position.y;
     flames.push(cone);
     g.add(cone);
+  }
+  // sparks: tiny embers that ride the heat column, wander and die out
+  for (let i = 0; i < 7; i += 1) {
+    const sp = new THREE.Mesh(
+      new THREE.SphereGeometry(s * 0.045, 4, 3),
+      new THREE.MeshBasicMaterial({
+        color: i % 2 ? 0xffc46a : 0xff8a3e, transparent: true, opacity: 0,
+        blending: THREE.AdditiveBlending, depthWrite: false,
+      }),
+    );
+    sp.userData.seed = i / 7 + s * 3.7;
+    sp.userData.s = s;
+    sp.userData.y0 = y + s * 0.5;
+    sparks.push(sp);
+    g.add(sp);
   }
   for (let i = 0; i < 4; i += 1) {                 // embers
     const e = new THREE.Mesh(
@@ -2405,6 +2525,7 @@ function buildStructs(st: WorldState): void {
   for (const l of fireLights) l.removeFromParent();
   fireLights = [];
   flames = [];
+  sparks = [];
   smokes = [];
   fireflies = [];
   structsGroup = new THREE.Group();
@@ -2431,21 +2552,26 @@ function buildStructs(st: WorldState): void {
     if (lit) {
       const pl = new THREE.PointLight(C.flame, 6, 9, 1.6);
       pl.position.set(wx, gy + 0.8, wz);
+      pl.userData.bx = wx; pl.userData.bz = wz;   // for the dancing jitter
       scene.add(pl);
       fireLights.push(pl);
 
-      // life around a burning fire: a drifting smoke column, and fireflies
-      // that only come out with the dark
+      // life around a burning fire: a TALL billowing smoke column, and a
+      // fairytale swarm of fireflies that comes out with the dark
       const base = new THREE.Vector3(wx, gy + 0.55, wz);
       const puffs: THREE.Mesh[] = [];
-      for (let i = 0; i < 5; i += 1) {
-        const puff = new THREE.Mesh(new THREE.SphereGeometry(0.11, 6, 5), smokeMat.clone());
+      for (let i = 0; i < 8; i += 1) {
+        const puff = new THREE.Mesh(new THREE.SphereGeometry(0.13, 6, 5), smokeMat.clone());
         puffs.push(puff);
         lifeGroup.add(puff);
       }
       smokes.push({ base, puffs, seed: hashStr(s.id) });
-      for (let i = 0; i < 6; i += 1) {
-        const fly = new THREE.Mesh(new THREE.SphereGeometry(0.022, 4, 3), flyMat.clone());
+      const flyCols = [0xffd97a, 0xffe9a8, 0xcaf0b4];
+      for (let i = 0; i < 14; i += 1) {
+        const fm = flyMat.clone();
+        fm.color.setHex(flyCols[i % 3]);
+        const fly = new THREE.Mesh(
+          new THREE.SphereGeometry(0.016 + hashStr(s.id + "fs" + i) * 0.016, 4, 3), fm);
         fireflies.push({ m: fly, base, seed: hashStr(s.id + "fly" + i) });
         lifeGroup.add(fly);
       }
@@ -2685,6 +2811,7 @@ export function agentScreen3d(id: string): { x: number; y: number } | null {
 const stormGrey = new THREE.Color(0x8f9aa0);
 const nightCloud = new THREE.Color(0x39485a);
 const moonTint = new THREE.Color(0xe4edff);
+const flashSky = new THREE.Color(0xdfeaf8);
 const tmpColor = new THREE.Color();
 const tmpVecA = new THREE.Vector3();
 const clock = new THREE.Clock();
@@ -2746,8 +2873,20 @@ function tick(): void {
   evalLight(dayFrac);
   nightMix = LC.dark;
 
+  // lightning: during a storm the sky tears open every so often — a fast
+  // double pulse of cold light over everything (reads on land, sea and rain)
+  const nowT = performance.now() / 1000;
+  if (stormMix > 0.5 && nowT > nextFlash) {
+    flashStart = nowT;
+    nextFlash = nowT + 5 + Math.random() * 9;
+  }
+  const fd = nowT - flashStart;
+  const flash = fd >= 0 && fd < 0.5
+    ? Math.max(Math.exp(-fd * 16), 0.6 * Math.exp(-Math.abs(fd - 0.16) * 26)) * stormMix
+    : 0;
+
   sun.color.copy(LC.sun);
-  sun.intensity = LC.sunI * (1 - stormMix * 0.35);
+  sun.intensity = LC.sunI * (1 - stormMix * 0.35) + flash * 1.6;
   const sunR = 62;
   sun.position.set(
     islandCX + Math.sin(LC.azim) * Math.cos(LC.elev * 1.35) * sunR,
@@ -2756,8 +2895,9 @@ function tick(): void {
   );
   ambient.color.copy(LC.sky);
   ambient.groundColor.copy(LC.gnd);
-  ambient.intensity = LC.hemiI * (1 - stormMix * 0.2);
+  ambient.intensity = LC.hemiI * (1 - stormMix * 0.2) + flash * 1.1;
   tmpColor.copy(LC.fog).lerp(stormGrey, stormMix * 0.5);
+  if (flash > 0.01) tmpColor.lerp(flashSky, flash * 0.55);
   (scene.background as THREE.Color).copy(tmpColor);
   scene.fog!.color.copy(tmpColor);
   if (skyMat) {
@@ -2768,7 +2908,11 @@ function tick(): void {
   }
   if (waterMat) waterMat.color.copy(LC.water).lerp(stormGrey, stormMix * 0.3);
   for (const l of fireLights) {
+    const jt = performance.now() / 1000;
     l.intensity = (4.5 + Math.sin(performance.now() / 120) * 1.2) * (0.4 + nightMix * 0.9);
+    // the light source itself dances a little — shadows breathe like firelight
+    l.position.x = (l.userData.bx as number) + Math.sin(jt * 7.3) * 0.06;
+    l.position.z = (l.userData.bz as number) + Math.cos(jt * 6.1) * 0.06;
   }
 
   const skyNow = performance.now() / 1000;
@@ -2807,7 +2951,7 @@ function tick(): void {
   // rain, storm only: recompute streak endpoints while it falls
   if (rainMesh && rainBase) {
     const mat = rainMesh.material as THREE.LineBasicMaterial;
-    mat.opacity = stormMix * 0.45;
+    mat.opacity = stormMix * 0.55;
     rainMesh.visible = stormMix > 0.02;
     if (rainMesh.visible) {
       const attr = rainMesh.geometry.getAttribute("position") as THREE.BufferAttribute;
@@ -2874,13 +3018,20 @@ function tick(): void {
     surfMat.uniforms.uTime.value = now;
     surfMat.uniforms.uStorm.value = stormMix;
   }
-  // living fire: each flame layer breathes on its own phase
+  if (grassShader) {
+    grassShader.uniforms.uTime.value = now;
+    grassShader.uniforms.uWind.value = 0.35 + stormMix * 1.3;
+  }
+  // living fire: layered breathing + sideways licks + the occasional tall
+  // tongue of flame (a sharpened sine spike), each layer on its own phase
   for (const f of flames) {
     const ph = f.userData.phase as number;
-    f.scale.x = f.scale.z = 1 + Math.sin(now * 9 + ph) * 0.1;
-    f.scale.y = 1 + Math.sin(now * 13 + ph * 1.3) * 0.22;
+    const lick = Math.max(0, Math.sin(now * 3.1 + ph * 2.3)) ** 8;
+    f.scale.x = f.scale.z = 1 + Math.sin(now * 9 + ph) * 0.1 - lick * 0.12;
+    f.scale.y = 1 + Math.sin(now * 13 + ph * 1.3) * 0.2 + lick * 0.45;
     f.position.y = (f.userData.baseY as number) * f.scale.y;
     f.rotation.y = now * 1.4 + ph;
+    f.rotation.z = Math.sin(now * 6.3 + ph * 1.7) * 0.06;
   }
   if (cloudsGroup && state) {
     const n = state.map.size;
@@ -2913,36 +3064,55 @@ function tick(): void {
     const k = 1 + Math.sin(now * 1.1 + b.phase) * b.amp * wind;
     b.m.scale.x = b.base * k;
     b.m.scale.z = b.base * (2 - k);
+    // crowns also ROCK in the wind, not just breathe — reads at a distance
+    b.m.rotation.z = Math.sin(now * 1.4 + b.phase * 1.3) * 0.04 * wind;
   }
 
   // AMBIENT LIFE ──────────────────────────────────────────────────────────────
-  // smoke: puffs are born at the fire, rise, drift downwind, swell and thin
-  const drift = 0.35 + stormMix * 1.4;
+  // smoke: a real billowing column — born at the fire, rises high, leans
+  // downwind, swells and thins; each puff corkscrews a little as it climbs
+  const drift = 0.6 + stormMix * 1.8;
   for (const s of smokes) {
     for (let i = 0; i < s.puffs.length; i += 1) {
-      const t = (now * 0.11 + i / s.puffs.length + s.seed) % 1;
+      const t = (now * 0.08 + i / s.puffs.length + s.seed) % 1;
       const p = s.puffs[i];
+      const spin = now * 0.9 + i * 2.1 + s.seed * 9;
       p.position.set(
-        s.base.x + t * t * drift + Math.sin(now * 0.8 + i * 2.1) * 0.05 * t,
-        s.base.y + t * 1.7,
-        s.base.z + Math.cos(now * 0.6 + i * 1.7) * 0.05 * t,
+        s.base.x + t * t * drift + Math.sin(spin) * 0.14 * t,
+        s.base.y + t * 3.4,
+        s.base.z + Math.cos(spin * 0.8) * 0.14 * t,
       );
-      const sc = 0.5 + t * 1.6;
+      const sc = 0.45 + t * 2.7;
       p.scale.setScalar(sc);
       (p.material as THREE.MeshLambertMaterial).opacity =
-        0.24 * Math.min(1, t * 6) * (1 - t) * (1 + stormMix * 0.4);
+        0.34 * Math.min(1, t * 7) * (1 - t) * (1 + stormMix * 0.3);
     }
   }
-  // fireflies: only with darkness — lazy figure-eights near the fire, blinking
+  // fireflies: only with darkness — a loose fairytale swarm around the fire,
+  // each on its own lazy orbit, blinking out of phase
   for (const f of fireflies) {
     const t = now * 0.5 + f.seed;
+    const orbit = 0.6 + f.seed * 1.1;
     f.m.position.set(
-      f.base.x + Math.sin(t * 0.9 + f.seed) * (0.7 + Math.sin(f.seed * 3) * 0.3),
-      f.base.y + 0.25 + Math.sin(t * 1.7) * 0.3,
-      f.base.z + Math.cos(t * 0.7 + f.seed * 2) * 0.7,
+      f.base.x + Math.sin(t * 0.9 + f.seed * 4) * orbit,
+      f.base.y + 0.2 + f.seed * 0.5 + Math.sin(t * 1.7) * 0.35,
+      f.base.z + Math.cos(t * 0.7 + f.seed * 2) * orbit,
     );
     (f.m.material as THREE.MeshBasicMaterial).opacity =
-      nightMix * (0.35 + 0.65 * Math.max(0, Math.sin(now * 2.2 + f.seed * 9)));
+      nightMix * (0.3 + 0.7 * Math.max(0, Math.sin(now * (1.6 + f.seed) + f.seed * 9)));
+  }
+  // sparks ride the heat column and wink out
+  for (const sp of sparks) {
+    const seed = sp.userData.seed as number;
+    const fs = sp.userData.s as number;
+    const t = (now * (0.45 + seed * 0.2) + seed * 5) % 1;
+    sp.position.set(
+      Math.sin(now * 2.5 + seed * 20) * 0.09 * fs * (1 + t * 2),
+      (sp.userData.y0 as number) + t * fs * 2.6,
+      Math.cos(now * 2.1 + seed * 14) * 0.09 * fs * (1 + t * 2),
+    );
+    (sp.material as THREE.MeshBasicMaterial).opacity =
+      Math.min(1, t * 8) * (1 - t) * (0.5 + 0.5 * Math.sin(now * 11 + seed * 30));
   }
   // gulls circle by day, roost at night; butterflies flutter over the meadow
   const daylight = 1 - nightMix;
@@ -2988,6 +3158,7 @@ function tick(): void {
   fog.far = 210 - stormMix * 90;
   if (gradePass) {
     gradePass.uniforms.uTime.value = now;
+    gradePass.uniforms.uStorm.value = stormMix;
     (gradePass.uniforms.uInvVP.value as THREE.Matrix4)
       .multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
     (gradePass.uniforms.uCamPos.value as THREE.Vector3).copy(camera.position);
