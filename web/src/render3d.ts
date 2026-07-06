@@ -1622,55 +1622,108 @@ function buildClouds(cx: number, cz: number, n: number): void {
 // thousands of tufts sway for the cost of one draw call.
 let grassMesh: THREE.InstancedMesh | null = null;
 let grassShader: { uniforms: Record<string, { value: number }> } | null = null;
+let grassStructCount = -1;                 // regrow when the camp changes
 
 function bladeGeometry(): THREE.BufferGeometry {
   const pos: number[] = [];
-  const BLADES = 5;
+  const col: number[] = [];
+  const BLADES = 7;
   for (let i = 0; i < BLADES; i += 1) {
     const a = (i / BLADES) * Math.PI * 2 + i * 0.7;
-    const bx = Math.cos(a) * 0.03, bz = Math.sin(a) * 0.03;
-    const h = 0.13 + (i % 3) * 0.045;
-    const lean = 0.05 + (i % 2) * 0.03;
+    const bx = Math.cos(a) * 0.035, bz = Math.sin(a) * 0.035;
+    const h = 0.14 + (i % 3) * 0.05;
+    const lean = 0.05 + (i % 2) * 0.04;
     const tx = bx + Math.cos(a) * lean, tz = bz + Math.sin(a) * lean;
-    const wx = -Math.sin(a) * 0.014, wz = Math.cos(a) * 0.014;
+    const wx = -Math.sin(a) * 0.016, wz = Math.cos(a) * 0.016;
     pos.push(bx - wx, 0, bz - wz, bx + wx, 0, bz + wz, tx, h, tz);
+    // dark at the root, light at the tip — blades read as grass, not specks
+    col.push(0.58, 0.58, 0.58, 0.58, 0.58, 0.58, 1.14, 1.14, 1.14);
   }
   const geo = new THREE.BufferGeometry();
   geo.setAttribute("position", new THREE.BufferAttribute(new Float32Array(pos), 3));
+  geo.setAttribute("color", new THREE.BufferAttribute(new Float32Array(col), 3));
   geo.computeVertexNormals();
   return geo;
 }
 
+// The meadow GROWS instead of being sprinkled: a low-frequency lushness field
+// gates and scales every tuft (dense tall hearts of green fading to bare
+// ground), undergrowth hugs the tree trunks, springs grow lush rings, flowers
+// drift in their own patches — and the ground around every structure is
+// trampled bare, so the camp visibly lives in a clearing.
 function buildGrass(st: WorldState): void {
   grassMesh?.removeFromParent();
   grassMesh = null;
+  grassStructCount = st.structures.length;
   const n = st.map.size;
   const spots: { x: number; y: number; z: number; s: number; c: THREE.Color }[] = [];
   const base = new THREE.Color(0x7fb35c);
+  const sstep = (a: number, b: number, x: number): number => {
+    const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
+    return t * t * (3 - 2 * t);
+  };
+  const clearings = st.structures.map((s) => ({
+    x: s.x + (s.w || 1) / 2, z: s.y + (s.h || 1) / 2,
+    r: Math.max(s.w || 1, s.h || 1) / 2 + 1.0,
+  }));
+  const trampled = (x: number, z: number) =>
+    clearings.some((c) => (x - c.x) ** 2 + (z - c.z) ** 2 < c.r * c.r);
+  const put = (wx: number, wz: number, lush: number, sA: number, sB: number): void => {
+    const gy = heightAt(wx, wz);
+    if (gy < 0.6 || trampled(wx, wz)) return;
+    const c = base.clone();
+    // flowers drift in their own patches inside the lush zones
+    if (vnoise(wx, wz, 4, 207) > 0.72 && sB < 0.4 && lush > 0.45) {
+      c.setHex(sA < 0.5 ? 0xf2e2b8 : 0xe8b8c8);
+    } else {
+      c.offsetHSL((sA - 0.5) * 0.07, lush * 0.06,
+        (sB - 0.5) * 0.10 + lush * 0.06 - 0.04);
+    }
+    spots.push({
+      x: wx, y: gy, z: wz,
+      s: (0.65 + lush * 1.15) * (0.75 + sB * 0.5), c,
+    });
+  };
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
       const t = st.map.grid[ty][tx];
       const isGrass = t.includes("grass") && !t.includes("water");
       const isFol = t.includes("foliage");
       if (!isGrass && !isFol) continue;
-      const per = isFol ? 2 : 4;               // groves stay sparser
-      for (let k = 0; k < per; k += 1) {
-        if (hash01(tx, ty, 130 + k) > 0.68) continue;
+      for (let k = 0; k < 6; k += 1) {
         const wx = tx + hash01(tx, ty, 140 + k);
         const wz = ty + hash01(tx, ty, 150 + k);
-        const gy = heightAt(wx, wz);
-        if (gy < 0.6) continue;                // no grass on the beach skirt
-        const c = base.clone();
-        const flower = hash01(tx, ty, 160 + k) < 0.045;
-        if (flower) c.setHex(hash01(tx, ty, 161 + k) < 0.5 ? 0xf2e2b8 : 0xe8b8c8);
-        else c.offsetHSL((hash01(tx, ty, 162 + k) - 0.5) * 0.07, 0,
-          (hash01(tx, ty, 163 + k) - 0.5) * 0.12);
-        spots.push({ x: wx, y: gy, z: wz, s: 0.95 + hash01(tx, ty, 170 + k) * 0.85, c });
+        // lushness: two noise octaves shape MEADOW PATCHES, not uniform noise
+        const field = vnoise(wx, wz, 8, 201) * 0.65 + vnoise(wx, wz, 3.5, 203) * 0.35;
+        const lush = sstep(0.42, 0.78, field);
+        const keep = lush * (isFol ? 0.4 : 0.95);
+        if (hash01(tx, ty, 130 + k) > keep) continue;
+        put(wx, wz, lush, hash01(tx, ty, 162 + k), hash01(tx, ty, 163 + k));
+      }
+    }
+  }
+  // growth follows the features: undergrowth at tree feet, lush spring rings
+  for (const node of st.resources) {
+    if (node.quantity <= 0) continue;
+    const cx = node.x + 0.5, cz = node.y + 0.5;
+    if (node.kind === "spring") {
+      for (let i = 0; i < 12; i += 1) {
+        const a = hashStr(`${node.id}sa${i}`) * Math.PI * 2;
+        const r = 0.65 + hashStr(`${node.id}sr${i}`) * 0.8;
+        put(cx + Math.cos(a) * r, cz + Math.sin(a) * r, 0.95,
+          hashStr(`${node.id}sc${i}`), hashStr(`${node.id}sd${i}`));
+      }
+    } else if (node.kind === "wood" || node.kind === "fruit_tree") {
+      for (let i = 0; i < 3; i += 1) {
+        const a = hashStr(`${node.id}ta${i}`) * Math.PI * 2;
+        const r = 0.4 + hashStr(`${node.id}tr${i}`) * 0.45;
+        put(cx + Math.cos(a) * r, cz + Math.sin(a) * r, 0.7,
+          hashStr(`${node.id}tc${i}`), hashStr(`${node.id}td${i}`));
       }
     }
   }
   if (!spots.length) return;
-  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff });
+  const mat = new THREE.MeshLambertMaterial({ color: 0xffffff, vertexColors: true });
   mat.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uWind = { value: 0.4 };
@@ -2768,6 +2821,7 @@ export function sync3d(st: WorldState, stageEl: HTMLElement): void {
   }
   buildProps(st);
   buildStructs(st);
+  if (st.structures.length !== grassStructCount) buildGrass(st);   // trampling
   syncAgents3d(st);
   setActive3d(true);
 }
