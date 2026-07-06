@@ -340,14 +340,14 @@ const LIGHT_KEYS: LightKey[] = [
   { t: 0.50, sun: 0xff9a70, sunI: 0.95, elev: 0.07, azim: 1.6,
     sky: 0xd8b8c8, gnd: 0x585868, hemiI: 0.62,
     fog: 0xc9aab6, top: 0x5a6a9a, hor: 0xf0a888, water: 0x6f92a4, dark: 0.35 },
-  // moonlit, not pitch-black: a strong cool moon + lifted blue ambient keep
-  // the island readable all night
-  { t: 0.62, sun: 0xb9cdec, sunI: 0.75, elev: 0.5, azim: -0.9,
-    sky: 0x4a648e, gnd: 0x2a3442, hemiI: 0.55,
-    fog: 0x1c2e46, top: 0x14233a, hor: 0x354864, water: 0x3c5a72, dark: 1 },
-  { t: 0.90, sun: 0xb9cdec, sunI: 0.75, elev: 0.35, azim: -1.4,
-    sky: 0x4a648e, gnd: 0x2a3442, hemiI: 0.55,
-    fog: 0x1e2f45, top: 0x16253c, hor: 0x394c68, water: 0x3c5a72, dark: 1 },
+  // moonlit, not pitch-black: the ISLAND itself stays readable — a bright
+  // cool moon models the terrain and a lifted blue ambient fills the shadows
+  { t: 0.62, sun: 0xc6d8f4, sunI: 1.15, elev: 0.42, azim: -0.9,
+    sky: 0x5b76a4, gnd: 0x35404f, hemiI: 0.7,
+    fog: 0x24374f, top: 0x1a2c46, hor: 0x40546e, water: 0x46647c, dark: 1 },
+  { t: 0.90, sun: 0xc6d8f4, sunI: 1.15, elev: 0.32, azim: -1.4,
+    sky: 0x5b76a4, gnd: 0x35404f, hemiI: 0.7,
+    fog: 0x26384f, top: 0x1c2e47, hor: 0x445870, water: 0x46647c, dark: 1 },
 ];
 // interpolated per frame into these (avoids per-frame allocations)
 const LC = {
@@ -696,13 +696,40 @@ function ensureRenderer(stageEl: HTMLElement): void {
   markDecor(lumSprite);
   scene.add(lumSprite);
 
-  // moon path: an additive ripple strip pointing at the moon, night only
-  const mpGeo = new THREE.PlaneGeometry(34, 2.8);
+  // moon path: sparse bright dashes on a BLACK sheet (additive: black adds
+  // nothing) with brightness dying toward every edge — a broken glimmer, not
+  // the solid glowing rectangle the first attempt produced
+  const glimmer = (() => {
+    const w = 512, h = 128;
+    const cv = document.createElement("canvas");
+    cv.width = w; cv.height = h;
+    const ctx = cv.getContext("2d")!;
+    ctx.fillStyle = "#000000";
+    ctx.fillRect(0, 0, w, h);
+    let s = 60217;
+    const rnd = () => ((s = (s * 48271) % 2147483647) / 2147483647);
+    ctx.lineCap = "round";
+    for (let i = 0; i < 90; i += 1) {
+      const x = rnd() * w, y = h * 0.5 + (rnd() - 0.5) * h * 0.72;
+      // edge falloff along both axes keeps the sheet border invisible
+      const fade = Math.sin((x / w) * Math.PI) * (1 - Math.abs(y / h - 0.5) * 2);
+      const a = (0.10 + rnd() * 0.30) * Math.max(0, fade) ** 1.5;
+      const len = 6 + rnd() * 26;
+      ctx.strokeStyle = `rgba(215, 232, 255, ${a})`;
+      ctx.lineWidth = 1.5 + rnd() * 2.5;
+      ctx.beginPath();
+      ctx.moveTo(x - len / 2, y);
+      ctx.lineTo(x + len / 2, y + (rnd() - 0.5) * 3);
+      ctx.stroke();
+    }
+    const tex = new THREE.CanvasTexture(cv);
+    tex.wrapS = THREE.RepeatWrapping;
+    return tex;
+  })();
+  const mpGeo = new THREE.PlaneGeometry(38, 2.4);
   mpGeo.rotateX(-Math.PI / 2);
-  const mpTex = rippleTexture(3);
-  mpTex.repeat.set(7, 1);
   moonPath = new THREE.Mesh(mpGeo, new THREE.MeshBasicMaterial({
-    map: mpTex, color: 0xbcd8ff, transparent: true, opacity: 0,
+    map: glimmer, color: 0xaac8e8, transparent: true, opacity: 0,
     blending: THREE.AdditiveBlending, depthWrite: false,
   }));
   moonPath.position.y = 0.03;
@@ -2762,7 +2789,7 @@ function tick(): void {
   }
   if (moonPath && state) {
     const mat = moonPath.material as THREE.MeshBasicMaterial;
-    mat.opacity = Math.max(0, nightMix - 0.3) * 0.4 * (1 - stormMix * 0.7);
+    mat.opacity = Math.max(0, nightMix - 0.3) * 0.8 * (1 - stormMix * 0.7);
     moonPath.visible = mat.opacity > 0.01;
     if (moonPath.visible) {
       const dx = sun.position.x - islandCX, dz = sun.position.z - islandCZ;
