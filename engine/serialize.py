@@ -41,6 +41,7 @@ def world_snapshot(world) -> dict:
     return {
         "tick": world.tick,
         "day": world.day,
+        "day_length_ticks": world.day_length_ticks,
         "is_night": world.is_night,
         "weather": world.weather,
         "escaped": world.escaped,

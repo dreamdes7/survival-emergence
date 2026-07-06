@@ -73,6 +73,7 @@ export type StructureState = {
 export type WorldState = {
   tick: number;
   day: number;
+  day_length_ticks?: number;   // for continuous time-of-day lighting
   is_night: boolean;
   weather: string | null;
   escaped: boolean;
