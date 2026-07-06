@@ -341,18 +341,23 @@ const LIGHT_KEYS: LightKey[] = [
   { t: 0.10, sun: 0xffe9c8, sunI: 1.75, elev: 0.5, azim: -1.05,
     sky: 0xd8ecec, gnd: 0x6a7a5e, hemiI: 0.85,
     fog: 0xd6e8df, top: 0x8fd0ea, hor: 0xf6f3e2, water: 0x7fb6ba, dark: 0 },
-  { t: 0.25, sun: 0xfff2dd, sunI: 1.9, elev: 0.85, azim: 0.0,
+  { t: 0.24, sun: 0xfff2dd, sunI: 1.9, elev: 0.85, azim: 0.0,
     sky: 0xd8ecec, gnd: 0x6a7a5e, hemiI: 0.9,
     fog: 0xd6e8df, top: 0x8ecfe0, hor: 0xf4ead2, water: 0x7fb6ba, dark: 0 },
-  { t: 0.40, sun: 0xffbe6e, sunI: 1.95, elev: 0.26, azim: 1.15,
+  { t: 0.38, sun: 0xffbe6e, sunI: 1.95, elev: 0.26, azim: 1.15,
     sky: 0xecd8bc, gnd: 0x70685a, hemiI: 0.74,
     fog: 0xecd5ac, top: 0xa8c4d8, hor: 0xffcf8e, water: 0x87aeb2, dark: 0.05 },
-  { t: 0.50, sun: 0xff9a70, sunI: 0.95, elev: 0.07, azim: 1.6,
-    sky: 0xd8b8c8, gnd: 0x585868, hemiI: 0.62,
-    fog: 0xc9aab6, top: 0x5a6a9a, hor: 0xf0a888, water: 0x6f92a4, dark: 0.35 },
+  // sunset holds TWO keys (blaze, then violet dusk) so the evening is a scene
+  // of its own rather than a single frame on the way to night
+  { t: 0.46, sun: 0xff9468, sunI: 1.25, elev: 0.06, azim: 1.5,
+    sky: 0xe5c3c3, gnd: 0x5e5a62, hemiI: 0.68,
+    fog: 0xdbb3ae, top: 0x8492c0, hor: 0xffb37e, water: 0x7d9cae, dark: 0.2 },
+  { t: 0.54, sun: 0xa9a2d8, sunI: 0.6, elev: 0.12, azim: 1.9,
+    sky: 0x8a7ba8, gnd: 0x3c3a50, hemiI: 0.55,
+    fog: 0x6f6488, top: 0x3c4470, hor: 0x9b7a96, water: 0x5a7390, dark: 0.6 },
   // moonlit, not pitch-black: the ISLAND itself stays readable — a bright
   // cool moon models the terrain and a lifted blue ambient fills the shadows
-  { t: 0.62, sun: 0xc6d8f4, sunI: 1.15, elev: 0.42, azim: -0.9,
+  { t: 0.64, sun: 0xc6d8f4, sunI: 1.15, elev: 0.42, azim: -0.9,
     sky: 0x5b76a4, gnd: 0x35404f, hemiI: 0.7,
     fog: 0x24374f, top: 0x1a2c46, hor: 0x40546e, water: 0x46647c, dark: 1 },
   { t: 0.90, sun: 0xc6d8f4, sunI: 1.15, elev: 0.32, azim: -1.4,
@@ -462,6 +467,11 @@ let stormMix = 0;                          // 0 = clear, 1 = storm (lerped)
 let dayFrac = 0.25;                        // displayed time of day (0..1, smoothed)
 let dayFracTarget = 0.25;
 let dayFracOverride: number | null = null; // debug: freeze the hour for screenshots
+let dayLenTicks = 0;                       // from the snapshot (0 = unknown)
+let estTickSec = 0;                        // measured seconds per sim tick (EMA)
+let lastSimTick = -1;
+let lastTickMs = 0;
+let lastUserCamT = 0;                      // idle timer for the auto-orbit drift
 let waterMat: THREE.MeshPhongMaterial | null = null;
 let islandCX = 30, islandCZ = 30;          // sun orbits this
 let followId: string | null = null;        // camera-follow state
@@ -841,6 +851,9 @@ function ensureRenderer(stageEl: HTMLElement): void {
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
+  controls.autoRotateSpeed = 0.3;            // the idle "living poster" drift
+  lastUserCamT = performance.now();
+  controls.addEventListener("start", () => { lastUserCamT = performance.now(); });
   controls.maxPolarAngle = Math.PI * 0.44;    // never below the horizon
   controls.minPolarAngle = Math.PI * 0.12;
   controls.minDistance = 6;
@@ -1623,6 +1636,7 @@ function buildClouds(cx: number, cz: number, n: number): void {
 let grassMesh: THREE.InstancedMesh | null = null;
 let grassShader: { uniforms: Record<string, { value: number }> } | null = null;
 let grassStructCount = -1;                 // regrow when the camp changes
+let grassDay = -1;                         // …and morph with every sim day
 
 function bladeGeometry(): THREE.BufferGeometry {
   const pos: number[] = [];
@@ -1655,8 +1669,13 @@ function buildGrass(st: WorldState): void {
   grassMesh?.removeFromParent();
   grassMesh = null;
   grassStructCount = st.structures.length;
+  grassDay = st.day;
   const n = st.map.size;
-  const spots: { x: number; y: number; z: number; s: number; c: THREE.Color }[] = [];
+  const day = st.day || 0;
+  // seasons: the noise domain drifts a little every sim day (patches migrate,
+  // thicken, die back) and a slow global wave makes lush days and lean days
+  const gLush = 0.8 + 0.25 * Math.sin(day * 0.55 + 2.0);
+  const spots: { x: number; y: number; z: number; sx: number; sy: number; c: THREE.Color }[] = [];
   const base = new THREE.Color(0x7fb35c);
   const sstep = (a: number, b: number, x: number): number => {
     const t = Math.min(1, Math.max(0, (x - a) / (b - a)));
@@ -1668,20 +1687,26 @@ function buildGrass(st: WorldState): void {
   }));
   const trampled = (x: number, z: number) =>
     clearings.some((c) => (x - c.x) ** 2 + (z - c.z) ** 2 < c.r * c.r);
-  const put = (wx: number, wz: number, lush: number, sA: number, sB: number): void => {
+  const put = (wx: number, wz: number, lush: number, sA: number, sB: number,
+               forceTall = false): void => {
     const gy = heightAt(wx, wz);
     if (gy < 0.6 || trampled(wx, wz)) return;
     const c = base.clone();
+    // deep hearts of a patch grow TALL grass — reeds you could hide in
+    const tall = forceTall || (lush > 0.78 && sB > 0.62);
     // flowers drift in their own patches inside the lush zones
-    if (vnoise(wx, wz, 4, 207) > 0.72 && sB < 0.4 && lush > 0.45) {
+    if (!tall && vnoise(wx, wz, 4, 207) > 0.72 && sB < 0.4 && lush > 0.45) {
       c.setHex(sA < 0.5 ? 0xf2e2b8 : 0xe8b8c8);
+    } else if (tall) {
+      c.offsetHSL(-0.025 + (sA - 0.5) * 0.04, 0.05, -0.05 + (sB - 0.5) * 0.06);
     } else {
       c.offsetHSL((sA - 0.5) * 0.07, lush * 0.06,
         (sB - 0.5) * 0.10 + lush * 0.06 - 0.04);
     }
+    const s = (0.65 + lush * 1.15) * (0.75 + sB * 0.5);
     spots.push({
       x: wx, y: gy, z: wz,
-      s: (0.65 + lush * 1.15) * (0.75 + sB * 0.5), c,
+      sx: tall ? s * 1.25 : s, sy: tall ? s * 2.5 : s, c,
     });
   };
   for (let ty = 0; ty < n; ty += 1) {
@@ -1693,10 +1718,12 @@ function buildGrass(st: WorldState): void {
       for (let k = 0; k < 6; k += 1) {
         const wx = tx + hash01(tx, ty, 140 + k);
         const wz = ty + hash01(tx, ty, 150 + k);
-        // lushness: two noise octaves shape MEADOW PATCHES, not uniform noise
-        const field = vnoise(wx, wz, 8, 201) * 0.65 + vnoise(wx, wz, 3.5, 203) * 0.35;
+        // lushness: two noise octaves shape MEADOW PATCHES, not uniform noise;
+        // the domain drifts with the sim day, so patches live their own lives
+        const field = vnoise(wx + day * 1.9, wz - day * 1.3, 8, 201) * 0.65
+          + vnoise(wx - day * 0.8, wz + day * 1.1, 3.5, 203) * 0.35;
         const lush = sstep(0.42, 0.78, field);
-        const keep = lush * (isFol ? 0.4 : 0.95);
+        const keep = lush * gLush * (isFol ? 0.42 : 1.0);
         if (hash01(tx, ty, 130 + k) > keep) continue;
         put(wx, wz, lush, hash01(tx, ty, 162 + k), hash01(tx, ty, 163 + k));
       }
@@ -1719,6 +1746,14 @@ function buildGrass(st: WorldState): void {
         const r = 0.4 + hashStr(`${node.id}tr${i}`) * 0.45;
         put(cx + Math.cos(a) * r, cz + Math.sin(a) * r, 0.7,
           hashStr(`${node.id}tc${i}`), hashStr(`${node.id}td${i}`));
+      }
+    } else if (node.kind === "thicket") {
+      // fiber thickets read as actual TALL-GRASS stands
+      for (let i = 0; i < 6; i += 1) {
+        const a = hashStr(`${node.id}ka${i}`) * Math.PI * 2;
+        const r = 0.3 + hashStr(`${node.id}kr${i}`) * 0.45;
+        put(cx + Math.cos(a) * r, cz + Math.sin(a) * r, 0.9,
+          hashStr(`${node.id}kc${i}`), hashStr(`${node.id}kd${i}`), true);
       }
     }
   }
@@ -1747,7 +1782,7 @@ function buildGrass(st: WorldState): void {
   for (let i = 0; i < spots.length; i += 1) {
     const sp = spots[i];
     q.setFromAxisAngle(up, hashStr(`ga${i}`) * Math.PI * 2);
-    sc.setScalar(sp.s);
+    sc.set(sp.sx, sp.sy, sp.sx);
     m4.compose(new THREE.Vector3(sp.x, sp.y, sp.z), q, sc);
     grassMesh.setMatrixAt(i, m4);
     grassMesh.setColorAt(i, sp.c);
@@ -2811,7 +2846,18 @@ export function sync3d(st: WorldState, stageEl: HTMLElement): void {
   // continuous time of day (falls back to two anchors when the backend
   // predates day_length_ticks in the snapshot)
   const L = st.day_length_ticks ?? 0;
+  dayLenTicks = L;
   dayFracTarget = L > 0 ? (st.tick % L) / L : st.is_night ? 0.72 : 0.25;
+  // measure the sim's pace so the visual clock can run BETWEEN ticks
+  if (st.tick !== lastSimTick) {
+    const nowMs = performance.now();
+    if (lastSimTick >= 0 && st.tick > lastSimTick && lastTickMs > 0) {
+      const per = (nowMs - lastTickMs) / 1000 / (st.tick - lastSimTick);
+      estTickSec = estTickSec > 0 ? estTickSec * 0.7 + per * 0.3 : per;
+    }
+    lastSimTick = st.tick;
+    lastTickMs = nowMs;
+  }
   const mapKey = `${st.scenario}:${st.map.size}`;
   if (mapKey !== builtMapKey) {
     builtMapKey = mapKey;
@@ -2821,7 +2867,8 @@ export function sync3d(st: WorldState, stageEl: HTMLElement): void {
   }
   buildProps(st);
   buildStructs(st);
-  if (st.structures.length !== grassStructCount) buildGrass(st);   // trampling
+  // trampling + seasons: regrow when the camp changes or a new day dawns
+  if (st.structures.length !== grassStructCount || st.day !== grassDay) buildGrass(st);
   syncAgents3d(st);
   setActive3d(true);
 }
@@ -2917,13 +2964,22 @@ function tick(): void {
     }
   }
 
-  // TIME OF DAY: glide the displayed hour toward the sim's (wrap-aware), then
-  // evaluate the light keyframes — colours, sun path, darkness, water tint.
-  const want = dayFracOverride ?? dayFracTarget;
-  let dGap = want - dayFrac;
-  if (dGap > 0.5) dGap -= 1;
-  if (dGap < -0.5) dGap += 1;
-  dayFrac = (dayFrac + dGap * Math.min(1, dt * 0.7) + 1) % 1;
+  // TIME OF DAY: the visual clock runs CONTINUOUSLY at the sim's measured
+  // pace, so dawns and dusks sweep through their keyframes between ticks —
+  // instead of the light snapping from one tick's hour to the next's. The
+  // authoritative sim time only nudges it (and snaps after big jumps).
+  if (dayFracOverride !== null) {
+    dayFrac = dayFracOverride;
+  } else {
+    if (dayLenTicks > 0 && estTickSec > 0.05) {
+      dayFrac = (dayFrac + dt / (dayLenTicks * estTickSec)) % 1;
+    }
+    let dGap = dayFracTarget - dayFrac;
+    if (dGap > 0.5) dGap -= 1;
+    if (dGap < -0.5) dGap += 1;
+    const pull = Math.abs(dGap) > 0.2 ? 2.5 : 0.15;   // snap vs gentle nudge
+    dayFrac = (dayFrac + dGap * Math.min(1, dt * pull) + 1) % 1;
+  }
   evalLight(dayFrac);
   nightMix = LC.dark;
 
@@ -3059,6 +3115,16 @@ function tick(): void {
     camera.fov += (wantFov - camera.fov) * Math.min(1, dt * 2.5);
     camera.updateProjectionMatrix();
   }
+  // after ~14s of no input the camera starts a slow orbit around the island —
+  // an idle "living poster"; any touch or an active follow cancels it
+  controls.autoRotate = !sel && performance.now() - lastUserCamT > 14000;
+  // tilt-shift focus rides the followed hero; relaxes to mid-frame otherwise
+  const wantFocus = sel
+    ? Math.min(0.72, Math.max(0.25,
+        tmpVecA.set(sel.x, sel.group.position.y + 0.4, sel.z).project(camera).y * 0.5 + 0.5))
+    : 0.46;
+  tiltPass.uniforms.uFocus.value +=
+    (wantFocus - (tiltPass.uniforms.uFocus.value as number)) * Math.min(1, dt * 2.5);
 
   // atmosphere: waves, drifting clouds, breathing foam, storm front
   const now = performance.now() / 1000;
