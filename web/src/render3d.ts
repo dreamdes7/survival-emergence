@@ -153,12 +153,16 @@ const GradeShader = {
       // haze-lifted blacks: nothing is ever pure dark
       c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
 
-      // storm grade: colour drains toward cold slate, highlights come down —
-      // the whole frame turns bruised while the weather lasts
+      // storm grade: colour drains hard toward cold slate, highlights come down,
+      // and a heavy vignette closes in — the whole frame turns bruised and the
+      // horizon presses down while the weather lasts
       if (uStorm > 0.01) {
         float sl = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-        c.rgb = mix(c.rgb, vec3(sl) * vec3(0.90, 0.97, 1.06), uStorm * 0.32);
-        c.rgb *= 1.0 - uStorm * 0.06;
+        c.rgb = mix(c.rgb, vec3(sl) * vec3(0.86, 0.95, 1.08), uStorm * 0.5);
+        c.rgb *= 1.0 - uStorm * 0.12;
+        // oppressive vignette, weighted to the top so the sky feels like a lid
+        float vig = distance(vUv, vec2(0.5, 0.62));
+        c.rgb *= 1.0 - smoothstep(0.28, 0.95, vig) * uStorm * 0.4;
       }
 
       // screen-space granulation: barely-there (world-space turbulence above
@@ -464,11 +468,13 @@ let builtMapKey = "";
 let heightGrid: number[][] = [];          // smoothed corner heights (n+1)^2
 let mapN = 0;
 let state: WorldState | null = null;
+let shadowTick = 0;                        // throttles the shadow-map refresh
 let nightMix = 0;                          // darkness 0..1 (from the light keys)
 let stormMix = 0;                          // 0 = clear, 1 = storm (lerped)
 let dayFrac = 0.25;                        // displayed time of day (0..1, smoothed)
 let dayFracTarget = 0.25;
 let dayFracOverride: number | null = null; // debug: freeze the hour for screenshots
+let stormOverride: number | null = null;   // debug: force the storm 0..1
 let dayLenTicks = 0;                       // from the snapshot (0 = unknown)
 let estTickSec = 0;                        // measured seconds per sim tick (EMA)
 let lastSimTick = -1;
@@ -511,7 +517,7 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   // lifted (negative sink) so the pool surface clears the ground plate instead
   // of dropping under it and hiding the water
   hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.14 },
-  plane: { url: "models/plane.glb", size: 7.5, axis: "xz", sink: 0.08 },
+  plane: { url: "models/plane_updated.glb", size: 7.5, axis: "xz", sink: 0.08 },
   radiotower: { url: "models/radiotower.glb", size: 3.8, axis: "y", sink: 0.03 },
   tent: { url: "models/tent.glb", size: 1.5, axis: "xz", sink: 0.05 },
   tent_unfinished: { url: "models/tent_unfinished.glb", size: 1.5, axis: "xz", sink: 0.05 },
@@ -951,6 +957,7 @@ function ensureRenderer(stageEl: HTMLElement): void {
       dayFracOverride = frac;
       if (frac !== null) dayFrac = frac;
     },
+    storm(v: number | null): void { stormOverride = v; },   // freeze storm 0..1
   };
 }
 
@@ -1655,7 +1662,7 @@ function buildClouds(cx: number, cz: number, n: number): void {
   scene.add(cloudsGroup);
 
   // rain: slanted streaks over the island, alive only while a storm blows
-  const DROPS = 300;
+  const DROPS = 560;
   rainBase = new Float32Array(DROPS * 4);
   const rp = new Float32Array(DROPS * 6);
   for (let i = 0; i < DROPS; i += 1) {
@@ -3042,6 +3049,7 @@ export function audioEnv3d(): { night: number; storm: number; fire: number } | n
 
 // ── per-frame ─────────────────────────────────────────────────────────────────
 const stormGrey = new THREE.Color(0x8f9aa0);
+const stormDark = new THREE.Color(0x363d45);       // heavy slate for the overcast
 const nightCloud = new THREE.Color(0x39485a);
 const moonTint = new THREE.Color(0xe4edff);
 const flashSky = new THREE.Color(0xdfeaf8);
@@ -3127,8 +3135,13 @@ function tick(): void {
     ? Math.max(Math.exp(-fd * 16), 0.6 * Math.exp(-Math.abs(fd - 0.16) * 26)) * stormMix
     : 0;
 
+  // storm GUSTS: a slow, irregular pulse that dims the light and swells the wind
+  // — the sky breathing down on the island
+  const gt = performance.now() / 1000;
+  const gust = stormMix * (0.55 + 0.45 * Math.sin(gt * 0.5) * Math.cos(gt * 0.21 + 1.1));
+
   sun.color.copy(LC.sun);
-  sun.intensity = LC.sunI * (1 - stormMix * 0.35) + flash * 1.6;
+  sun.intensity = LC.sunI * (1 - stormMix * 0.5 - gust * 0.14) + flash * 1.7;
   const sunR = 62;
   sun.position.set(
     islandCX + Math.sin(LC.azim) * Math.cos(LC.elev * 1.35) * sunR,
@@ -3137,18 +3150,25 @@ function tick(): void {
   );
   ambient.color.copy(LC.sky);
   ambient.groundColor.copy(LC.gnd);
-  ambient.intensity = LC.hemiI * (1 - stormMix * 0.2) + flash * 1.1;
-  tmpColor.copy(LC.fog).lerp(stormGrey, stormMix * 0.5);
+  ambient.intensity = LC.hemiI * (1 - stormMix * 0.3 - gust * 0.1) + flash * 1.1;
+  // heavy, low overcast: toward slate and then darkened, gusting darker still
+  tmpColor.copy(LC.fog).lerp(stormGrey, stormMix * 0.5).lerp(stormDark, stormMix * 0.4);
+  tmpColor.multiplyScalar(1 - stormMix * 0.16 - gust * 0.07);
   if (flash > 0.01) tmpColor.lerp(flashSky, flash * 0.55);
   (scene.background as THREE.Color).copy(tmpColor);
   scene.fog!.color.copy(tmpColor);
   if (skyMat) {
     (skyMat.uniforms.uTop.value as THREE.Color)
-      .copy(LC.top).lerp(stormGrey, stormMix * 0.4);
+      .copy(LC.top).lerp(stormGrey, stormMix * 0.4).lerp(stormDark, stormMix * 0.45)
+      .multiplyScalar(1 - stormMix * 0.14 - gust * 0.05);
     (skyMat.uniforms.uHor.value as THREE.Color)
-      .copy(LC.hor).lerp(stormGrey, stormMix * 0.55);
+      .copy(LC.hor).lerp(stormGrey, stormMix * 0.55).lerp(stormDark, stormMix * 0.28)
+      .multiplyScalar(1 - stormMix * 0.1);
   }
-  if (waterMat) waterMat.color.copy(LC.water).lerp(stormGrey, stormMix * 0.3);
+  if (waterMat) waterMat.color.copy(LC.water).lerp(stormGrey, stormMix * 0.3)
+    .lerp(stormDark, stormMix * 0.35);
+  // the whole frame sits darker and heavier under a storm (and dips in gusts)
+  renderer.toneMappingExposure = 1.15 - stormMix * 0.26 - gust * 0.05;
   for (const l of fireLights) {
     const jt = performance.now() / 1000;
     l.intensity = (4.5 + Math.sin(performance.now() / 120) * 1.2) * (0.4 + nightMix * 0.9);
@@ -3193,18 +3213,20 @@ function tick(): void {
   // rain, storm only: recompute streak endpoints while it falls
   if (rainMesh && rainBase) {
     const mat = rainMesh.material as THREE.LineBasicMaterial;
-    mat.opacity = stormMix * 0.55;
+    mat.opacity = stormMix * 0.72;
     rainMesh.visible = stormMix > 0.02;
     if (rainMesh.visible) {
       const attr = rainMesh.geometry.getAttribute("position") as THREE.BufferAttribute;
       const arr = attr.array as Float32Array;
       const drops = rainBase.length / 4;
+      const slantX = 0.42 + gust * 0.45;    // wind drives the rain sideways in gusts
       for (let i = 0; i < drops; i += 1) {
         const bx = rainBase[i * 4], by = rainBase[i * 4 + 1];
         const bz = rainBase[i * 4 + 2], sp = rainBase[i * 4 + 3];
-        const y = 14 - ((by + skyNow * sp) % 14);
+        const y = 14 - ((by + skyNow * sp * 1.3) % 14);   // falls faster
         arr[i * 6] = bx; arr[i * 6 + 1] = y; arr[i * 6 + 2] = bz;
-        arr[i * 6 + 3] = bx + 0.28; arr[i * 6 + 4] = y - 0.85; arr[i * 6 + 5] = bz + 0.06;
+        // longer, wind-slanted streaks read as a heavier downpour
+        arr[i * 6 + 3] = bx + slantX; arr[i * 6 + 4] = y - 1.3; arr[i * 6 + 5] = bz + 0.14;
       }
       attr.needsUpdate = true;
     }
@@ -3257,7 +3279,7 @@ function tick(): void {
 
   // atmosphere: waves, drifting clouds, breathing foam, storm front
   const now = performance.now() / 1000;
-  const storm = state.weather === "storm" ? 1 : 0;
+  const storm = stormOverride !== null ? stormOverride : (state.weather === "storm" ? 1 : 0);
   stormMix += (storm - stormMix) * Math.min(1, dt * 1.2);
   if (waterShader) {
     waterShader.uniforms.uTime.value = now;
@@ -3284,21 +3306,25 @@ function tick(): void {
   }
   if (cloudsGroup && state) {
     const n = state.map.size;
-    tmpColor.setHex(0xdfe6e2).lerp(nightCloud, nightMix).lerp(stormGrey, stormMix * 0.5);
+    // storm clouds go dark, dense and low — a lid clamped over the island
+    tmpColor.setHex(0xdfe6e2).lerp(nightCloud, nightMix)
+      .lerp(stormGrey, stormMix * 0.5).lerp(stormDark, stormMix * 0.6);
     for (let ci = 0; ci < cloudsGroup.children.length; ci += 1) {
       const cl = cloudsGroup.children[ci];
       cl.position.x += (cl.userData.speed as number) * dt * (1 + stormMix * 2.5);
+      // a storm presses the ceiling down
+      cl.position.y += ((12.5 - stormMix * 4.5 + (ci % 5) * 1.4) - cl.position.y) * Math.min(1, dt * 0.5);
       if (cl.position.x > n / 2 + n) {
         cl.position.x = n / 2 - n;
         cl.position.z = n / 2 + (Math.random() - 0.5) * n * 1.1;   // fresh lane
-        cl.position.y = 12.5 + Math.random() * 7;
       }
       const mat = cloudMats[ci];
       if (mat) {
         mat.color.copy(tmpColor);
-        // melt away when drifting between the camera and the island
+        // melt away when drifting between the camera and the island; heavier
+        // and more opaque in a storm
         const near = camera.position.distanceTo(cl.position);
-        mat.opacity = (0.92 - nightMix * 0.18) * THREE.MathUtils.smoothstep(near, 12, 26);
+        mat.opacity = (0.92 - nightMix * 0.18 + stormMix * 0.06) * THREE.MathUtils.smoothstep(near, 12, 26);
       }
     }
   }
@@ -3425,9 +3451,11 @@ function tick(): void {
     fogGroup.visible = mist > 0.01;
     if (fogGroup.visible) {
       // base mist is the fog colour (warm dawn / violet dusk); when the sun is
-      // low it glows toward the sun tint — luminous haze, i.e. scattered light
+      // low it glows toward the sun tint — luminous haze, i.e. scattered light.
+      // In a storm it instead turns dark and heavy — low scud over the ground.
       const lowSun = THREE.MathUtils.clamp(1 - LC.elev * 1.2, 0, 1) * (1 - nightMix) * (1 - stormMix);
-      tmpColor.copy(LC.fog).lerp(stormGrey, 0.18).lerp(LC.sun, lowSun * 0.5);
+      tmpColor.copy(LC.fog).lerp(stormGrey, 0.18).lerp(LC.sun, lowSun * 0.5)
+        .lerp(stormDark, stormMix * 0.5);
       const glow = 1 + lowSun * 0.6;                    // low sun lifts the veil a touch
       const span = state.map.size;
       for (const spr of fogSprites) {
@@ -3461,6 +3489,7 @@ function tick(): void {
   // are deferred to the main render so they aren't paid twice per frame.
   if (inkTarget && inkMat) {
     renderer.shadowMap.autoUpdate = false;
+    renderer.shadowMap.needsUpdate = false;   // never update inside the prepass
     const oldBg = scene.background;
     scene.background = null;
     scene.overrideMaterial = inkMat;
@@ -3474,8 +3503,13 @@ function tick(): void {
     scene.background = oldBg;
     camera.layers.set(0);
     camera.layers.enable(1);
-    renderer.shadowMap.autoUpdate = true;
   }
+
+  // Shadows re-render the whole scene from the sun — but the sun crawls, so
+  // refreshing the map every 3rd frame (~20fps) is indistinguishable and saves
+  // two full depth passes out of three. autoUpdate stays off; we pulse it.
+  renderer.shadowMap.autoUpdate = false;
+  if (shadowTick++ % 3 === 0) renderer.shadowMap.needsUpdate = true;
 
   composer.render();
 }
