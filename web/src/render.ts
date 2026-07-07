@@ -5,13 +5,14 @@
 import { Application, Assets, Container, Graphics, Rectangle, RenderTexture, Sprite, Texture, TilingSprite } from "pixi.js";
 import { API_URL, OCEAN_COLOR, OCEAN_PAD, TILE_SIZE, VOID_COLOR } from "./constants";
 import { requiredProgress, store } from "./store";
-import { agentCssInk, agentIndex, agentTint } from "./utils";
+import { agentCssInk, agentIndex, agentTint, intentIcon } from "./utils";
 import { closeModal, openAgentModal, openStructModal, pushEvent, renderChrome, stageEl, viewportTools } from "./ui";
 import { controlSim } from "./api";
 import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
          invalidateVectorTerrain, makeFogCanvas, makeGrainCanvas, makeVignetteCanvas,
          V } from "./vector";
-import { agentScreen3d, invalidate3d, setActive3d, sync3d } from "./render3d";
+import { agentScreen3d, audioEnv3d, invalidate3d, setActive3d, sync3d } from "./render3d";
+import { audioEnabled, audioWanted, toggleAudio, updateAudioEnv } from "./audio";
 import type { StructureState, WorldState } from "./types";
 
 // Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
@@ -81,6 +82,7 @@ export async function initPixi(): Promise<void> {
   app.ticker.add(animateNight);
   app.ticker.add(animateGlow);
   app.ticker.add(animateFilm);
+  app.ticker.add(animateAudio);
   glowTex = makeGlowTexture();
 
   // Screen-space film layer above the world (visible only in vector mode).
@@ -134,6 +136,26 @@ function animateFilm(): void {
   }
   flickerAlpha += (flickerTarget - flickerAlpha) * Math.min(1, dt * 14);
   if (filmFlicker) filmFlicker.alpha = flickerAlpha * (0.6 + nightAlpha);
+}
+
+// Drive the procedural ambience from the live scene. In 3D we read the real
+// continuous night/storm/fire from the renderer; otherwise we fall back to the
+// snapshot's discrete flags so sound still tracks the world in 2D modes.
+function animateAudio(): void {
+  const dt = app.ticker.deltaMS / 1000;
+  const st = store.state;
+  let night = 0, storm = 0, fire = 0;
+  const e3 = mode3d() ? audioEnv3d() : null;
+  if (e3) {
+    night = e3.night; storm = e3.storm; fire = e3.fire;
+  } else if (st) {
+    night = st.is_night ? 1 : 0;
+    storm = st.weather === "storm" ? 1 : 0;
+    fire = st.structures.some((s) =>
+      (s.kind === "campfire" || s.kind === "signal_fire")
+      && (Number(s.state?.fuel ?? 0) > 0 || s.state?.active === true)) ? 1 : 0;
+  }
+  updateAudioEnv({ night, storm, fire, day: 1 - night }, dt);
 }
 
 // New-world housekeeping, extracted from applyState: when the map identity
@@ -191,6 +213,12 @@ function bindViewportControls() {
     if (action === "out") zoomAt(1 / 1.2, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
     if (action === "reset") fitCamera(true);
     if (target.id === "style-btn") toggleRenderStyle();
+    if (target.id === "audio-btn") {
+      const on = toggleAudio();
+      target.textContent = on ? "🔊" : "🔇";
+      target.classList.toggle("on", on);
+      pushEvent(on ? "звук: эмбиент включён" : "звук выключен");
+    }
     if (target.dataset.control === "pause") {
       const next = !store.simPaused;
       try {
@@ -204,6 +232,18 @@ function bindViewportControls() {
       }
     }
   });
+
+  // Restore a previously-enabled soundscape on the first world interaction
+  // (autoplay policy forbids starting audio without a user gesture). Bound to
+  // the canvas only, so it never races the explicit audio-button toggle.
+  if (audioWanted()) {
+    app.canvas.addEventListener("pointerdown", () => {
+      if (audioEnabled()) return;
+      const on = toggleAudio();
+      const btn = document.querySelector<HTMLButtonElement>("#audio-btn");
+      if (btn) { btn.textContent = on ? "🔊" : "🔇"; btn.classList.toggle("on", on); }
+    }, { once: true });
+  }
 
   app.canvas.addEventListener("wheel", (event) => {
     event.preventDefault();
@@ -554,6 +594,8 @@ function syncAgents(): void {
 
     // Name + speech bubble are HTML overlay elements (crisp, zoom-independent).
     const dom = ensureAgentDom(a.id, a.name);
+    const icon = intentIcon(a.status, a.action);
+    if (icon !== dom.lastIntent) { dom.lastIntent = icon; dom.intentEl.textContent = icon; }
     if (a.status === "dead") dom.wrap.classList.add("dead");
     else dom.wrap.classList.remove("dead");
     if (a.said && a.said !== dom.lastSaid) {
@@ -575,7 +617,7 @@ function syncAgents(): void {
 
 // ── HTML overlay: agent names + speech bubbles (crisp, zoom-independent) ───────
 const overlayEl = document.querySelector<HTMLDivElement>("#overlay")!;
-type AgentDom = { wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; ttl: number; lastSaid: string };
+type AgentDom = { wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; intentEl: HTMLDivElement; ttl: number; lastSaid: string; lastIntent: string };
 const agentDom = new Map<string, AgentDom>();
 
 function ensureAgentDom(id: string, name: string): AgentDom {
@@ -585,12 +627,14 @@ function ensureAgentDom(id: string, name: string): AgentDom {
     wrap.className = "agent-ov";
     const bubbleEl = document.createElement("div");
     bubbleEl.className = "agent-bubble";
+    const intentEl = document.createElement("div");
+    intentEl.className = "agent-intent";
     const nameEl = document.createElement("div");
     nameEl.className = "agent-name";
     nameEl.style.background = agentCssInk(id);
-    wrap.append(bubbleEl, nameEl);
+    wrap.append(bubbleEl, intentEl, nameEl);
     overlayEl.appendChild(wrap);
-    d = { wrap, nameEl, bubbleEl, ttl: 0, lastSaid: "" };
+    d = { wrap, nameEl, bubbleEl, intentEl, ttl: 0, lastSaid: "", lastIntent: "" };
     agentDom.set(id, d);
   }
   d.nameEl.textContent = name;
@@ -609,6 +653,8 @@ function syncAgentDom(state: WorldState): void {
   for (const a of state.agents) {
     seen.add(a.id);
     const dom = ensureAgentDom(a.id, a.name);
+    const icon = intentIcon(a.status, a.action);
+    if (icon !== dom.lastIntent) { dom.lastIntent = icon; dom.intentEl.textContent = icon; }
     if (a.status === "dead") dom.wrap.classList.add("dead");
     else dom.wrap.classList.remove("dead");
     if (a.said && a.said !== dom.lastSaid) {

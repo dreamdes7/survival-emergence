@@ -5,7 +5,7 @@
 import { applyConfigReq, fetchProviderModels } from "./api";
 import { requiredProgress, store } from "./store";
 import { setInterviewAgent } from "./interview";
-import { agentCssInk, escapeAttr, escapeHtml, genderLabel } from "./utils";
+import { agentCssInk, escapeAttr, escapeHtml, genderLabel, intentIcon } from "./utils";
 import type { AgentState, FeedEntry, ForgeConfig, StructureState, WorldState } from "./types";
 
 // ── injected navigation (main.ts assigns the real implementations) ────────────
@@ -44,6 +44,15 @@ const ccSkills = document.querySelector<HTMLDivElement>("#cc-skills")!;
 const ccBeliefs = document.querySelector<HTMLDivElement>("#cc-beliefs")!;
 const ccDiary = document.querySelector<HTMLDivElement>("#cc-diary")!;
 const ccStructBody = document.querySelector<HTMLDivElement>("#cc-struct-body")!;
+
+// Live inspector (bottom-center HUD for the selected/followed survivor)
+const inspectorEl = document.querySelector<HTMLDivElement>("#inspector")!;
+const inspSwatch = document.querySelector<HTMLSpanElement>("#insp-swatch")!;
+const inspIntent = document.querySelector<HTMLSpanElement>("#insp-intent")!;
+const inspName = document.querySelector<HTMLSpanElement>("#insp-name")!;
+const inspChips = document.querySelector<HTMLSpanElement>("#insp-chips")!;
+const inspCog = document.querySelector<HTMLDivElement>("#insp-cog")!;
+const inspBars = document.querySelector<HTMLDivElement>("#insp-bars")!;
 
 let modalAgentId: string | null = null;
 export let modalIsOpen = false;
@@ -436,6 +445,51 @@ export function renderChrome() {
   renderChronicle();
   renderEvents();
   refreshModal();
+  renderInspector();
+}
+
+// The live inspector: a compact always-on card for whoever is selected (and the
+// camera is following in 3D). It's the glanceable read on one survivor —
+// thought, current action, plan, vitals — without the full modal covering the
+// scene. Double-click / "детали →" still opens the deep card.
+export function renderInspector() {
+  const id = store.selectedAgentId;
+  const agent = id ? store.state?.agents.find((a) => a.id === id) : null;
+  if (!agent) { inspectorEl.hidden = true; return; }
+  inspectorEl.hidden = false;
+
+  inspSwatch.style.background = agentCssInk(agent.id);
+  inspIntent.textContent = intentIcon(agent.status, agent.action);
+  inspName.textContent = agent.name;
+  inspChips.innerHTML = [
+    agent.role ? `<span class="cc-chip cc-chip-role">${escapeHtml(agent.role)}</span>` : "",
+    agent.status !== "active" ? chip(agent.status) : "",
+    agent.following ? chip(`→ ${agent.following}`) : "",
+  ].join("");
+
+  inspCog.innerHTML = [
+    agent.thought ? `<div class="cc-cog-line cc-thought">💭 ${escapeHtml(agent.thought)}</div>` : "",
+    agent.action ? `<div class="cc-cog-line cc-action">▶ ${escapeHtml(agent.action)}</div>` : "",
+    agent.plan?.goal ? `<div class="cc-cog-line cc-plan">🗺 ${escapeHtml(agent.plan.goal)}</div>` : "",
+  ].join("") || `<div class="cc-empty">Пока размышляет…</div>`;
+
+  // The three survival vitals that matter at a glance (skip niche physiology).
+  const order = ["health", "hunger", "thirst", "energy", "oxygen", "warmth", "morale"];
+  const phys = agent.physiology;
+  const keys = order.filter((k) => k in phys).concat(
+    Object.keys(phys).filter((k) => !order.includes(k)));
+  inspBars.innerHTML = keys.slice(0, 4).map((k) => statBar(k, phys[k])).join("");
+}
+
+export function bindInspector(): void {
+  document.querySelector<HTMLButtonElement>("#insp-close")!.addEventListener("click", () => {
+    store.selectedAgentId = null;
+    store.selectedStructureId = null;
+    renderChrome();
+  });
+  document.querySelector<HTMLButtonElement>("#insp-more")!.addEventListener("click", () => {
+    if (store.selectedAgentId) openAgentModal(store.selectedAgentId);
+  });
 }
 
 function renderChronicle() {

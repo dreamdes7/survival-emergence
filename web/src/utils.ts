@@ -46,3 +46,31 @@ export function agentIndex(id: string): number {
   const n = parseInt(id.replace(/[^0-9]/g, ""), 10);
   return Number.isFinite(n) ? n : 0;
 }
+
+// ── intent glyph (what an agent is doing, at a glance) ────────────────────────
+// Maps the agent's status + last tool to one emoji shown as a badge over its
+// head and in the live inspector — so the scene reads as behaviour, not dots.
+const INTENT_ICONS: Record<string, string> = {
+  go_to: "🚶", wander: "🧭",
+  gather: "🧺", eat: "🍖", drink: "💧", rest: "💤", refill_oxygen: "🫁",
+  build: "🔨", build_structure: "🔨", maintain: "🪵", stash: "📦", grab: "📦",
+  craft: "🛠️", cook: "🍳", plant: "🌱", harvest_crop: "🌾", repair: "🔧",
+  say_to: "💬", announce: "📢", tell_story: "📖", name_place: "🏷️", gossip: "🗣️",
+  give: "🎁", share_location: "🗺️", follow: "👣", warn: "⚠️", claim: "🚩", promise: "🤝",
+  propose_friendship: "🤝", confess_feelings: "💗", accept_bond: "💞",
+  reject_bond: "💔", declare_enemy: "⚔️",
+  propose_rule: "📜", vote: "🗳️", assign_role: "🎖️", expel_member: "🚫",
+  write_diary: "✍️", set_goal: "🎯", wait: "",
+  investigate: "🔎", examine: "🔎", investigate_anomaly: "🔎", scan: "📡",
+  offer: "🕯️", press_button: "🔘", breach: "🚪", read_sign: "🪧", post: "📌",
+  escape: "🛟",
+};
+
+// `action` arrives as "tool: result"; the tool is the part before the colon.
+export function intentIcon(status: string, action: string): string {
+  if (status === "dead") return "💀";
+  if (status === "incapacitated") return "🤕";
+  const tool = (action.split(":")[0] || "").trim().toLowerCase();
+  if (tool in INTENT_ICONS) return INTENT_ICONS[tool];
+  return tool ? "•" : "";
+}

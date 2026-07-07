@@ -23,6 +23,7 @@
         <button type="button" id="pause-btn" data-control="pause" title="Pause / resume">⏸</button>
         <button type="button" id="replay-btn" title="Replay — отмотать историю">⏪</button>
         <button type="button" id="style-btn" title="Стиль рендера: вектор ↔ тайлы">🎨</button>
+        <button type="button" id="audio-btn" title="Звук: эмбиент вкл/выкл">🔇</button>
       </div>
 
       <!-- Replay scrubber (hidden until replay mode) -->
@@ -61,6 +62,20 @@
 
       <!-- Bottom-right: world tally -->
       <div class="legend floaty" id="legend"></div>
+
+      <!-- Bottom-center: live inspector for the selected/followed survivor -->
+      <div id="inspector" class="inspector floaty" hidden>
+        <button class="insp-close" id="insp-close" aria-label="Снять выбор">✕</button>
+        <div class="insp-head">
+          <span class="insp-swatch" id="insp-swatch"></span>
+          <span class="insp-intent" id="insp-intent"></span>
+          <span class="insp-name" id="insp-name"></span>
+          <span class="insp-chips" id="insp-chips"></span>
+        </div>
+        <div class="insp-cog" id="insp-cog"></div>
+        <div class="insp-bars" id="insp-bars"></div>
+        <button class="insp-more" id="insp-more">детали →</button>
+      </div>
     </div>
 
     <!-- Character / structure modal -->

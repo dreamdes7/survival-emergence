@@ -436,6 +436,8 @@ let propsGroup: THREE.Group | null = null;
 let structsGroup: THREE.Group | null = null;
 let foamGroup: THREE.Group | null = null;
 let cloudsGroup: THREE.Group | null = null;
+let fogGroup: THREE.Group | null = null;
+let fogSprites: THREE.Sprite[] = [];
 let skyMesh: THREE.Mesh | null = null;
 let skyMat: THREE.ShaderMaterial | null = null;
 let fireLights: THREE.PointLight[] = [];
@@ -1309,6 +1311,7 @@ function buildTerrain(st: WorldState): void {
   buildSurf(st);
   buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
+  buildFog(cx, cz, n);
   buildSkyLife(cx, cz, n);
   buildGrass(st);
 
@@ -1795,6 +1798,54 @@ function buildGrass(st: WorldState): void {
 
 // Sky life: gulls circling the island by day, butterflies over the meadows.
 // Tiny primitive assemblies animated in tick(); they retire at night.
+// One soft round wisp — the mist banks are made of many of these, so their
+// edges are always feathered (never the hard white slab a clipped ground plane
+// produced).
+function fogSpriteTexture(): THREE.Texture {
+  const s = 128;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = s;
+  const ctx = cv.getContext("2d")!;
+  const g = ctx.createRadialGradient(s / 2, s / 2, 0, s / 2, s / 2, s / 2);
+  g.addColorStop(0, "rgba(255,255,255,0.55)");
+  g.addColorStop(0.45, "rgba(255,255,255,0.22)");
+  g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.fillStyle = g;
+  ctx.fillRect(0, 0, s, s);
+  return new THREE.CanvasTexture(cv);
+}
+
+// Volumetric ground fog: a low band of wide, soft, camera-facing wisps hugging
+// the shore and lowlands. Feathered on every side (soft sprites), faint, and
+// drifting — densest at dawn and dusk (opacity driven in tick()).
+function buildFog(cx: number, cz: number, n: number): void {
+  fogGroup?.removeFromParent();
+  fogGroup = new THREE.Group();
+  fogSprites = [];
+  const tex = fogSpriteTexture();
+  const COUNT = 16;
+  for (let i = 0; i < COUNT; i += 1) {
+    const r0 = hashStr(`fog${i}`), r1 = hashStr(`fg${i}b`), r2 = hashStr(`fg${i}c`);
+    const mat = new THREE.SpriteMaterial({
+      map: tex, transparent: true, opacity: 0, depthWrite: false, fog: false,
+    });
+    const spr = new THREE.Sprite(mat);
+    const a = i * 2.39996 + r0 * 0.8;
+    // bias to the coast/water ring rather than the central basin, so the mist
+    // haloes the shoreline instead of pooling into an opaque white patch inland
+    const rad = n * (0.26 + 0.5 * Math.sqrt((i + r1) / COUNT));
+    const w = 10 + r2 * 12;
+    spr.scale.set(w, w * 0.36, 1);                 // wide + low → a mist band
+    spr.position.set(cx + Math.cos(a) * rad, 0.45 + r0 * 1.0, cz + Math.sin(a) * rad * 0.9);
+    spr.userData = { speed: 0.12 + r1 * 0.22, baseA: 0.05 + r2 * 0.045,
+                     y: spr.position.y, phase: r0 * 6.28 };
+    fogGroup.add(spr);
+    fogSprites.push(spr);
+  }
+  markDecor(fogGroup);
+  scene.add(fogGroup);
+}
+
 function buildSkyLife(cx: number, cz: number, n: number): void {
   skyLifeGroup?.removeFromParent();
   skyLifeGroup = new THREE.Group();
@@ -2908,6 +2959,12 @@ export function agentScreen3d(id: string): { x: number; y: number } | null {
   };
 }
 
+/** Live scene environment for the audio engine (0..1 each). Null when 3D is off. */
+export function audioEnv3d(): { night: number; storm: number; fire: number } | null {
+  if (!active) return null;
+  return { night: nightMix, storm: stormMix, fire: fireLights.length ? 1 : 0 };
+}
+
 // ── per-frame ─────────────────────────────────────────────────────────────────
 const stormGrey = new THREE.Color(0x8f9aa0);
 const nightCloud = new THREE.Color(0x39485a);
@@ -3270,6 +3327,36 @@ function tick(): void {
       const vis = Math.max(0, Math.sin(t));
       const mat = (w as THREE.Mesh).material as THREE.MeshBasicMaterial;
       mat.opacity = vis * vis * (0.5 + stormMix * 0.3);
+    }
+  }
+
+  // VOLUMETRIC MIST + LIGHT: a low band of soft wisps that thickens at dawn and
+  // dusk (and in storm). When the sun rides low it glows — the mist takes the
+  // warm sun colour, so light appears to scatter through the air (the reliable
+  // "volumetric light" read for this locked top-down camera, where screen-space
+  // god-ray shafts have no visible sky to gather from).
+  if (fogGroup && fogSprites.length && state) {
+    const cd = (c: number) => { const d = Math.abs(dayFrac - c) % 1; return Math.min(d, 1 - d); };
+    const dawnDusk = Math.max(Math.max(0, 1 - cd(0.03) / 0.09), Math.max(0, 1 - cd(0.53) / 0.10));
+    const golden = Math.max(0, 1 - cd(0.42) / 0.08);   // a lighter veil at golden hour
+    const mist = Math.min(1, dawnDusk * 0.85 + golden * 0.4 + stormMix * 0.45);
+    fogGroup.visible = mist > 0.01;
+    if (fogGroup.visible) {
+      // base mist is the fog colour (warm dawn / violet dusk); when the sun is
+      // low it glows toward the sun tint — luminous haze, i.e. scattered light
+      const lowSun = THREE.MathUtils.clamp(1 - LC.elev * 1.2, 0, 1) * (1 - nightMix) * (1 - stormMix);
+      tmpColor.copy(LC.fog).lerp(stormGrey, 0.18).lerp(LC.sun, lowSun * 0.5);
+      const glow = 1 + lowSun * 0.6;                    // low sun lifts the veil a touch
+      const span = state.map.size;
+      for (const spr of fogSprites) {
+        const mat = spr.material as THREE.SpriteMaterial;
+        mat.color.copy(tmpColor);
+        mat.opacity = Math.min(0.22, mist * (spr.userData.baseA as number) * glow);
+        spr.position.x += (spr.userData.speed as number) * dt;
+        if (spr.position.x > islandCX + span * 0.95) spr.position.x -= span * 1.9;
+        spr.position.y = (spr.userData.y as number)
+          + Math.sin(now * 0.1 + (spr.userData.phase as number)) * 0.15;
+      }
     }
   }
 

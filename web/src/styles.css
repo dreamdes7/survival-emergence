@@ -316,6 +316,7 @@ body {
 .vt-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; }
 #pause-btn { color: var(--warn); }
 #pause-btn.paused { color: var(--olive); }
+#audio-btn.on { color: var(--olive); }
 
 /* ── Activity log (fills the left dock below the head) ──────────────────────── */
 .event-log {
@@ -837,6 +838,57 @@ body {
 }
 .agent-bubble.show { display: block; animation: bubble-in 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.15); }
 @keyframes bubble-in { from { opacity: 0; transform: translateY(5px) scale(0.92); } to { opacity: 1; transform: none; } }
+
+/* Intent glyph over each survivor's head — reads the scene as behaviour. */
+.agent-intent {
+  font-size: 13px;
+  line-height: 1;
+  width: 22px; height: 22px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--glass-strong);
+  border-radius: 50%;
+  box-shadow: var(--sh-float);
+  filter: saturate(1.05);
+}
+.agent-intent:empty { display: none; }
+.agent-ov.dead .agent-intent { opacity: 0.55; }
+
+/* ── Live inspector (bottom-center, follows selection) ──────────────────────── */
+.inspector {
+  bottom: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(400px, calc(100vw - 720px));
+  min-width: 300px;
+  padding: 13px 16px 12px;
+  border-radius: var(--r-lg);
+  z-index: 4;
+  animation: insp-in 0.24s cubic-bezier(0.2, 0.9, 0.3, 1.05);
+}
+@keyframes insp-in { from { opacity: 0; transform: translate(-50%, 8px); } to { opacity: 1; transform: translate(-50%, 0); } }
+.insp-close {
+  position: absolute; top: 8px; right: 10px;
+  width: 22px; height: 22px; border: none; background: transparent;
+  color: var(--ink-3); font-size: 13px; cursor: pointer; border-radius: 50%;
+}
+.insp-close:hover { background: rgba(188, 75, 43, 0.10); color: var(--terra); }
+.insp-head { display: flex; align-items: center; gap: 8px; margin-bottom: 9px; padding-right: 20px; }
+.insp-swatch { width: 11px; height: 11px; border-radius: 50%; flex-shrink: 0; box-shadow: inset 0 0 0 1px rgba(0,0,0,0.15); }
+.insp-intent { font-size: 15px; line-height: 1; flex-shrink: 0; }
+.insp-intent:empty { display: none; }
+.insp-name { font-family: var(--serif); font-weight: 700; font-size: 15px; color: var(--ink); flex-shrink: 0; }
+.insp-chips { display: flex; gap: 5px; flex-wrap: wrap; overflow: hidden; }
+.insp-cog { display: flex; flex-direction: column; gap: 3px; font-size: 13px; margin-bottom: 10px; }
+.insp-cog .cc-cog-line { margin: 0; overflow: hidden; text-overflow: ellipsis; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.insp-bars { display: flex; flex-direction: column; gap: 5px; }
+.insp-bars .bar-row { font-size: 12px; }
+.insp-bars .bar-row > span:first-child { width: 52px; }
+.insp-more {
+  margin-top: 10px; border: none; background: transparent; cursor: pointer;
+  font-family: var(--serif); font-size: 11px; letter-spacing: 0.08em;
+  color: var(--terra); padding: 2px 0; text-transform: uppercase;
+}
+.insp-more:hover { color: var(--terra-d); text-decoration: underline; }
 
 /* ── Scrollbars ─────────────────────────────────────────────────────────────── */
 ::-webkit-scrollbar { width: 6px; height: 6px; }
