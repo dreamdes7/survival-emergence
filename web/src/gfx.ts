@@ -26,6 +26,38 @@ export type Gfx = {
   letterbox: boolean;   // 2.35:1 bars
   viewfinder: boolean;  // optical viewfinder overlay while following
   handheld: number;     // 0..1 operator micro-drift while following
+  // ── film stock emulation (independent of the art preset) ────────────────────
+  film: string;         // FILM_PROFILES key — the "capture medium" on top
+};
+
+// A film stock (Dehancer-style): a tone curve (toe lift / shoulder rolloff /
+// contrast / S), a channel colour response (how the dye layers push shadows vs
+// highlights), the stock's saturation, halation glow, and its grain.
+export type FilmProfile = {
+  strength: number; contrast: number; sCurve: number; toe: number; shoulder: number;
+  shadow: [number, number, number]; high: [number, number, number];
+  sat: number; halo: number; haloTint: [number, number, number]; grain: number;
+};
+
+export const FILM_PROFILES: Record<string, FilmProfile> = {
+  none:        { strength: 0,    contrast: 1,    sCurve: 0,    toe: 0,    shoulder: 0,    shadow: [1, 1, 1],        high: [1, 1, 1],          sat: 1,    halo: 0,    haloTint: [1, 1, 1],       grain: 0 },
+  // warm, soft, creamy — the portrait negative
+  portra:      { strength: 0.85, contrast: 0.92, sCurve: 0.20, toe: 0.03, shoulder: 0.05, shadow: [1.02, 1.00, 0.96], high: [1.05, 1.00, 0.90], sat: 0.98, halo: 0.05, haloTint: [1.0, 0.7, 0.5], grain: 0.020 },
+  // cool, green-leaning, crisp — the Fuji look
+  fuji:        { strength: 0.85, contrast: 1.06, sCurve: 0.30, toe: 0.02, shoulder: 0.03, shadow: [0.96, 1.02, 1.04], high: [0.97, 1.03, 0.99], sat: 1.08, halo: 0.03, haloTint: [0.6, 0.8, 1.0], grain: 0.020 },
+  // vivid reversal slide — snappy, saturated
+  ektachrome:  { strength: 0.90, contrast: 1.12, sCurve: 0.35, toe: 0.00, shoulder: 0.02, shadow: [0.97, 1.00, 1.06], high: [1.03, 1.02, 0.97], sat: 1.20, halo: 0.04, haloTint: [1.0, 0.8, 0.6], grain: 0.015 },
+  // black & white — desaturated, contrasty, grainy (Tri-X)
+  bw:          { strength: 1.00, contrast: 1.10, sCurve: 0.30, toe: 0.05, shoulder: 0.04, shadow: [1, 1, 1],          high: [1, 1, 1],          sat: 0.0,  halo: 0.0,  haloTint: [1, 1, 1],       grain: 0.050 },
+  // old faded print — milky lifted blacks, low sat, warm
+  faded:       { strength: 0.90, contrast: 0.84, sCurve: 0.00, toe: 0.13, shoulder: 0.07, shadow: [1.03, 1.00, 0.96], high: [1.00, 0.98, 0.93], sat: 0.80, halo: 0.06, haloTint: [1.0, 0.75, 0.55], grain: 0.030 },
+  // technicolor — cyan shadows, warm-red highlights, heavy saturation
+  technicolor: { strength: 0.90, contrast: 1.15, sCurve: 0.40, toe: 0.02, shoulder: 0.02, shadow: [0.94, 1.00, 1.07], high: [1.09, 0.98, 0.88], sat: 1.30, halo: 0.05, haloTint: [1.0, 0.6, 0.5], grain: 0.020 },
+};
+
+export const FILM_LABELS: Record<string, string> = {
+  none: "Без плёнки", portra: "Kodak Portra", fuji: "Fuji", ektachrome: "Ektachrome",
+  bw: "Ч/б (Tri-X)", faded: "Выцветшая печать", technicolor: "Technicolor",
 };
 
 // Which fields a preset owns. Camera/optics fields are deliberately excluded so
@@ -43,7 +75,7 @@ const WATERCOLOR: Gfx = {
   ink: 0.85, inkWidth: 0, comic: 0, posterLevels: 6, posterAmt: 0.13,
   halftone: 0, halftoneScale: 5, saturation: 1.14, paper: 1, vignette: 0.14,
   barrel: 0, bloom: 0.22, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
 };
 
 // Old-film cartoon: keeps the painterly base but ages it — warm faded duotone,
@@ -54,7 +86,7 @@ const VINTAGE: Gfx = {
   ink: 1.0, inkWidth: 0.3, comic: 0, posterLevels: 5, posterAmt: 0.3,
   halftone: 0, halftoneScale: 5, saturation: 0.84, paper: 0.9, vignette: 0.36,
   barrel: 0.07, bloom: 0.36, focus: 1, sepia: 0.62, flicker: 0.5, weave: 0.4,
-  letterbox: false, viewfinder: true, handheld: 0.5,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
 };
 
 // Bold cel + ink + Ben-Day dots: comic / old-cartoon. Flatter fills, fewer,
@@ -65,7 +97,7 @@ const COMIC: Gfx = {
   ink: 1.5, inkWidth: 1.15, comic: 1, posterLevels: 4, posterAmt: 0.9,
   halftone: 0.6, halftoneScale: 5, saturation: 1.34, paper: 0.4, vignette: 0.2,
   barrel: 0.1, bloom: 0.26, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
 };
 
 export const PRESETS: Record<string, Gfx> = {

@@ -6,7 +6,7 @@ import { applyConfigReq, fetchProviderModels } from "./api";
 import { requiredProgress, store } from "./store";
 import { setInterviewAgent } from "./interview";
 import { agentCssInk, escapeAttr, escapeHtml, genderLabel, intentIcon } from "./utils";
-import { applyPreset, gfx, PRESETS, saveGfx } from "./gfx";
+import { applyPreset, FILM_LABELS, FILM_PROFILES, gfx, PRESETS, saveGfx } from "./gfx";
 import type { AgentState, FeedEntry, ForgeConfig, StructureState, WorldState } from "./types";
 
 // ── injected navigation (main.ts assigns the real implementations) ────────────
@@ -547,8 +547,12 @@ function renderGfxPanel(): void {
   const toggles = GFX_TOGGLES.map((t) =>
     `<label class="gfx-toggle">${t.label}`
     + `<input type="checkbox" data-gfxt="${t.key}" ${gfxBool[t.key] ? "checked" : ""}></label>`).join("");
+  const filmOpts = Object.keys(FILM_PROFILES).map((k) =>
+    `<option value="${k}" ${gfx.film === k ? "selected" : ""}>${FILM_LABELS[k] ?? k}</option>`).join("");
+  const filmSelect = `<div class="gfx-row gfx-selrow"><label>Плёночный профиль</label>`
+    + `<select id="gfx-film" class="gfx-select">${filmOpts}</select></div>`;
   gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${GFX_SLIDERS.map(sliderRow).join("")}`
-    + `<div class="gfx-sec">Плёнка / винтаж</div>${GFX_FILM.map(sliderRow).join("")}`
+    + `<div class="gfx-sec">Плёнка / винтаж</div>${filmSelect}${GFX_FILM.map(sliderRow).join("")}`
     + `<div class="gfx-sec">Камера / оптика</div>${toggles}`;
 }
 
@@ -578,6 +582,9 @@ export function bindGfxPanel(): void {
       saveGfx();
     } else if (t.dataset.gfxt) {
       gfxBool[t.dataset.gfxt] = t.checked;
+      saveGfx();
+    } else if (t.id === "gfx-film") {
+      gfx.film = t.value;
       saveGfx();
     }
   });

@@ -397,6 +397,9 @@ body {
 .gfx-toggle { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--ink-2); padding: 3px 0; }
 .gfx-toggle input { accent-color: var(--terra); width: 15px; height: 15px; cursor: pointer; }
 .gfx-sec { font-family: var(--serif); font-size: 10px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--brass); margin: 8px 0 2px; }
+.gfx-selrow { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 4px; }
+.gfx-selrow label { font-size: 12px; color: var(--ink-2); }
+.gfx-select { background: var(--glass-input); border: 1px solid var(--line); border-radius: var(--r-sm); color: var(--ink); font-family: var(--text); font-size: 12px; padding: 4px 8px; cursor: pointer; }
 
 /* ── Activity log (fills the left dock below the head) ──────────────────────── */
 .event-log {

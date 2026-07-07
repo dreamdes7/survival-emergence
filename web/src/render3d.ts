@@ -20,7 +20,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
-import { gfx } from "./gfx";
+import { gfx, FILM_PROFILES } from "./gfx";
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
@@ -59,6 +59,13 @@ const GradeShader = {
     uWeave: { value: 0.0 },
     uHiTint: { value: new THREE.Color(1, 1, 1) },      // time-of-day colour script
     uShadowTint: { value: new THREE.Color(1, 1, 1) },
+    // film stock emulation
+    uFilm: { value: 0 }, uFilmContrast: { value: 1 }, uFilmSCurve: { value: 0 },
+    uFilmToe: { value: 0 }, uFilmShoulder: { value: 0 }, uFilmSat: { value: 1 },
+    uFilmHalo: { value: 0 }, uFilmGrain: { value: 0 },
+    uFilmShadow: { value: new THREE.Color(1, 1, 1) },
+    uFilmHigh: { value: new THREE.Color(1, 1, 1) },
+    uFilmHaloTint: { value: new THREE.Color(1, 1, 1) },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -77,6 +84,8 @@ const GradeShader = {
     uniform float uHalftone, uHalftoneScale, uSat, uPaperAmt, uVignette, uBarrel;
     uniform float uSepia, uFlicker, uWeave;
     uniform vec3 uHiTint, uShadowTint;
+    uniform float uFilm, uFilmContrast, uFilmSCurve, uFilmToe, uFilmShoulder, uFilmSat, uFilmHalo, uFilmGrain;
+    uniform vec3 uFilmShadow, uFilmHigh, uFilmHaloTint;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -225,6 +234,23 @@ const GradeShader = {
         c.rgb = mix(c.rgb, aged, uSepia * 0.8);
       }
 
+      // FILM STOCK emulation (Dehancer-style): the capture medium on top of the
+      // paint — a tone curve (contrast + S + toe lift + shoulder rolloff), a
+      // channel colour response (how the dye layers push shadows vs highlights),
+      // the stock's saturation, and halation glow out of the brights. uFilm=0
+      // bypasses it entirely.
+      if (uFilm > 0.001) {
+        vec3 f = (c.rgb - 0.5) * uFilmContrast + 0.5;
+        f = mix(f, f * f * (3.0 - 2.0 * f), uFilmSCurve);
+        f = clamp(f, 0.0, 1.0);
+        f = uFilmToe + f * (1.0 - uFilmToe - uFilmShoulder);   // latitude
+        float yf = dot(f, vec3(0.299, 0.587, 0.114));
+        f *= mix(uFilmShadow, uFilmHigh, smoothstep(0.08, 0.92, yf));
+        f = mix(vec3(yf), f, uFilmSat);
+        f += uFilmHaloTint * smoothstep(0.62, 1.0, yf) * uFilmHalo;
+        c.rgb = mix(c.rgb, f, uFilm);
+      }
+
       // haze-lifted blacks: nothing is ever pure dark
       c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
 
@@ -259,7 +285,7 @@ const GradeShader = {
                       + fract(uTime * 0.73) * 17.0) - 0.5;
       float grain = g1 * 0.62 + g2 * 0.38;
       float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
-      c.rgb += grain * 0.034 * gw * uPaperAmt;
+      c.rgb += grain * (0.034 * gw * uPaperAmt + uFilmGrain * (0.6 + gw * 0.4));
 
       // old-film density flicker + sparse dust and the odd drifting scratch
       c.rgb *= 1.0 + (hash(vec2(floor(uTime * 20.0), 7.0)) - 0.5) * uFlicker * 0.1;
@@ -3606,6 +3632,19 @@ function tick(): void {
     // colour script: highlights lean into the sun, shadows into the sky dome
     (gu.uHiTint.value as THREE.Color).copy(LC.sun);
     (gu.uShadowTint.value as THREE.Color).copy(LC.top);
+    // film stock emulation
+    const fp = FILM_PROFILES[gfx.film] ?? FILM_PROFILES.none;
+    gu.uFilm.value = fp.strength;
+    gu.uFilmContrast.value = fp.contrast;
+    gu.uFilmSCurve.value = fp.sCurve;
+    gu.uFilmToe.value = fp.toe;
+    gu.uFilmShoulder.value = fp.shoulder;
+    gu.uFilmSat.value = fp.sat;
+    gu.uFilmHalo.value = fp.halo;
+    gu.uFilmGrain.value = fp.grain;
+    (gu.uFilmShadow.value as THREE.Color).setRGB(fp.shadow[0], fp.shadow[1], fp.shadow[2]);
+    (gu.uFilmHigh.value as THREE.Color).setRGB(fp.high[0], fp.high[1], fp.high[2]);
+    (gu.uFilmHaloTint.value as THREE.Color).setRGB(fp.haloTint[0], fp.haloTint[1], fp.haloTint[2]);
   }
   if (bloomPass) bloomPass.strength = gfx.bloom;
   if (tiltPass) tiltPass.uniforms.uMax.value = 2.6 * gfx.focus;
