@@ -24,12 +24,26 @@ physiology:
   warmth: { start: 100, decay: 1.3, critical: 20, restore: 50 }   # drops faster at night
   morale: { start: 80,  decay: 0.8, critical: 20, restore: 25, lethal: false }  # comfort/hope, not deadly
 
+# Psychosocial drives ABOVE survival (engine/models.py PSYCHE_ACT). They decay
+# every tick and are refilled ONLY by acts of connection / contribution /
+# meaning; when they run low they erode morale. So a warm, fed, but idle and
+# lonely survivor grows restless — and the way out of that restlessness is to
+# bond, to be useful, to build and to make culture. Society becomes the answer
+# to a felt need, not an instruction. Nothing here names a specific structure.
+psyche:
+  belonging: { start: 55, decay: 1.0 }   # closeness — refilled by company & bonds
+  esteem:    { start: 50, decay: 0.9 }    # being useful — refilled by contribution
+  purpose:   { start: 45, decay: 0.7 }    # meaning/legacy — refilled by culture & leading
+
 resources:
   # persistent props (stay, regenerate). Springs sit inland, never on the beach.
   - { kind: spring,     yield_item: water, count: 7,  quantity: 60, regen: 0.5, terrain: grass,   blocking: false, min_coast_dist: 4 }
   - { kind: spring,     yield_item: water, count: 5,  quantity: 50, regen: 0.4, terrain: jungle,  blocking: false, min_coast_dist: 4 }
-  - { kind: fruit_tree, yield_item: food,  count: 22, quantity: 30, regen: 0.2, terrain: grass }      # palms on the meadow
-  - { kind: fishing,    yield_item: food,  count: 6,  quantity: 40, regen: 0.4, terrain: coast, blocking: false }
+  # wild food is FINITE and slow to regrow — a clustered camp depletes the
+  # nearby trees, so hand-to-mouth foraging stops scaling and planted gardens /
+  # stored & preserved food become the way to eat reliably (pressure, not scripting)
+  - { kind: fruit_tree, yield_item: food,  count: 20, quantity: 28, regen: 0.18, terrain: grass }      # palms on the meadow
+  - { kind: fishing,    yield_item: food,  count: 6,  quantity: 40, regen: 0.35, terrain: coast, blocking: false }
   # harvestable props — a chopped tree / mined rock disappears once emptied
   - { kind: wood,       yield_item: wood,  count: 52, quantity: 12, regen: 0.0, terrain: jungle,   consumable: true }  # dense forest
   - { kind: thicket,    yield_item: fiber, count: 22, quantity: 18, regen: 0.0, terrain: jungle,   consumable: true }

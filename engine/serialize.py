@@ -63,6 +63,7 @@ def world_snapshot(world) -> dict:
                 "y": a.y,
                 "status": a.status,
                 "physiology": dict(a.physiology),
+                "psyche": {k: round(v) for k, v in getattr(a, "psyche", {}).items()},
                 "inventory": dict(a.inventory),
                 "goals": list(a.goals),
                 "allies": sum(1 for r in a.relationships.rel.values() if r.label == "ally"),

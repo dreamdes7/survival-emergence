@@ -89,6 +89,14 @@ class HeuristicLLM:
             if plan:
                 return plan
 
+        # Survival is handled — now the psychosocial drives bias what comes next:
+        # a lonely agent reaches for people, a useless one for work, an empty one
+        # for meaning. Mirrors the LLM's felt-need architecture for the free baseline.
+        psy = getattr(agent, "psyche", {})
+        low_belong = psy.get("belonging", 100) < 45
+        low_esteem = psy.get("esteem", 100) < 45
+        low_purpose = psy.get("purpose", 100) < 45
+
         # 2) Survival-rational info sharing — NOT gated on cooperation bias.
         # Fires whenever an adjacent agent is missing a vital node we know.
         if rng.random() < 0.5:
@@ -108,8 +116,8 @@ class HeuristicLLM:
             if share:
                 return share
 
-        # 4) Socialise (tone varies by relationship label).
-        if rng.random() < phys.b("sociability") * 0.7:
+        # 4) Socialise (tone varies by relationship label). Loneliness pushes hard.
+        if rng.random() < max(phys.b("sociability") * 0.7, 0.9 if low_belong else 0.0):
             chat = self._maybe_socialise(agent, world)
             if chat:
                 return chat
@@ -122,7 +130,7 @@ class HeuristicLLM:
 
         # 4b2) Tell a story: retell something memorable (or a story once heard) —
         # keeps the oral-history mechanic alive in free stub worlds.
-        if rng.random() < 0.10:
+        if rng.random() < max(0.10, 0.55 if low_purpose else 0.0):
             story = self._maybe_tell_story(agent, world)
             if story:
                 return story
@@ -132,8 +140,8 @@ class HeuristicLLM:
         if maint:
             return maint
 
-        # 5) Build camp infrastructure — everyone benefits, not just industrious.
-        if rng.random() < max(0.55, phys.b("industry")):
+        # 5) Build camp infrastructure — everyone benefits. Feeling useless drives it.
+        if rng.random() < max(0.55, phys.b("industry"), 0.95 if low_esteem else 0.0):
             build = self._work_build(agent, world)
             if build:
                 return build
@@ -509,7 +517,22 @@ class HeuristicLLM:
         elif sheltered < alive:
             target = "tent"
         else:
-            return None
+            # Basics are covered — now IMPROVE the camp. This is settlement
+            # development: a water source, a shared store, a garden for reliable
+            # food, a smokehouse to preserve it, tools. Build the first one the
+            # camp still lacks (drives esteem: being useful once safe).
+            have_roles = {s.role for s in world.structures
+                          if s.state.get("complete") or s.state.get("buildable_kind") is None}
+            progression = [("water_still", "water"), ("store", "store"),
+                           ("garden", "garden"), ("smokehouse", "smokehouse"),
+                           ("workbench", "workbench"), ("watchtower", "lookout")]
+            target = None
+            for kind, role in progression:
+                if kind in buildables and role not in have_roles:
+                    target = kind
+                    break
+            if target is None:
+                return None
         spec = buildables.get(target)
         if spec is None:
             return None

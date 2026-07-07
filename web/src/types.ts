@@ -10,6 +10,7 @@ export type AgentState = {
   y: number;
   status: string;
   physiology: Record<string, number>;
+  psyche?: Record<string, number>;   // belonging/esteem/purpose — the "why build society" drives
   inventory: Record<string, number>;
   goals: string[];
   allies: number;

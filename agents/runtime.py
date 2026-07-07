@@ -77,7 +77,7 @@ def _compass(dx: int, dy: int) -> str:
 class Agent:
     def __init__(self, agent_id: str, name: str, persona: Persona,
                  model: str, x: int, y: int, physiology: dict, world_size: int,
-                 gender: str = "unspecified"):
+                 gender: str = "unspecified", psyche: dict | None = None):
         self.id = agent_id
         self.name = name
         self.gender = gender
@@ -87,6 +87,9 @@ class Agent:
         self.y = y
         self.world_size = world_size
         self.physiology: dict[str, float] = dict(physiology)
+        # Psychosocial drives above survival (belonging/esteem/purpose); empty
+        # when the scenario opts out. Refilled by acts, decayed each tick.
+        self.psyche: dict[str, float] = dict(psyche) if psyche else {}
         self.inventory: dict[str, float] = {}
         self.status = "active"                 # active | incapacitated | dead
         self.incap_ticks = 0
@@ -415,6 +418,13 @@ class Agent:
              "not ", "too far", "already", "can't", "hemmed"))
         if succeeded:
             skillmod.grant(self, tool)
+            # A landed act of connection/contribution/meaning feeds the matching
+            # psychosocial drive — this is what makes society FELT-worthwhile.
+            if self.psyche:
+                from engine.models import PSYCHE_ACT
+                fill = PSYCHE_ACT.get(tool)
+                if fill and fill[0] in self.psyche:
+                    self.psyche[fill[0]] = min(100.0, self.psyche[fill[0]] + fill[1])
             new_role = skillmod.dominant_role(self)
             if new_role and new_role != self.role:
                 self.role = new_role

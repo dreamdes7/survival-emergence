@@ -129,6 +129,7 @@ def spawn_agents(world: World, cfg: dict) -> None:
     count = int(cfg["agents"]["count"])
     persona_mode = cfg["agents"].get("persona_mode", "library")
     phys_start = {s: float(v.get("start", 100)) for s, v in world.scenario["physiology"].items()}
+    psyche_start = {s: float(v.get("start", 50)) for s, v in world.scenario.get("psyche", {}).items()}
 
     while len(roster) < count:
         name = f"Выживший{len(roster)+1}"
@@ -149,7 +150,7 @@ def spawn_agents(world: World, cfg: dict) -> None:
         agent = Agent(agent_id=f"A{i}", name=name, persona=persona,
                       model=model, x=x, y=y,
                       physiology=phys_start, world_size=world.size,
-                      gender=gender)
+                      gender=gender, psyche=psyche_start)
         # Fog of war: each agent spawns knowing only their home sector.
         # Structures near camp + critical survival/goal structures are always revealed.
         # A vital safety-net guarantees the N nearest water+food nodes are known

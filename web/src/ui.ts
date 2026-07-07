@@ -115,7 +115,13 @@ function renderAgentModal(agent: AgentState) {
   ].join("") || `<div class="cc-empty">No activity yet.</div>`;
 
   const oldScrollTop = ccDiary.scrollTop;
-  ccBars.innerHTML = Object.entries(agent.physiology).map(([k, v]) => statBar(k, v)).join("");
+  const psy = agent.psyche ?? {};
+  const psyLabel: Record<string, string> = { belonging: "близость", esteem: "нужность", purpose: "смысл" };
+  ccBars.innerHTML = Object.entries(agent.physiology).map(([k, v]) => statBar(k, v)).join("")
+    + (Object.keys(psy).length
+        ? `<div class="cc-drives-label">Драйвы (выше выживания)</div>`
+          + Object.entries(psy).map(([k, v]) => statBar(psyLabel[k] ?? k, v)).join("")
+        : "");
   ccInv.innerHTML = Object.keys(agent.inventory).length
     ? Object.entries(agent.inventory).map(([k, v]) => `<div class="cc-chip">${escapeHtml(k)}: ${Math.round(v)}</div>`).join("")
     : `<div class="cc-empty">Empty.</div>`;

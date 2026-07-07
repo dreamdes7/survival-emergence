@@ -6,6 +6,35 @@ from dataclasses import dataclass, field
 FOOD_ITEMS  = {"food", "food_ration", "food_plant", "fish", "coconut", "berries", "fruit", "dried_food"}
 WATER_ITEMS = {"water"}
 WOOD_ITEMS  = {"wood"}
+# Raw food spoils in a pack over days; preserved food (from a smokehouse) keeps —
+# this is what makes storage/preservation structures worth building.
+PRESERVED_FOOD = {"dried_food"}
+PERISHABLE_FOOD = FOOD_ITEMS - PRESERVED_FOOD
+
+# ── psychosocial drives (the "why build a society" layer) ──────────────────────
+# Above survival sit needs that ONLY a society satisfies. They decay each tick and
+# are refilled only by acts of connection / contribution / meaning — so once
+# survival is met, the binding constraint becomes social, and building a camp,
+# helping, leading and making culture become the way to feel whole. Each landed
+# action nudges the matching drive. (belonging | esteem | purpose)
+PSYCHE_ACT: dict[str, tuple[str, float]] = {
+    # belonging — closeness, being part of something
+    "say_to": ("belonging", 5), "accept_bond": ("belonging", 22),
+    "propose_friendship": ("belonging", 10), "confess_feelings": ("belonging", 14),
+    "hug": ("belonging", 12), "comfort": ("belonging", 10), "compliment": ("belonging", 8),
+    "follow": ("belonging", 5),
+    # esteem — being useful, capable, relied upon
+    "build_structure": ("esteem", 12), "build": ("esteem", 10), "maintain": ("esteem", 6),
+    "give": ("esteem", 9), "share_location": ("esteem", 6), "warn": ("esteem", 6),
+    "craft": ("esteem", 11), "cook": ("esteem", 8), "plant": ("esteem", 8),
+    "harvest_crop": ("esteem", 8), "repair": ("esteem", 12), "stash": ("esteem", 4),
+    "gather": ("esteem", 2),
+    # purpose — meaning, legacy, a mark left on the world / the group
+    "name_place": ("purpose", 16), "tell_story": ("purpose", 12), "post": ("purpose", 8),
+    "propose_rule": ("purpose", 14), "vote": ("purpose", 8), "assign_role": ("purpose", 10),
+    "announce": ("purpose", 4), "investigate": ("purpose", 8), "examine": ("purpose", 6),
+    "write_diary": ("purpose", 3),
+}
 
 # Maps a physiology stat -> (restore tool name, set of items that satisfy it).
 # items=None means the restore action needs no inventory item (rest, refill).

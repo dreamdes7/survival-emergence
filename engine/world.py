@@ -648,10 +648,12 @@ class World:
             s.state["fuel"] = max(0.0, s.state["fuel"] - 4.0)
             for a in self.living_agents():
                 if chebyshev(a.x, a.y, s.x, s.y) <= 2:
+                    # a fire gives WARMTH (physical). Happiness is no longer free
+                    # here — morale now comes from connection, contribution and
+                    # meaning (the psyche layer), so a warm camp is not a fulfilled
+                    # one unless the survivors actually build a life together.
                     if "warmth" in a.physiology:
                         a.physiology["warmth"] = min(100.0, a.physiology["warmth"] + 8)
-                    if "morale" in a.physiology:
-                        a.physiology["morale"] = min(100.0, a.physiology["morale"] + 5)
 
         # Hot springs warm anyone soaking nearby (natural, no fuel).
         for s in self.structures:
@@ -669,6 +671,44 @@ class World:
                         if "morale" in a.physiology:
                             a.physiology["morale"] = min(100.0, a.physiology["morale"] + 2)
                     break
+
+        # ── psychosocial drives: decay, company, and the pull on morale ─────────
+        # The engine of "why build a society". Each drive decays every tick; only
+        # ACTS refill esteem/purpose (see runtime.step), while belonging also
+        # feeds off simple company. When the drives run hollow they drag morale
+        # down — so once survival is met, restlessness pushes survivors to bond,
+        # to be useful, and to leave a mark. None of it names a structure.
+        psy_cfg = self.scenario.get("psyche", {})
+        if psy_cfg:
+            living = self.living_agents()
+            for a in living:
+                if not a.psyche:
+                    continue
+                if "belonging" in a.psyche:
+                    nearest = min((chebyshev(a.x, a.y, o.x, o.y) for o in living if o is not a),
+                                  default=99)
+                    if nearest <= 2:
+                        a.psyche["belonging"] = min(100.0, a.psyche["belonging"] + 1.5)
+                    elif nearest >= 6:
+                        a.psyche["belonging"] = max(0.0, a.psyche["belonging"] - 1.0)
+                for stat in list(a.psyche):
+                    dec = float(psy_cfg.get(stat, {}).get("decay", 1.0))
+                    a.psyche[stat] = max(0.0, a.psyche[stat] - dec)
+                if "morale" in a.physiology and a.psyche:
+                    avg = sum(a.psyche.values()) / len(a.psyche)
+                    a.physiology["morale"] = max(0.0, min(100.0,
+                        a.physiology["morale"] + (avg - 50.0) / 50.0 * 1.5))
+
+        # ── food spoilage: raw food rots in the pack over days, preserved keeps ──
+        # Makes stockpiling raw food fail, so a smokehouse (dried food) and a
+        # shared store become worth building rather than hand-to-mouth foraging.
+        from engine.models import PERISHABLE_FOOD
+        for a in self.living_agents():
+            for item in list(a.inventory):
+                if item in PERISHABLE_FOOD and a.inventory[item] > 0:
+                    a.inventory[item] = max(0.0, a.inventory[item] - 0.3)
+                    if a.inventory[item] <= 0:
+                        del a.inventory[item]
 
         # Mystery objects: dread, manifestations, the hatch ritual.
         anomaly_tick(self)
@@ -742,6 +782,8 @@ class World:
                 for a in present:
                     if "morale" in a.physiology:
                         a.physiology["morale"] = min(100.0, a.physiology["morale"] + bonus)
+                    if a.psyche.get("belonging") is not None:   # gathering IS connection
+                        a.psyche["belonging"] = min(100.0, a.psyche["belonging"] + 4.0)
                 self.gatherings += 1
                 if not self.fireside_tradition and self.gatherings >= 4:
                     self.fireside_tradition = True
