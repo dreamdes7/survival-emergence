@@ -13,6 +13,7 @@ import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
          V } from "./vector";
 import { agentScreen3d, audioEnv3d, invalidate3d, setActive3d, sync3d } from "./render3d";
 import { audioEnabled, audioWanted, toggleAudio, updateAudioEnv } from "./audio";
+import { gfx } from "./gfx";
 import type { StructureState, WorldState } from "./types";
 
 // Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
@@ -617,6 +618,7 @@ function syncAgents(): void {
 
 // ── HTML overlay: agent names + speech bubbles (crisp, zoom-independent) ───────
 const overlayEl = document.querySelector<HTMLDivElement>("#overlay")!;
+const cineboxEl = document.querySelector<HTMLDivElement>("#cinebox")!;
 type AgentDom = { wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; intentEl: HTMLDivElement; ttl: number; lastSaid: string; lastIntent: string };
 const agentDom = new Map<string, AgentDom>();
 
@@ -675,6 +677,11 @@ function syncAgentDom(state: WorldState): void {
 function updateOverlay(): void {
   const dt = app.ticker.deltaMS / 1000;
   const in3d = mode3d();
+  // cinematic optics: letterbox whenever enabled in 3D, viewfinder while a
+  // survivor is being followed
+  const following3d = in3d && !!store.selectedAgentId;
+  cineboxEl.classList.toggle("show-lb", gfx.letterbox && in3d);
+  cineboxEl.classList.toggle("show-vf", gfx.viewfinder && following3d);
   const sc = camera.scale;
   const items: { d: AgentDom; x: number; y: number }[] = [];
   for (const [id, d] of agentDom) {

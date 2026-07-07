@@ -20,6 +20,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
+import { gfx } from "./gfx";
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
@@ -41,6 +42,18 @@ const GradeShader = {
     uCamPos: { value: new THREE.Vector3() },
     uCamFwd: { value: new THREE.Vector3(0, 0, -1) },
     uStorm: { value: 0 },
+    // style knobs (driven from gfx / presets)
+    uInkAmt: { value: 0.85 },
+    uInkWidth: { value: 0.0 },
+    uComic: { value: 0.0 },
+    uPosterLevels: { value: 6.0 },
+    uPosterAmt: { value: 0.13 },
+    uHalftone: { value: 0.0 },
+    uHalftoneScale: { value: 5.0 },
+    uSat: { value: 1.14 },
+    uPaperAmt: { value: 1.0 },
+    uVignette: { value: 0.14 },
+    uBarrel: { value: 0.0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -55,6 +68,8 @@ const GradeShader = {
     uniform vec3 uCamPos;
     uniform vec3 uCamFwd;
     uniform float uStorm;
+    uniform float uInkAmt, uInkWidth, uComic, uPosterLevels, uPosterAmt;
+    uniform float uHalftone, uHalftoneScale, uSat, uPaperAmt, uVignette, uBarrel;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -71,12 +86,17 @@ const GradeShader = {
     void main() {
       vec2 asp = vec2(uRes.x / uRes.y, 1.0);
 
+      // lens barrel: gently bow the image toward the edges, as if seen through
+      // glass (optics look). Zero = flat. Feeds every downstream sample.
+      vec2 cc = vUv - 0.5;
+      vec2 bUv = vUv + cc * dot(cc, cc) * uBarrel;
+
       // hand tremor: the paper's smooth field (G channel) nudges every sample,
       // so straight CG edges come out gently hand-wavy. STATIC — an animated
       // wobble makes the whole frame swim without reading as art.
-      float wA = texture2D(uPaper, vUv * asp * 1.35).g;
-      float wB = texture2D(uPaper, vUv * asp * 1.35 + vec2(0.31, 0.47)).g;
-      vec2 uv = vUv + (vec2(wA, wB) - 0.5) * (2.0 / uRes);
+      float wA = texture2D(uPaper, bUv * asp * 1.35).g;
+      float wB = texture2D(uPaper, bUv * asp * 1.35 + vec2(0.31, 0.47)).g;
+      vec2 uv = bUv + (vec2(wA, wB) - 0.5) * (2.0 / uRes);
       vec4 c = texture2D(tDiffuse, uv);
 
       // INK LINE from the normals+depth prepass: Roberts cross over view-space
@@ -89,7 +109,7 @@ const GradeShader = {
                       texture2D(uPaper, uv * asp * 2.2 + roll + vec2(0.53, 0.29)).g)
                  - 0.5) * (3.0 / uRes);
       vec2 iuv = uv + bo;
-      vec2 ip = 1.3 / uRes;
+      vec2 ip = (1.3 + uInkWidth * 2.2) / uRes;    // wider cross = bolder line
       vec4 s0 = texture2D(uInk, iuv + vec2(-ip.x, -ip.y));
       vec4 s1 = texture2D(uInk, iuv + vec2( ip.x,  ip.y));
       vec4 s2 = texture2D(uInk, iuv + vec2( ip.x, -ip.y));
@@ -104,8 +124,10 @@ const GradeShader = {
       ink = min(ink, 1.0);
       // the line is deposited pigment, not a drawn stroke: pigment-equation
       // darkening (saturates mids, spares highlights) with a cool ink cast
-      c.rgb = pigment(c.rgb, 1.0 + ink * 0.85);
+      c.rgb = pigment(c.rgb, 1.0 + ink * uInkAmt);
       c.rgb *= mix(vec3(1.0), vec3(0.93, 0.985, 1.04), ink * 0.5);
+      // comic mode lays a SOLID confident outline over the paint
+      c.rgb = mix(c.rgb, vec3(0.05, 0.06, 0.09), clamp(ink, 0.0, 1.0) * uComic * 0.72);
 
       // ink pooling: soft luminance edges still pool a little pigment (kept
       // gentle now that the real contour line exists)
@@ -127,15 +149,29 @@ const GradeShader = {
         vec3 rayDir = normalize(hp.xyz / hp.w - uCamPos);
         vec3 wp = uCamPos + rayDir * (vDepth / max(0.05, dot(rayDir, uCamFwd)));
         float turb = vn(wp.xz * 0.9 + wp.y * 0.5) * 0.6 + vn(wp.xz * 2.4 + 7.7) * 0.4;
-        c.rgb = pigment(c.rgb, 1.0 + (turb - 0.5) * 0.30);
+        c.rgb = pigment(c.rgb, 1.0 + (turb - 0.5) * 0.30 * uPaperAmt);
       }
 
       float l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
 
-      // layered washes: luminance settles into soft bands, as if the scene were
-      // built from a few flat washes instead of continuous CG shading
-      float lq = floor(l * 6.0 + 0.5) / 6.0;
-      c.rgb *= mix(1.0, (lq + 0.001) / (l + 0.001), 0.13);
+      // layered washes → cel steps: luminance settles into bands. Watercolour
+      // nudges gently toward them (soft washes); comic snaps hard (flat cel
+      // fills with crisp light/shadow terminators).
+      float lq = floor(l * uPosterLevels + 0.5) / uPosterLevels;
+      c.rgb *= mix(1.0, (lq + 0.001) / (l + 0.001), uPosterAmt);
+
+      // BEN-DAY halftone: in the mid/shadow tones, break the fill into a rotated
+      // dot screen whose dots swell as it darkens — the signature comic tone.
+      if (uHalftone > 0.001) {
+        float lum = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+        float ca = 0.4; mat2 rot = mat2(cos(ca), -sin(ca), sin(ca), cos(ca));
+        vec2 hv = rot * (vUv * uRes) / max(2.0, uHalftoneScale);
+        float dcell = length(fract(hv) - 0.5) * 2.0;   // 0 centre .. ~1.4 corner
+        float radius = (1.0 - lum) * 0.95;              // darker → bigger dot
+        float dotMask = smoothstep(radius - 0.12, radius + 0.12, dcell); // 1 paper, 0 ink
+        float apply = (1.0 - smoothstep(0.35, 0.8, lum)) * uHalftone;
+        c.rgb = mix(c.rgb, c.rgb * mix(0.32, 1.0, dotMask), apply);
+      }
 
       // split toning: shadows drift teal, highlights drift gold
       vec3 shadowTint = vec3(0.86, 1.02, 1.04);
@@ -146,9 +182,9 @@ const GradeShader = {
       // filmic S-curve: rolled shadows, soft shoulder — the "one preset" feel
       c.rgb = mix(c.rgb, c.rgb * c.rgb * (3.0 - 2.0 * c.rgb), 0.38);
 
-      // saturation with a little life back after the curve
+      // saturation with a little life back after the curve (comic punches it up)
       l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
-      c.rgb = mix(vec3(l), c.rgb, 1.14);
+      c.rgb = mix(vec3(l), c.rgb, uSat);
 
       // haze-lifted blacks: nothing is ever pure dark
       c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
@@ -169,13 +205,13 @@ const GradeShader = {
       // is the real pigment layer), and through the pigment equation so it
       // melts out of the highlights by construction
       float gran = texture2D(uPaper, vUv * asp * 5.0).b - 0.5;
-      c.rgb = pigment(c.rgb, 1.0 + gran * 0.10);
+      c.rgb = pigment(c.rgb, 1.0 + gran * 0.10 * uPaperAmt);
 
       // vignette as UNPAINTED paper: toward the corners colours thin out and
       // lift slightly — the wash runs dry — instead of a photographic darken
       float d = distance(vUv, vec2(0.5));
       float vig = smoothstep(0.42, 0.94, d);
-      c.rgb *= 1.0 - vig * 0.14;
+      c.rgb *= 1.0 - vig * uVignette;
       c.rgb = mix(c.rgb, vec3(dot(c.rgb, vec3(0.299, 0.587, 0.114))), vig * 0.10);
 
       // fine film grain, dialed back — granulation carries the texture now
@@ -184,12 +220,12 @@ const GradeShader = {
                       + fract(uTime * 0.73) * 17.0) - 0.5;
       float grain = g1 * 0.62 + g2 * 0.38;
       float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
-      c.rgb += grain * 0.034 * gw;
+      c.rgb += grain * 0.034 * gw * uPaperAmt;
       // paper tooth: the whole frame sits on one sheet — quiet, and through
       // the pigment equation (paper is flat relative to the image plane, so
       // screen space is actually correct here; loudness was the overlay tell)
       float paper = texture2D(uPaper, vUv * asp * 2.4).r;
-      c.rgb = pigment(c.rgb, 1.0 + (0.91 - paper) * 0.55);
+      c.rgb = pigment(c.rgb, 1.0 + (0.91 - paper) * 0.55 * uPaperAmt);
       gl_FragColor = c;
     }`,
 };
@@ -435,6 +471,7 @@ let gradePass: ShaderPass;
 let kuwaharaPass: ShaderPass;
 let tiltPass: ShaderPass;
 let fxaaPass: ShaderPass;
+let bloomPass: UnrealBloomPass;
 let terrainGroup: THREE.Group | null = null;
 let propsGroup: THREE.Group | null = null;
 let structsGroup: THREE.Group | null = null;
@@ -928,7 +965,8 @@ function ensureRenderer(stageEl: HTMLElement): void {
   composer.addPass(kuwaharaPass);            // abstraction first, on linear HDR
   // bloom kept for fire/lamp halation only: high threshold + modest strength
   // so flat white clouds and bright sand stop glowing like neon
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.22, 0.6, 0.92));
+  bloomPass = new UnrealBloomPass(new THREE.Vector2(1280, 720), 0.22, 0.6, 0.92);
+  composer.addPass(bloomPass);
   composer.addPass(new OutputPass());
   gradePass = new ShaderPass(GradeShader);
   gradePass.uniforms.uPaper.value = paperTexture();
@@ -3055,11 +3093,15 @@ const moonTint = new THREE.Color(0xe4edff);
 const flashSky = new THREE.Color(0xdfeaf8);
 const tmpColor = new THREE.Color();
 const tmpVecA = new THREE.Vector3();
+const handheldOffset = new THREE.Vector3();   // operator sway, added post-update
 const clock = new THREE.Clock();
 
 function tick(): void {
   if (!renderer || !state) return;
   const dt = Math.min(0.1, clock.getDelta());
+  // undo last frame's handheld sway so controls/follow see the true position
+  camera.position.sub(handheldOffset);
+  handheldOffset.set(0, 0, 0);
   // resize to stage
   const el = renderer.domElement.parentElement;
   if (el) {
@@ -3474,15 +3516,42 @@ function tick(): void {
   fog.near = 70 - stormMix * 35;
   fog.far = 210 - stormMix * 90;
   if (gradePass) {
-    gradePass.uniforms.uTime.value = now;
-    gradePass.uniforms.uStorm.value = stormMix;
-    (gradePass.uniforms.uInvVP.value as THREE.Matrix4)
+    const gu = gradePass.uniforms;
+    gu.uTime.value = now;
+    gu.uStorm.value = stormMix;
+    (gu.uInvVP.value as THREE.Matrix4)
       .multiplyMatrices(camera.matrixWorld, camera.projectionMatrixInverse);
-    (gradePass.uniforms.uCamPos.value as THREE.Vector3).copy(camera.position);
-    camera.getWorldDirection(gradePass.uniforms.uCamFwd.value as THREE.Vector3);
+    (gu.uCamPos.value as THREE.Vector3).copy(camera.position);
+    camera.getWorldDirection(gu.uCamFwd.value as THREE.Vector3);
+    // live style knobs from the graphics panel / preset
+    gu.uInkAmt.value = gfx.ink;
+    gu.uInkWidth.value = gfx.inkWidth;
+    gu.uComic.value = gfx.comic;
+    gu.uPosterLevels.value = gfx.posterLevels;
+    gu.uPosterAmt.value = gfx.posterAmt;
+    gu.uHalftone.value = gfx.halftone;
+    gu.uHalftoneScale.value = gfx.halftoneScale;
+    gu.uSat.value = gfx.saturation;
+    gu.uPaperAmt.value = gfx.paper;
+    gu.uVignette.value = gfx.vignette;
+    gu.uBarrel.value = gfx.barrel;
   }
+  if (bloomPass) bloomPass.strength = gfx.bloom;
+  if (tiltPass) tiltPass.uniforms.uMax.value = 2.6 * gfx.focus;
 
   controls.update();
+
+  // operator handheld sway while following a survivor — a whisper of life added
+  // AFTER controls set the true position (and undone at the next tick's start)
+  if (sel && gfx.handheld > 0.001) {
+    const h = gfx.handheld, ht = now * 0.9;
+    handheldOffset.set(
+      (Math.sin(ht * 1.3) * 0.02 + Math.sin(ht * 3.1 + 1.0) * 0.007) * h,
+      (Math.sin(ht * 1.7 + 2.0) * 0.013) * h,
+      (Math.cos(ht * 1.1) * 0.02 + Math.cos(ht * 2.7) * 0.007) * h,
+    );
+    camera.position.add(handheldOffset);
+  }
 
   // ink prepass: solids only (layer 0), one override material, into the
   // half-float normals+depth target the grade shader reads. Shadow updates

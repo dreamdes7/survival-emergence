@@ -98,6 +98,51 @@ body {
 #stage { position: absolute; inset: 0; z-index: 0; }
 .overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
 
+/* ── Cinematic optics (letterbox + viewfinder) ──────────────────────────────── */
+/* Framed to the visible stage strip between the side docks (each 18+338px), so
+   the letterbox bars and viewfinder brackets sit on the actual viewport. */
+.cinebox { position: absolute; top: 0; bottom: 0; left: 356px; right: 356px; pointer-events: none; z-index: 2; overflow: hidden; }
+.cine-bar {
+  position: absolute; left: 0; right: 0; height: 8vh;
+  background: #0a0908;
+  transform: translateY(var(--lb-hide, -100%));
+  transition: transform 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+.cine-top { top: 0; --lb-hide: -100%; }
+.cine-bot { bottom: 0; --lb-hide: 100%; }
+.cinebox.show-lb .cine-bar { transform: translateY(0); }
+/* Optical viewfinder: focus brackets in the corners, a soft lens vignette, and
+   a blinking REC — the feeling of watching a survivor through glass. */
+.vf, .vf-vig, .vf-rec { opacity: 0; transition: opacity 0.4s ease; }
+.cinebox.show-vf .vf,
+.cinebox.show-vf .vf-vig,
+.cinebox.show-vf .vf-rec { opacity: 1; }
+.vf-vig {
+  position: absolute; inset: 0;
+  background: radial-gradient(ellipse 74% 74% at 50% 48%,
+    transparent 55%, rgba(10, 12, 16, 0.42) 100%);
+}
+.vf {
+  position: absolute; width: 26px; height: 26px;
+  border: 2px solid rgba(240, 244, 250, 0.72);
+  filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
+}
+.vf-tl { top: 11vh; left: 6%; border-right: none; border-bottom: none; }
+.vf-tr { top: 11vh; right: 6%; border-left: none; border-bottom: none; }
+.vf-bl { bottom: 11vh; left: 6%; border-right: none; border-top: none; }
+.vf-br { bottom: 11vh; right: 6%; border-left: none; border-top: none; }
+.vf-rec {
+  position: absolute; top: calc(8vh + 16px); right: 7%;
+  display: flex; align-items: center; gap: 6px;
+  font-family: var(--serif); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.18em; color: rgba(240, 244, 250, 0.82);
+}
+.vf-dot {
+  width: 9px; height: 9px; border-radius: 50%; background: #e0483a;
+  box-shadow: 0 0 6px #e0483a; animation: rec-blink 1.4s steps(1) infinite;
+}
+@keyframes rec-blink { 0%, 60% { opacity: 1; } 61%, 100% { opacity: 0.15; } }
+
 /* ── Shared floating glass panel (frosted cream "clipping") ─────────────────── */
 .floaty {
   position: absolute;
@@ -317,6 +362,41 @@ body {
 #pause-btn { color: var(--warn); }
 #pause-btn.paused { color: var(--olive); }
 #audio-btn.on { color: var(--olive); }
+#gfx-btn.on { color: var(--terra); }
+
+/* ── Graphics / style panel ─────────────────────────────────────────────────── */
+.gfx-panel {
+  position: absolute;
+  bottom: 64px; left: 50%; transform: translateX(-50%);
+  width: min(380px, calc(100vw - 720px)); min-width: 300px;
+  padding: 14px 16px 16px; border-radius: var(--r-lg); z-index: 5;
+  max-height: 70vh; overflow-y: auto;
+  animation: insp-in 0.22s cubic-bezier(0.2, 0.9, 0.3, 1.05);
+}
+.gfx-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.gfx-head .dock-label { padding: 0; }
+.gfx-close {
+  width: 22px; height: 22px; border: none; background: transparent;
+  color: var(--ink-3); font-size: 13px; cursor: pointer; border-radius: 50%;
+}
+.gfx-close:hover { background: rgba(188, 75, 43, 0.10); color: var(--terra); }
+.gfx-presets { display: flex; gap: 8px; margin-bottom: 14px; }
+.gfx-preset {
+  flex: 1; padding: 9px 8px; border: 1px solid var(--line); border-radius: var(--r-sm);
+  background: var(--glass-inset); color: var(--ink-2); cursor: pointer;
+  font-family: var(--serif); font-size: 12px; font-weight: 600; letter-spacing: 0.04em;
+  transition: all 0.15s;
+}
+.gfx-preset:hover { border-color: var(--line-strong); color: var(--ink); }
+.gfx-preset.sel { background: var(--terra); color: #fff; border-color: var(--terra); box-shadow: var(--sh-float); }
+.gfx-controls { display: flex; flex-direction: column; gap: 10px; }
+.gfx-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: center; }
+.gfx-row label { font-size: 12px; color: var(--ink-2); }
+.gfx-row .gfx-val { font-family: var(--serif); font-size: 11px; font-weight: 700; color: var(--terra); text-align: right; min-width: 34px; }
+.gfx-row input[type="range"] { grid-column: 1 / -1; width: 100%; accent-color: var(--terra); height: 4px; cursor: pointer; }
+.gfx-toggle { display: flex; align-items: center; justify-content: space-between; font-size: 12px; color: var(--ink-2); padding: 3px 0; }
+.gfx-toggle input { accent-color: var(--terra); width: 15px; height: 15px; cursor: pointer; }
+.gfx-sec { font-family: var(--serif); font-size: 10px; font-weight: 600; letter-spacing: 0.16em; text-transform: uppercase; color: var(--brass); margin: 8px 0 2px; }
 
 /* ── Activity log (fills the left dock below the head) ──────────────────────── */
 .event-log {

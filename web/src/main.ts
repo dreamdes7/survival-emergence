@@ -13,7 +13,7 @@
 
 import "./styles.css";
 import { initPixi } from "./render";
-import { bindForgeSubmit, bindInspector, bindModalClose, bindNewSimModal, nav, pushEvent } from "./ui";
+import { bindForgeSubmit, bindGfxPanel, bindInspector, bindModalClose, bindNewSimModal, nav, pushEvent } from "./ui";
 import { applyState, connectSim, createSim, deleteSim, initSims, loadForgeConfig, switchSim } from "./net";
 import { initInterview } from "./interview";
 import { initReplay } from "./replay";
@@ -33,6 +33,7 @@ async function init() {
   bindNewSimModal();
   bindForgeSubmit();
   bindInspector();
+  bindGfxPanel();
   initInterview();
   initReplay(showSnapshot);
 

@@ -6,6 +6,7 @@ import { applyConfigReq, fetchProviderModels } from "./api";
 import { requiredProgress, store } from "./store";
 import { setInterviewAgent } from "./interview";
 import { agentCssInk, escapeAttr, escapeHtml, genderLabel, intentIcon } from "./utils";
+import { applyPreset, gfx, PRESETS, saveGfx } from "./gfx";
 import type { AgentState, FeedEntry, ForgeConfig, StructureState, WorldState } from "./types";
 
 // ── injected navigation (main.ts assigns the real implementations) ────────────
@@ -489,6 +490,84 @@ export function bindInspector(): void {
   });
   document.querySelector<HTMLButtonElement>("#insp-more")!.addEventListener("click", () => {
     if (store.selectedAgentId) openAgentModal(store.selectedAgentId);
+  });
+}
+
+// ── graphics / style panel ────────────────────────────────────────────────────
+const gfxPanel = document.querySelector<HTMLDivElement>("#gfx-panel")!;
+const gfxPresetsEl = document.querySelector<HTMLDivElement>("#gfx-presets")!;
+const gfxControlsEl = document.querySelector<HTMLDivElement>("#gfx-controls")!;
+const gfxBtn = document.querySelector<HTMLButtonElement>("#gfx-btn")!;
+
+const PRESET_LABELS: Record<string, string> = { watercolor: "Акварель", comic: "Комикс", custom: "Свой" };
+const GFX_SLIDERS: { key: string; label: string; min: number; max: number; step: number }[] = [
+  { key: "ink", label: "Контур", min: 0, max: 2.5, step: 0.05 },
+  { key: "inkWidth", label: "Толщина линии", min: 0, max: 3, step: 0.05 },
+  { key: "posterAmt", label: "Cel-заливка (плоский свет)", min: 0, max: 1, step: 0.02 },
+  { key: "posterLevels", label: "Ступени света", min: 2, max: 8, step: 1 },
+  { key: "halftone", label: "Растр в тенях (Ben-Day)", min: 0, max: 1, step: 0.02 },
+  { key: "saturation", label: "Насыщенность", min: 0, max: 2, step: 0.02 },
+  { key: "paper", label: "Бумага / зерно", min: 0, max: 1.5, step: 0.02 },
+  { key: "bloom", label: "Свечение (bloom)", min: 0, max: 1, step: 0.02 },
+  { key: "focus", label: "Глубина резкости", min: 0, max: 2, step: 0.05 },
+  { key: "vignette", label: "Виньетка", min: 0, max: 0.5, step: 0.01 },
+  { key: "barrel", label: "Линза (дисторсия)", min: 0, max: 0.35, step: 0.01 },
+  { key: "handheld", label: "Дрожание камеры", min: 0, max: 2, step: 0.05 },
+];
+const GFX_TOGGLES: { key: string; label: string }[] = [
+  { key: "letterbox", label: "Кинокадр (letterbox)" },
+  { key: "viewfinder", label: "Видоискатель при слежении" },
+];
+
+const fmtNum = (v: number, step: number) => (step >= 1 ? String(Math.round(v)) : v.toFixed(2));
+const gfxNum = gfx as unknown as Record<string, number>;
+const gfxBool = gfx as unknown as Record<string, boolean>;
+
+function renderGfxPanel(): void {
+  gfxPresetsEl.innerHTML = Object.keys(PRESETS).map((name) =>
+    `<button type="button" class="gfx-preset ${gfx.preset === name ? "sel" : ""}" data-preset="${name}">`
+    + `${escapeHtml(PRESET_LABELS[name] ?? name)}</button>`).join("");
+  const sliders = GFX_SLIDERS.map((s) => {
+    const v = gfxNum[s.key] ?? 0;
+    return `<div class="gfx-row"><label>${s.label}</label>`
+      + `<span class="gfx-val" data-val="${s.key}">${fmtNum(v, s.step)}</span>`
+      + `<input type="range" data-gfx="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}"></div>`;
+  }).join("");
+  const toggles = GFX_TOGGLES.map((t) =>
+    `<label class="gfx-toggle">${t.label}`
+    + `<input type="checkbox" data-gfxt="${t.key}" ${gfxBool[t.key] ? "checked" : ""}></label>`).join("");
+  gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${sliders}`
+    + `<div class="gfx-sec">Камера / оптика</div>${toggles}`;
+}
+
+export function bindGfxPanel(): void {
+  const setOpen = (open: boolean) => {
+    gfxPanel.hidden = !open;
+    gfxBtn.classList.toggle("on", open);
+    if (open) renderGfxPanel();
+  };
+  gfxBtn.addEventListener("click", () => setOpen(gfxPanel.hidden));
+  document.querySelector<HTMLButtonElement>("#gfx-close")!.addEventListener("click", () => setOpen(false));
+  gfxPresetsEl.addEventListener("click", (e) => {
+    const b = (e.target as HTMLElement).closest<HTMLElement>("[data-preset]");
+    if (!b) return;
+    applyPreset(b.dataset.preset!);
+    renderGfxPanel();
+  });
+  gfxControlsEl.addEventListener("input", (e) => {
+    const t = e.target as HTMLInputElement;
+    if (t.dataset.gfx) {
+      const key = t.dataset.gfx;
+      gfxNum[key] = Number(t.value);
+      gfx.preset = "custom";
+      const valEl = gfxControlsEl.querySelector(`[data-val="${key}"]`);
+      if (valEl) valEl.textContent = fmtNum(Number(t.value), Number(t.step));
+      gfxPresetsEl.querySelectorAll(".gfx-preset").forEach((el) => el.classList.remove("sel"));
+      saveGfx();
+    } else if (t.dataset.gfxt) {
+      gfxBool[t.dataset.gfxt] = t.checked;
+      saveGfx();
+    }
   });
 }
 

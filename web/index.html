@@ -11,6 +11,17 @@
       <div id="stage"></div>
       <div id="overlay" class="overlay"></div>
 
+      <!-- Cinematic optics: letterbox bars + an optical viewfinder that frames
+           the followed survivor (focus brackets, vignette, REC). Toggled live. -->
+      <div id="cinebox" class="cinebox">
+        <div class="cine-bar cine-top"></div>
+        <div class="cine-bar cine-bot"></div>
+        <div class="vf-vig"></div>
+        <div class="vf vf-tl"></div><div class="vf vf-tr"></div>
+        <div class="vf vf-bl"></div><div class="vf vf-br"></div>
+        <div class="vf-rec"><span class="vf-dot"></span>REC</div>
+      </div>
+
       <!-- Top-center: world status readout -->
       <div class="world-stats floaty" id="world-stats"></div>
 
@@ -24,6 +35,17 @@
         <button type="button" id="replay-btn" title="Replay — отмотать историю">⏪</button>
         <button type="button" id="style-btn" title="Стиль рендера: вектор ↔ тайлы">🎨</button>
         <button type="button" id="audio-btn" title="Звук: эмбиент вкл/выкл">🔇</button>
+        <button type="button" id="gfx-btn" title="Стиль и графика">⚙</button>
+      </div>
+
+      <!-- Graphics / style panel (presets + live sliders) -->
+      <div id="gfx-panel" class="gfx-panel floaty" hidden>
+        <div class="gfx-head">
+          <span class="dock-label">Стиль и графика</span>
+          <button type="button" id="gfx-close" class="gfx-close" aria-label="Close">✕</button>
+        </div>
+        <div class="gfx-presets" id="gfx-presets"></div>
+        <div class="gfx-controls" id="gfx-controls"></div>
       </div>
 
       <!-- Replay scrubber (hidden until replay mode) -->
