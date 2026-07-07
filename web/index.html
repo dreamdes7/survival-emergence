@@ -25,17 +25,39 @@
       <!-- Top-center: world status readout -->
       <div class="world-stats floaty" id="world-stats"></div>
 
-      <!-- Bottom-center: map tools -->
+      <!-- Bottom-center: map tools (clean line icons, no emoji) -->
       <div class="viewport-tools floaty" id="viewport-tools">
-        <button type="button" data-zoom="out" title="Zoom out">−</button>
-        <button type="button" data-zoom="in" title="Zoom in">+</button>
-        <button type="button" data-zoom="reset" title="Reset view">⤢</button>
+        <button type="button" data-zoom="out" title="Отдалить" aria-label="Отдалить">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.2" y1="16.2" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/></svg>
+        </button>
+        <button type="button" data-zoom="in" title="Приблизить" aria-label="Приблизить">
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><line x1="16.2" y1="16.2" x2="21" y2="21"/><line x1="8" y1="11" x2="14" y2="11"/><line x1="11" y1="8" x2="11" y2="14"/></svg>
+        </button>
+        <button type="button" data-zoom="reset" title="Сбросить вид" aria-label="Сбросить вид">
+          <svg viewBox="0 0 24 24"><path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/></svg>
+        </button>
         <span class="vt-sep"></span>
-        <button type="button" id="pause-btn" data-control="pause" title="Pause / resume">⏸</button>
-        <button type="button" id="replay-btn" title="Replay — отмотать историю">⏪</button>
-        <button type="button" id="style-btn" title="Стиль рендера: вектор ↔ тайлы">🎨</button>
-        <button type="button" id="audio-btn" title="Звук: эмбиент вкл/выкл">🔇</button>
-        <button type="button" id="gfx-btn" title="Стиль и графика">⚙</button>
+        <button type="button" id="pause-btn" data-control="pause" title="Пауза / продолжить" aria-label="Пауза">
+          <svg class="ic ic-pause" viewBox="0 0 24 24"><rect x="7" y="5.5" width="3.4" height="13" rx="1"/><rect x="13.6" y="5.5" width="3.4" height="13" rx="1"/></svg>
+          <svg class="ic ic-play" viewBox="0 0 24 24"><path d="M8 5.5l11 6.5-11 6.5z"/></svg>
+        </button>
+        <button type="button" id="replay-btn" title="Реплей — отмотать историю" aria-label="Реплей">
+          <svg viewBox="0 0 24 24"><path d="M3.5 12a8.5 8.5 0 1 0 2.8-6.3"/><path d="M3 4.5V9h4.5"/></svg>
+        </button>
+        <button type="button" id="style-btn" title="Стиль рендера" aria-label="Стиль рендера">
+          <svg viewBox="0 0 24 24"><path d="M12 3l9 5-9 5-9-5z"/><path d="M3 13l9 5 9-5"/></svg>
+        </button>
+        <button type="button" id="audio-btn" title="Звук: эмбиент" aria-label="Звук">
+          <svg class="ic ic-audoff" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/><line x1="16" y1="9.5" x2="21" y2="14.5"/><line x1="21" y1="9.5" x2="16" y2="14.5"/></svg>
+          <svg class="ic ic-audon" viewBox="0 0 24 24"><path d="M4 9.5v5h3.5L12 18V6L7.5 9.5z"/><path d="M15.5 8.5a5 5 0 0 1 0 7"/><path d="M17.8 6a8 8 0 0 1 0 12"/></svg>
+        </button>
+        <button type="button" id="gfx-btn" title="Стиль и графика" aria-label="Графика">
+          <svg viewBox="0 0 24 24"><line x1="4" y1="8" x2="20" y2="8"/><circle cx="9" cy="8" r="2.3"/><line x1="4" y1="16" x2="20" y2="16"/><circle cx="15" cy="16" r="2.3"/></svg>
+        </button>
+        <span class="vt-sep"></span>
+        <button type="button" id="cine-btn" title="Кино-режим — убрать интерфейс" aria-label="Кино-режим">
+          <svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="1.5"/><line x1="3" y1="9.3" x2="21" y2="9.3"/><line x1="3" y1="14.7" x2="21" y2="14.7"/></svg>
+        </button>
       </div>
 
       <!-- Graphics / style panel (presets + live sliders) -->
@@ -56,21 +78,31 @@
         <button type="button" id="replay-close" title="Вернуться в прямой эфир">✕</button>
       </div>
 
-      <!-- LEFT dock — identity · simulations · activity (one cohesive panel) -->
-      <aside class="leftdock floaty">
+      <!-- LEFT dock — identity + tabbed chronicle / activity -->
+      <aside class="leftdock floaty" id="leftdock">
         <div class="dock-head">
+          <button type="button" class="dock-collapse" data-collapse="left" title="Свернуть" aria-label="Свернуть">
+            <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+          </button>
           <p class="eyebrow">Survival Emergence</p>
           <h1 id="world-title">Observer</h1>
           <div class="simbar" id="simbar"></div>
         </div>
-        <div class="dock-label">Хроника</div>
-        <div id="chronicle" class="chronicle"></div>
-        <div class="dock-label">Activity</div>
-        <div id="event-log" class="event-log"></div>
+        <div class="dock-tabs" id="left-tabs">
+          <button type="button" class="dock-tab is-active" data-tab="chronicle">Хроника</button>
+          <button type="button" class="dock-tab" data-tab="activity">Лента</button>
+        </div>
+        <div class="dock-panes">
+          <div id="chronicle" class="chronicle tab-pane is-active" data-pane="chronicle"></div>
+          <div id="event-log" class="event-log tab-pane" data-pane="activity"></div>
+        </div>
       </aside>
 
       <!-- RIGHT dock — forge + metrics (one panel, two sections) -->
-      <aside class="rightdock floaty">
+      <aside class="rightdock floaty" id="rightdock">
+        <button type="button" class="dock-collapse dock-collapse-r" data-collapse="right" title="Свернуть" aria-label="Свернуть">
+          <svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>
+        </button>
         <div class="dock-pad">
           <div class="dock-label">World Forge</div>
           <form id="forge-form" class="forge-form"></form>
@@ -81,6 +113,14 @@
           <div id="metrics-dashboard" class="metrics-dashboard"></div>
         </div>
       </aside>
+
+      <!-- Edge tabs to reopen a collapsed dock -->
+      <button type="button" class="dock-reopen dock-reopen-l" data-reopen="left" title="Открыть панель" aria-label="Открыть панель" hidden>
+        <svg viewBox="0 0 24 24"><path d="M10 6l6 6-6 6"/></svg>
+      </button>
+      <button type="button" class="dock-reopen dock-reopen-r" data-reopen="right" title="Открыть панель" aria-label="Открыть панель" hidden>
+        <svg viewBox="0 0 24 24"><path d="M14 6l-6 6 6 6"/></svg>
+      </button>
 
       <!-- Bottom-right: world tally -->
       <div class="legend floaty" id="legend"></div>

@@ -13,7 +13,7 @@ import { buildMeeple, buildVectorProp, buildVectorStructure, buildVectorTerrain,
          V } from "./vector";
 import { agentScreen3d, audioEnv3d, invalidate3d, setActive3d, sync3d } from "./render3d";
 import { audioEnabled, audioWanted, toggleAudio, updateAudioEnv } from "./audio";
-import { gfx } from "./gfx";
+import { gfx, saveGfx } from "./gfx";
 import type { StructureState, WorldState } from "./types";
 
 // Vector (procedural, asset-free) renderer is island-only for now; Mars keeps
@@ -208,7 +208,9 @@ function toggleRenderStyle(): void {
 
 function bindViewportControls() {
   viewportTools.addEventListener("click", async (event) => {
-    const target = event.target as HTMLButtonElement;
+    // clicks may land on an inner <svg>/<path>, so resolve the owning button
+    const target = (event.target as HTMLElement).closest("button") as HTMLButtonElement | null;
+    if (!target) return;
     const action = target.dataset.zoom;
     if (action === "in") zoomAt(1.2, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
     if (action === "out") zoomAt(1 / 1.2, stageEl.clientWidth / 2, stageEl.clientHeight / 2);
@@ -216,16 +218,21 @@ function bindViewportControls() {
     if (target.id === "style-btn") toggleRenderStyle();
     if (target.id === "audio-btn") {
       const on = toggleAudio();
-      target.textContent = on ? "🔊" : "🔇";
       target.classList.toggle("on", on);
       pushEvent(on ? "звук: эмбиент включён" : "звук выключен");
+    }
+    if (target.id === "cine-btn") {
+      const on = !target.classList.contains("on");
+      target.classList.toggle("on", on);
+      document.getElementById("app")?.classList.toggle("cinematic", on);
+      gfx.letterbox = on;
+      saveGfx();
     }
     if (target.dataset.control === "pause") {
       const next = !store.simPaused;
       try {
         const data = await controlSim(store.activeSimId, next ? "pause" : "resume");
         store.simPaused = data.paused;
-        target.textContent = store.simPaused ? "▶ Resume" : "⏸ Pause";
         target.classList.toggle("paused", store.simPaused);
         pushEvent(store.simPaused ? "paused — model calls stopped" : "resumed");
       } catch {
@@ -234,6 +241,12 @@ function bindViewportControls() {
     }
   });
 
+  // Reflect a persisted cinematic choice on load.
+  if (gfx.letterbox) {
+    document.getElementById("cine-btn")?.classList.add("on");
+    document.getElementById("app")?.classList.add("cinematic");
+  }
+
   // Restore a previously-enabled soundscape on the first world interaction
   // (autoplay policy forbids starting audio without a user gesture). Bound to
   // the canvas only, so it never races the explicit audio-button toggle.
@@ -241,8 +254,7 @@ function bindViewportControls() {
     app.canvas.addEventListener("pointerdown", () => {
       if (audioEnabled()) return;
       const on = toggleAudio();
-      const btn = document.querySelector<HTMLButtonElement>("#audio-btn");
-      if (btn) { btn.textContent = on ? "🔊" : "🔇"; btn.classList.toggle("on", on); }
+      document.querySelector<HTMLButtonElement>("#audio-btn")?.classList.toggle("on", on);
     }, { once: true });
   }
 

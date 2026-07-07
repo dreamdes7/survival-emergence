@@ -526,7 +526,6 @@ const GFX_FILM: { key: string; label: string; min: number; max: number; step: nu
   { key: "weave", label: "Дрожание кадра (gate)", min: 0, max: 1, step: 0.02 },
 ];
 const GFX_TOGGLES: { key: string; label: string }[] = [
-  { key: "letterbox", label: "Кинокадр (letterbox)" },
   { key: "viewfinder", label: "Видоискатель при слежении" },
 ];
 
@@ -554,6 +553,34 @@ function renderGfxPanel(): void {
   gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${GFX_SLIDERS.map(sliderRow).join("")}`
     + `<div class="gfx-sec">Плёнка / винтаж</div>${filmSelect}${GFX_FILM.map(sliderRow).join("")}`
     + `<div class="gfx-sec">Камера / оптика</div>${toggles}`;
+}
+
+// Collapsible docks + reopen edge-tabs + the chronicle/activity tab switch.
+export function bindDockUI(): void {
+  const leftdock = document.getElementById("leftdock")!;
+  const rightdock = document.getElementById("rightdock")!;
+  const reopen: Record<string, HTMLButtonElement> = {
+    left: document.querySelector<HTMLButtonElement>(".dock-reopen-l")!,
+    right: document.querySelector<HTMLButtonElement>(".dock-reopen-r")!,
+  };
+  const setCollapsed = (side: string, collapsed: boolean) => {
+    (side === "left" ? leftdock : rightdock).classList.toggle("collapsed", collapsed);
+    reopen[side].hidden = !collapsed;
+  };
+  document.querySelectorAll<HTMLButtonElement>("[data-collapse]").forEach((b) =>
+    b.addEventListener("click", () => setCollapsed(b.dataset.collapse!, true)));
+  document.querySelectorAll<HTMLButtonElement>("[data-reopen]").forEach((b) =>
+    b.addEventListener("click", () => setCollapsed(b.dataset.reopen!, false)));
+
+  const tabs = document.getElementById("left-tabs")!;
+  tabs.addEventListener("click", (e) => {
+    const t = (e.target as HTMLElement).closest<HTMLButtonElement>(".dock-tab");
+    if (!t) return;
+    const name = t.dataset.tab!;
+    tabs.querySelectorAll(".dock-tab").forEach((el) => el.classList.toggle("is-active", el === t));
+    document.querySelectorAll<HTMLElement>(".tab-pane").forEach((p) =>
+      p.classList.toggle("is-active", p.dataset.pane === name));
+  });
 }
 
 export function bindGfxPanel(): void {

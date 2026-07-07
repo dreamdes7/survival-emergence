@@ -96,12 +96,16 @@ body {
 
 /* ── Full-screen world ──────────────────────────────────────────────────────── */
 #stage { position: absolute; inset: 0; z-index: 0; }
+/* hidden must always win — some panels set display:flex/block which otherwise
+   overrides the [hidden] attribute (same specificity, author rule wins). */
+[hidden] { display: none !important; }
+
 .overlay { position: absolute; inset: 0; pointer-events: none; overflow: hidden; z-index: 1; }
 
 /* ── Cinematic optics (letterbox + viewfinder) ──────────────────────────────── */
-/* Framed to the visible stage strip between the side docks (each 18+338px), so
-   the letterbox bars and viewfinder brackets sit on the actual viewport. */
-.cinebox { position: absolute; top: 0; bottom: 0; left: 356px; right: 356px; pointer-events: none; z-index: 2; overflow: hidden; }
+/* Full-screen cinematic frame. Cinematic mode clears the docks so the bars and
+   viewfinder read edge-to-edge (see #app.cinematic). */
+.cinebox { position: absolute; inset: 0; pointer-events: none; z-index: 6; overflow: hidden; }
 .cine-bar {
   position: absolute; left: 0; right: 0; height: 8vh;
   background: #0a0908;
@@ -127,12 +131,12 @@ body {
   border: 2px solid rgba(240, 244, 250, 0.72);
   filter: drop-shadow(0 0 2px rgba(0,0,0,0.5));
 }
-.vf-tl { top: 11vh; left: 6%; border-right: none; border-bottom: none; }
-.vf-tr { top: 11vh; right: 6%; border-left: none; border-bottom: none; }
-.vf-bl { bottom: 11vh; left: 6%; border-right: none; border-top: none; }
-.vf-br { bottom: 11vh; right: 6%; border-left: none; border-top: none; }
+.vf-tl { top: 11vh; left: 5%; border-right: none; border-bottom: none; }
+.vf-tr { top: 11vh; right: 5%; border-left: none; border-bottom: none; }
+.vf-bl { bottom: 11vh; left: 5%; border-right: none; border-top: none; }
+.vf-br { bottom: 11vh; right: 5%; border-left: none; border-top: none; }
 .vf-rec {
-  position: absolute; top: calc(8vh + 16px); right: 7%;
+  position: absolute; top: calc(8vh + 16px); right: 6%;
   display: flex; align-items: center; gap: 6px;
   font-family: var(--serif); font-size: 11px; font-weight: 700;
   letter-spacing: 0.18em; color: rgba(240, 244, 250, 0.82);
@@ -363,6 +367,74 @@ body {
 #pause-btn.paused { color: var(--olive); }
 #audio-btn.on { color: var(--olive); }
 #gfx-btn.on { color: var(--terra); }
+#cine-btn.on { color: var(--terra); background: rgba(188, 75, 43, 0.12); }
+
+/* ── toolbar line icons (SVG, no emoji) ─────────────────────────────────────── */
+.viewport-tools button svg {
+  width: 18px; height: 18px; display: block;
+  fill: none; stroke: currentColor; stroke-width: 2;
+  stroke-linecap: round; stroke-linejoin: round;
+}
+.viewport-tools .ic-play, .viewport-tools .ic-audon { display: none; }
+#pause-btn.paused .ic-pause { display: none; }
+#pause-btn.paused .ic-play { display: block; }
+#audio-btn.on .ic-audoff { display: none; }
+#audio-btn.on .ic-audon { display: block; }
+/* filled glyphs */
+#pause-btn .ic-pause rect, #pause-btn .ic-play path { fill: currentColor; stroke: none; }
+#audio-btn svg > path:first-child { fill: currentColor; stroke: none; }
+
+/* ── collapsible docks + reopen tabs ────────────────────────────────────────── */
+.leftdock, .rightdock { transition: transform 0.34s cubic-bezier(0.4, 0, 0.2, 1); }
+.leftdock.collapsed { transform: translateX(calc(-100% - 30px)); }
+.rightdock.collapsed { transform: translateX(calc(100% + 30px)); }
+.dock-collapse {
+  position: absolute; top: 12px; z-index: 4;
+  width: 24px; height: 24px; border: none; background: transparent;
+  color: var(--ink-3); cursor: pointer; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.dock-collapse svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dock-collapse:hover { background: rgba(188, 75, 43, 0.10); color: var(--terra); }
+.leftdock .dock-collapse { right: 12px; }
+.dock-collapse-r { left: 12px; }
+.dock-reopen {
+  position: absolute; top: 50%; transform: translateY(-50%); z-index: 5;
+  width: 22px; height: 58px; border: none; cursor: pointer;
+  background: var(--glass-strong); backdrop-filter: var(--blur); -webkit-backdrop-filter: var(--blur);
+  box-shadow: var(--sh-float); color: var(--ink-2);
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.dock-reopen svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.dock-reopen:hover { color: var(--terra); }
+.dock-reopen-l { left: 0; border-radius: 0 11px 11px 0; }
+.dock-reopen-r { right: 0; border-radius: 11px 0 0 11px; }
+
+/* ── dock tabs (chronicle / activity share the full height) ──────────────────── */
+.dock-tabs { display: flex; gap: 2px; padding: 8px 14px 0; flex-shrink: 0; border-bottom: 1px solid var(--line); }
+.dock-tab {
+  flex: 1; padding: 8px 6px 9px; border: none; background: transparent; cursor: pointer;
+  font-family: var(--serif); font-size: 11px; font-weight: 600; letter-spacing: 0.14em;
+  text-transform: uppercase; color: var(--ink-3); border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color 0.14s, border-color 0.14s;
+}
+.dock-tab:hover { color: var(--ink-2); }
+.dock-tab.is-active { color: var(--terra); border-bottom-color: var(--terra); }
+.dock-panes { flex: 1; min-height: 0; display: flex; overflow: hidden; }
+.tab-pane { display: none; flex: 1; min-height: 0; overflow-y: auto; }
+.tab-pane.is-active { display: block; }
+
+/* ── cinematic mode: clear all chrome for the pure frame ─────────────────────── */
+#app.cinematic .leftdock,
+#app.cinematic .rightdock,
+#app.cinematic .world-stats,
+#app.cinematic .legend,
+#app.cinematic .dock-reopen,
+#app.cinematic #inspector {
+  opacity: 0; pointer-events: none;
+  transition: opacity 0.3s ease;
+}
+#app.cinematic .viewport-tools { bottom: calc(8vh + 14px); z-index: 8; }
 
 /* ── Graphics / style panel ─────────────────────────────────────────────────── */
 .gfx-panel {
@@ -455,9 +527,8 @@ body {
 
 /* ── Chronicle (the saga — high-signal headlines above the raw activity) ─────── */
 .chronicle {
-  flex-shrink: 0;
-  max-height: 168px;
   overflow-y: auto;
+  padding-bottom: 12px;
   scrollbar-width: thin;
   scrollbar-color: rgba(188, 75, 43, 0.30) transparent;
 }
