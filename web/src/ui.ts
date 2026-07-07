@@ -224,13 +224,7 @@ export function renderSimBar(): void {
       void nav.deleteSim(btn.dataset.close!);
     });
   });
-  document.getElementById("btn-new-sim")?.addEventListener("click", () => {
-    const modal = document.getElementById("newsim-modal") as HTMLDivElement;
-    const status = document.getElementById("newsim-status") as HTMLDivElement;
-    status.textContent = "";
-    status.classList.remove("error");
-    modal.hidden = false;
-  });
+  document.getElementById("btn-new-sim")?.addEventListener("click", () => openNewSim());
 }
 
 // ── model autocomplete (per provider) ─────────────────────────────────────────
@@ -269,11 +263,23 @@ function rosterRowsHtml(count: number, cfg: ForgeConfig): string {
   return html;
 }
 
-export function renderForge(cfg: ForgeConfig) {
-  forgeCfg = cfg;
+// Sensible defaults for a brand-new simulation (used by the "+" launcher when
+// no config has loaded yet).
+const DEFAULT_FORGE: ForgeConfig = {
+  scenario: "island", seed: 0, provider: "openrouter",
+  sim: { max_days: 4, api_tick_seconds: 1, emergency_multiplier: 2.0 },
+  llm: { fallback_policy: "stub", thinking: "full" },
+  agents: { count: 5, model_override: "", persona_mode: "blank", roster: [] },
+  budget: { usd_cap: 0, context_tokens_per_agent_tick: 32000, max_output_tokens: 1024 },
+};
+
+// The full parameter form — the SINGLE set of controls, used both by the World
+// Forge (reconfigure the running sim) and the New-sim launcher (create a fresh
+// one). No more "4 fields at creation, everything else only after launch".
+function forgeFieldsHtml(cfg: ForgeConfig): string {
   const count = cfg.agents.count;
   const prov = cfg.provider ?? "openrouter";
-  forgeForm.innerHTML = `
+  return `
     ${field("scenario", "scenario", `<select name="scenario">
       <option value="mars"${cfg.scenario === "mars" ? " selected" : ""}>mars</option>
       <option value="island"${cfg.scenario === "island" ? " selected" : ""}>island</option>
@@ -317,19 +323,53 @@ export function renderForge(cfg: ForgeConfig) {
       <label>per-agent model — blank = use model (all) above (names are auto)</label>
       <div id="roster-rows">${rosterRowsHtml(count, cfg)}</div>
     </div>
-    <button class="forge-submit" type="submit">Apply world</button>
   `;
-  // Keep the per-agent rows in sync with the agent count.
-  const agentsInput = forgeForm.querySelector<HTMLInputElement>('input[name="agents"]')!;
-  const rowsEl = forgeForm.querySelector<HTMLDivElement>("#roster-rows")!;
+}
+
+// Keep the per-agent rows + model autocomplete live inside whichever form hosts
+// the fields (the dock forge or the new-sim launcher).
+function wireForgeForm(formEl: HTMLFormElement, cfg: ForgeConfig): void {
+  const agentsInput = formEl.querySelector<HTMLInputElement>('input[name="agents"]')!;
+  const rowsEl = formEl.querySelector<HTMLDivElement>("#roster-rows")!;
   agentsInput.addEventListener("input", () => {
     const n = Math.max(1, Math.min(12, Number(agentsInput.value) || 1));
-    rowsEl.innerHTML = rosterRowsHtml(n, forgeCfg!);
+    rowsEl.innerHTML = rosterRowsHtml(n, cfg);
   });
-  // Populate model autocomplete for the selected provider, refresh on change.
-  const provSel = forgeForm.querySelector<HTMLSelectElement>('select[name="provider"]')!;
+  const provSel = formEl.querySelector<HTMLSelectElement>('select[name="provider"]')!;
   void loadProviderModels(provSel.value);
   provSel.addEventListener("change", () => void loadProviderModels(provSel.value));
+}
+
+// Build the full overrides payload from a filled forge form — shared by
+// "apply to current" and "launch new", so both carry EVERY parameter.
+function forgePayload(formEl: HTMLFormElement): Record<string, unknown> {
+  const form = new FormData(formEl);
+  const count = Math.max(1, Math.min(12, Number(form.get("agents")) || 1));
+  const roster: { name: string; model: string }[] = [];
+  for (let i = 0; i < count; i += 1) {
+    roster.push({ name: "", model: String(form.get(`rmodel_${i}`) ?? "stub").trim() || "stub" });
+  }
+  return {
+    scenario: form.get("scenario"), seed: form.get("seed"), days: form.get("days"),
+    agents: count, provider: String(form.get("provider") ?? "openrouter"),
+    api_tick_seconds: form.get("api_tick_seconds"), usd_cap: form.get("usd_cap"),
+    context_tokens_per_agent_tick: form.get("context_tokens_per_agent_tick"),
+    max_output_tokens: form.get("max_output_tokens"),
+    model: String(form.get("model") ?? "").trim(),
+    anomaly: String(form.get("anomaly") ?? "none"),
+    persona_mode: String(form.get("persona_mode") ?? "blank"),
+    emergency_multiplier: form.get("emergency_multiplier"),
+    fallback_policy: String(form.get("fallback_policy") ?? "stub"),
+    thinking: String(form.get("thinking") ?? "full"),
+    roster,
+  };
+}
+
+export function renderForge(cfg: ForgeConfig) {
+  forgeCfg = cfg;
+  forgeForm.innerHTML = forgeFieldsHtml(cfg)
+    + `<button class="forge-submit" type="submit">Применить к текущей</button>`;
+  wireForgeForm(forgeForm, cfg);
 }
 
 function field(label: string, name: string, control: string, wide = false) {
@@ -341,31 +381,7 @@ export function bindForgeSubmit(): void {
     event.preventDefault();
     const button = forgeForm.querySelector<HTMLButtonElement>("button")!;
     button.disabled = true;
-    const form = new FormData(forgeForm);
-    const count = Math.max(1, Math.min(12, Number(form.get("agents")) || 1));
-    const roster: { name: string; model: string }[] = [];
-    for (let i = 0; i < count; i += 1) {
-      // name left blank on purpose — each agent picks its own (see resolve_names).
-      roster.push({ name: "", model: String(form.get(`rmodel_${i}`) ?? "stub").trim() || "stub" });
-    }
-    const payload = {
-      scenario: form.get("scenario"),
-      seed: form.get("seed"),
-      days: form.get("days"),
-      agents: count,
-      provider: String(form.get("provider") ?? "openrouter"),
-      api_tick_seconds: form.get("api_tick_seconds"),
-      usd_cap: form.get("usd_cap"),
-      context_tokens_per_agent_tick: form.get("context_tokens_per_agent_tick"),
-      max_output_tokens: form.get("max_output_tokens"),
-      model: String(form.get("model") ?? "").trim(),
-      anomaly: String(form.get("anomaly") ?? "none"),
-      persona_mode: String(form.get("persona_mode") ?? "blank"),
-      emergency_multiplier: form.get("emergency_multiplier"),
-      fallback_policy: String(form.get("fallback_policy") ?? "stub"),
-      thinking: String(form.get("thinking") ?? "full"),
-      roster,
-    };
+    const payload = forgePayload(forgeForm);
     try {
       store.selectedAgentId = null;
       const snap = await applyConfigReq(store.activeSimId, payload);
@@ -380,45 +396,48 @@ export function bindForgeSubmit(): void {
   });
 }
 
-// ── new-sim modal ─────────────────────────────────────────────────────────────
+// ── new-sim launcher (full forge in a modal) ───────────────────────────────────
+const newSimModalEl = () => document.getElementById("newsim-modal") as HTMLDivElement;
+const newSimFormEl = () => document.getElementById("newsim-form") as HTMLFormElement;
+
+/** Open the launcher pre-filled with the full parameter set (from the current
+ *  config, or defaults) so a new sim can be started with ANY option up front. */
+export function openNewSim(): void {
+  const cfg = forgeCfg ?? DEFAULT_FORGE;
+  const form = newSimFormEl();
+  form.innerHTML = forgeFieldsHtml(cfg)
+    + `<div id="newsim-status" class="newsim-status" role="status" aria-live="polite"></div>`
+    + `<div class="newsim-actions">`
+    + `<button type="button" class="btn-cancel" data-newsim-cancel>Отмена</button>`
+    + `<button type="submit" class="btn-create">Запустить ✦</button></div>`;
+  wireForgeForm(form, cfg);
+  newSimModalEl().hidden = false;
+}
+
 export function bindNewSimModal(): void {
-  const newSimModal = document.getElementById("newsim-modal") as HTMLDivElement;
-  const newSimForm = document.getElementById("newsim-form") as HTMLFormElement;
-  const newSimStatus = document.getElementById("newsim-status") as HTMLDivElement;
-  const newSimCancel = document.getElementById("newsim-cancel") as HTMLButtonElement;
-  const newSimSubmit = newSimForm.querySelector<HTMLButtonElement>('button[type="submit"]')!;
-  newSimCancel.addEventListener("click", () => { newSimModal.hidden = true; });
-  newSimModal.addEventListener("click", (e) => { if (e.target === newSimModal) newSimModal.hidden = true; });
-  // Model autocomplete in the new-sim modal follows its provider select.
-  const nsProvider = document.getElementById("ns-provider") as HTMLSelectElement;
-  nsProvider.addEventListener("change", () => void loadProviderModels(nsProvider.value));
-  void loadProviderModels(nsProvider.value);
-  newSimForm.addEventListener("submit", async (e) => {
+  const modal = newSimModalEl();
+  const form = newSimFormEl();
+  modal.addEventListener("click", (e) => { if (e.target === modal) modal.hidden = true; });
+  document.getElementById("newsim-close")?.addEventListener("click", () => { modal.hidden = true; });
+  form.addEventListener("click", (e) => {
+    if ((e.target as HTMLElement).closest("[data-newsim-cancel]")) modal.hidden = true;
+  });
+  form.addEventListener("submit", async (e) => {
     e.preventDefault();
-    const fd = new FormData(newSimForm);
-    const overrides: Record<string, unknown> = {
-      scenario: fd.get("scenario"),
-      seed: Number(fd.get("seed")),
-      agents: Number(fd.get("agents")),
-      days: Number(fd.get("days")),
-      model: String(fd.get("model") ?? "").trim() || undefined,
-      provider: fd.get("provider"),
-    };
-    newSimStatus.textContent = "Launching simulation...";
-    newSimStatus.classList.remove("error");
-    newSimCancel.disabled = true;
-    newSimSubmit.disabled = true;
+    const status = document.getElementById("newsim-status");
+    const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
+    const payload = forgePayload(form);
+    if (status) { status.textContent = "Запускаю симуляцию…"; status.classList.remove("error"); }
+    if (submit) submit.disabled = true;
     try {
-      await nav.createSim(overrides);
-      newSimModal.hidden = true;
+      await nav.createSim(payload);
+      modal.hidden = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      newSimStatus.textContent = `Launch failed: ${message}`;
-      newSimStatus.classList.add("error");
+      if (status) { status.textContent = `Не удалось запустить: ${message}`; status.classList.add("error"); }
       pushEvent(`create sim failed: ${message}`);
     } finally {
-      newSimCancel.disabled = false;
-      newSimSubmit.disabled = false;
+      if (submit) submit.disabled = false;
     }
   });
 }

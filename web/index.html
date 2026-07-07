@@ -181,50 +181,13 @@
       </div>
     </div>
 
-    <!-- New simulation modal -->
+    <!-- New simulation launcher — the SAME full parameter set as the World Forge,
+         so every option is available at creation (no create-then-restart). -->
     <div id="newsim-modal" class="newsim-scrim" hidden>
       <div class="newsim-card floaty">
-        <h2>New Simulation</h2>
-        <form id="newsim-form" class="newsim-form">
-          <div class="field">
-            <label for="ns-scenario">Scenario</label>
-            <select name="scenario" id="ns-scenario">
-              <option value="island">island</option>
-              <option value="mars">mars</option>
-            </select>
-          </div>
-          <div class="ns-grid">
-            <div class="field">
-              <label for="ns-seed">Seed</label>
-              <input type="number" name="seed" id="ns-seed" min="0" value="0">
-            </div>
-            <div class="field">
-              <label for="ns-agents">Agents</label>
-              <input type="number" name="agents" id="ns-agents" min="1" max="12" value="5">
-            </div>
-            <div class="field">
-              <label for="ns-days">Days</label>
-              <input type="number" name="days" id="ns-days" min="1" max="30" value="4">
-            </div>
-          </div>
-          <div class="field">
-            <label for="ns-model">Model <span class="hint">blank = stub</span></label>
-            <input type="text" name="model" id="ns-model" list="model-options" placeholder="deepseek-ai/deepseek-v4-flash">
-          </div>
-          <div class="field">
-            <label for="ns-provider">Provider</label>
-            <select name="provider" id="ns-provider">
-              <option value="openrouter">OpenRouter</option>
-              <option value="megallm">MegaLLM</option>
-              <option value="stub">Stub (free)</option>
-            </select>
-          </div>
-          <div id="newsim-status" class="newsim-status" role="status" aria-live="polite"></div>
-          <div class="newsim-actions">
-            <button type="button" class="btn-cancel" id="newsim-cancel">Cancel</button>
-            <button type="submit" class="btn-create">Launch ✦</button>
-          </div>
-        </form>
+        <button type="button" class="cc-close" id="newsim-close" aria-label="Close">✕</button>
+        <h2>Новая симуляция</h2>
+        <form id="newsim-form" class="forge-form"></form>
       </div>
     </div>
 
