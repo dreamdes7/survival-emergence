@@ -473,7 +473,6 @@ let dayLenTicks = 0;                       // from the snapshot (0 = unknown)
 let estTickSec = 0;                        // measured seconds per sim tick (EMA)
 let lastSimTick = -1;
 let lastTickMs = 0;
-let lastUserCamT = 0;                      // idle timer for the auto-orbit drift
 let waterMat: THREE.MeshPhongMaterial | null = null;
 let islandCX = 30, islandCZ = 30;          // sun orbits this
 let followId: string | null = null;        // camera-follow state
@@ -506,6 +505,16 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   campfire: { url: "models/campfire.glb", size: 1.0, axis: "xz", sink: 0.05 },
   lighthouse: { url: "models/lighthouse.glb", size: 3.1, axis: "y", sink: 0.02 },
   bunker: { url: "models/bunker2.glb", size: 1.1, axis: "xz", sink: 0.05 },
+  // hand-modelled by the user (near-arbitrary source scale → normalised to these
+  // world sizes; tweak the `size` here to nudge each to fit the island)
+  cave: { url: "models/cave.glb", size: 2.1, axis: "xz", sink: 0.06 },
+  // lifted (negative sink) so the pool surface clears the ground plate instead
+  // of dropping under it and hiding the water
+  hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.14 },
+  plane: { url: "models/plane.glb", size: 3.2, axis: "xz", sink: 0.08 },
+  radiotower: { url: "models/radiotower.glb", size: 3.8, axis: "y", sink: 0.03 },
+  tent: { url: "models/tent.glb", size: 1.5, axis: "xz", sink: 0.05 },
+  tent_unfinished: { url: "models/tent_unfinished.glb", size: 1.5, axis: "xz", sink: 0.05 },
 };
 const models = new Map<string, THREE.Group>();
 
@@ -853,13 +862,22 @@ function ensureRenderer(stageEl: HTMLElement): void {
   controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  controls.autoRotateSpeed = 0.3;            // the idle "living poster" drift
-  lastUserCamT = performance.now();
-  controls.addEventListener("start", () => { lastUserCamT = performance.now(); });
-  controls.maxPolarAngle = Math.PI * 0.44;    // never below the horizon
-  controls.minPolarAngle = Math.PI * 0.12;
-  controls.minDistance = 6;
-  controls.maxDistance = 140;
+  // Free "fly over the island" scheme (MapControls-style): LEFT-drag trucks the
+  // camera across the sea/land, RIGHT-drag orbits & tilts, wheel dollies, arrow
+  // keys pan. No more being pinned to one centre point that everything spins
+  // around — you go where you look.
+  controls.screenSpacePanning = false;        // pan parallel to the water, not the screen
+  controls.enablePan = true;
+  controls.panSpeed = 0.9;
+  controls.keyPanSpeed = 26;
+  controls.mouseButtons = {
+    LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.touches = { ONE: THREE.TOUCH.PAN, TWO: THREE.TOUCH.DOLLY_ROTATE };
+  controls.listenToKeyEvents(window);         // arrow keys fly the camera
+  controls.maxPolarAngle = Math.PI * 0.47;    // never quite below the horizon
+  controls.minPolarAngle = Math.PI * 0.10;
+  controls.minDistance = 5;
+  controls.maxDistance = 190;
 
   // Selection halo that follows the selected agent.
   selRing = new THREE.Mesh(
@@ -2306,6 +2324,8 @@ function makeStructure(s: StructureState): THREE.Group {
   };
 
   if (building) {
+    // A tent under construction has its own hand-modelled half-pitched frame.
+    if ((s.kind === "tent" || s.kind === "lean_to") && useModel("tent_unfinished")) return g;
     // Scaffold: four posts + a crossbar, ghost of the future building inside.
     for (const [px, pz] of [[-0.3, -0.25], [0.3, -0.25], [-0.3, 0.25], [0.3, 0.25]] as const) {
       g.add(cyl(0.025, 0.025, 0.55, 4, WOOD_D, px, 0.27, pz));
@@ -2361,6 +2381,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "tent": case "lean_to": {
+      if (useModel("tent")) break;
       const tent = new THREE.Mesh(new THREE.CylinderGeometry(0, 0.52, 0.62, 4), lam(CLOTH));
       tent.position.y = 0.31;
       tent.rotation.y = Math.PI / 4;
@@ -2433,6 +2454,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "cave": {
+      if (useModel("cave")) break;
       const dome = new THREE.Mesh(new THREE.DodecahedronGeometry(0.55, 0), lam(0x8b867c));
       dome.position.y = 0.28;
       dome.scale.set(1.15, 0.75, 1);
@@ -2444,10 +2466,13 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "hotspring": {
-      g.add(cyl(0.42, 0.48, 0.1, 8, 0x8a7a55, 0, 0.05, 0));
-      const pool = cyl(0.34, 0.34, 0.05, 8, 0x5db8c9, 0, 0.11, 0);
-      (pool.material as THREE.MeshLambertMaterial).flatShading = false;
-      g.add(pool);
+      if (!useModel("hotspring")) {
+        g.add(cyl(0.42, 0.48, 0.1, 8, 0x8a7a55, 0, 0.05, 0));
+        const pool = cyl(0.34, 0.34, 0.05, 8, 0x5db8c9, 0, 0.11, 0);
+        (pool.material as THREE.MeshLambertMaterial).flatShading = false;
+        g.add(pool);
+      }
+      // steam rises whether the pool is hand-modelled or primitive
       for (let i = 0; i < 3; i += 1) {
         const steam = new THREE.Mesh(new THREE.SphereGeometry(0.07 - i * 0.015, 5, 4),
           new THREE.MeshLambertMaterial({ color: 0xffffff, transparent: true, opacity: 0.35 - i * 0.08 }));
@@ -2483,6 +2508,16 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "radiotower": {
+      if (useModel("radiotower")) {
+        if (st.active) {
+          const tip = new THREE.Mesh(new THREE.SphereGeometry(0.06 / scale, 5, 4),
+            new THREE.MeshBasicMaterial({ color: 0xff6a5a }));
+          tip.position.y = 2.5 / scale;
+          markDecor(tip);
+          g.add(tip);
+        }
+        break;
+      }
       for (const a of [0, 2.09, 4.19]) {
         const leg = cyl(0.02, 0.03, 1.5, 4, METAL_D, Math.cos(a) * 0.22, 0.75, Math.sin(a) * 0.22);
         leg.rotation.x = Math.sin(a) * -0.15;
@@ -2502,6 +2537,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "plane_wreckage": {
+      if (useModel("plane")) break;
       const body = cyl(0.16, 0.2, 1.3, 7, METAL, 0, 0.2, 0);
       body.rotation.z = Math.PI / 2;
       body.rotation.y = 0.4;
@@ -3172,9 +3208,6 @@ function tick(): void {
     camera.fov += (wantFov - camera.fov) * Math.min(1, dt * 2.5);
     camera.updateProjectionMatrix();
   }
-  // after ~14s of no input the camera starts a slow orbit around the island —
-  // an idle "living poster"; any touch or an active follow cancels it
-  controls.autoRotate = !sel && performance.now() - lastUserCamT > 14000;
   // tilt-shift focus rides the followed hero; relaxes to mid-frame otherwise
   const wantFocus = sel
     ? Math.min(0.72, Math.max(0.25,
