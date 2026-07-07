@@ -54,6 +54,9 @@ const GradeShader = {
     uPaperAmt: { value: 1.0 },
     uVignette: { value: 0.14 },
     uBarrel: { value: 0.0 },
+    uSepia: { value: 0.0 },
+    uFlicker: { value: 0.0 },
+    uWeave: { value: 0.0 },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -70,6 +73,7 @@ const GradeShader = {
     uniform float uStorm;
     uniform float uInkAmt, uInkWidth, uComic, uPosterLevels, uPosterAmt;
     uniform float uHalftone, uHalftoneScale, uSat, uPaperAmt, uVignette, uBarrel;
+    uniform float uSepia, uFlicker, uWeave;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -90,6 +94,11 @@ const GradeShader = {
       // glass (optics look). Zero = flat. Feeds every downstream sample.
       vec2 cc = vUv - 0.5;
       vec2 bUv = vUv + cc * dot(cc, cc) * uBarrel;
+      // projector GATE WEAVE: the whole frame drifts a hair, like film sliding in
+      // an old gate. Tiny + slow so it reads as age, not the swim we avoid.
+      bUv += vec2(sin(uTime * 2.3) * 0.6 + sin(uTime * 5.1) * 0.4,
+                  sin(uTime * 1.7 + 1.0) * 0.6 + cos(uTime * 3.3) * 0.3)
+             * uWeave * 0.0016;
 
       // hand tremor: the paper's smooth field (G channel) nudges every sample,
       // so straight CG edges come out gently hand-wavy. STATIC — an animated
@@ -186,6 +195,15 @@ const GradeShader = {
       l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
       c.rgb = mix(vec3(l), c.rgb, uSat);
 
+      // VINTAGE film: age the frame toward a warm faded duotone (shadows drift
+      // warm brown, highlights toward cream) — the old-cartoon print, laid over
+      // the paint rather than replacing it
+      if (uSepia > 0.001) {
+        float yl = dot(c.rgb, vec3(0.299, 0.587, 0.114));
+        vec3 aged = mix(vec3(0.20, 0.12, 0.07), vec3(1.0, 0.94, 0.80), yl);
+        c.rgb = mix(c.rgb, aged, uSepia * 0.8);
+      }
+
       // haze-lifted blacks: nothing is ever pure dark
       c.rgb = mix(c.rgb, vec3(0.70, 0.82, 0.80), 0.05);
 
@@ -221,6 +239,15 @@ const GradeShader = {
       float grain = g1 * 0.62 + g2 * 0.38;
       float gw = 0.35 + (1.0 - smoothstep(0.45, 0.95, l));
       c.rgb += grain * 0.034 * gw * uPaperAmt;
+
+      // old-film density flicker + sparse dust and the odd drifting scratch
+      c.rgb *= 1.0 + (hash(vec2(floor(uTime * 20.0), 7.0)) - 0.5) * uFlicker * 0.1;
+      if (uSepia > 0.001) {
+        float spec = hash(floor(vUv * uRes / 3.0) + floor(uTime * 16.0) * 1.7);
+        c.rgb += step(0.9992, spec) * uSepia * 0.55;              // bright dust mote
+        float sx = hash(vec2(floor(uTime * 2.0), 11.0));
+        c.rgb -= smoothstep(0.004, 0.0, abs(vUv.x - sx)) * uSepia * 0.12;  // scratch
+      }
       // paper tooth: the whole frame sits on one sheet — quiet, and through
       // the pigment equation (paper is flat relative to the image plane, so
       // screen space is actually correct here; loudness was the overlay tell)
@@ -3535,6 +3562,9 @@ function tick(): void {
     gu.uPaperAmt.value = gfx.paper;
     gu.uVignette.value = gfx.vignette;
     gu.uBarrel.value = gfx.barrel;
+    gu.uSepia.value = gfx.sepia;
+    gu.uFlicker.value = gfx.flicker;
+    gu.uWeave.value = gfx.weave;
   }
   if (bloomPass) bloomPass.strength = gfx.bloom;
   if (tiltPass) tiltPass.uniforms.uMax.value = 2.6 * gfx.focus;

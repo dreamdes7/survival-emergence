@@ -514,6 +514,11 @@ const GFX_SLIDERS: { key: string; label: string; min: number; max: number; step:
   { key: "barrel", label: "Линза (дисторсия)", min: 0, max: 0.35, step: 0.01 },
   { key: "handheld", label: "Дрожание камеры", min: 0, max: 2, step: 0.05 },
 ];
+const GFX_FILM: { key: string; label: string; min: number; max: number; step: number }[] = [
+  { key: "sepia", label: "Винтаж (тёплый тон)", min: 0, max: 1, step: 0.02 },
+  { key: "flicker", label: "Мерцание плёнки", min: 0, max: 1, step: 0.02 },
+  { key: "weave", label: "Дрожание кадра (gate)", min: 0, max: 1, step: 0.02 },
+];
 const GFX_TOGGLES: { key: string; label: string }[] = [
   { key: "letterbox", label: "Кинокадр (letterbox)" },
   { key: "viewfinder", label: "Видоискатель при слежении" },
@@ -527,16 +532,17 @@ function renderGfxPanel(): void {
   gfxPresetsEl.innerHTML = Object.keys(PRESETS).map((name) =>
     `<button type="button" class="gfx-preset ${gfx.preset === name ? "sel" : ""}" data-preset="${name}">`
     + `${escapeHtml(PRESET_LABELS[name] ?? name)}</button>`).join("");
-  const sliders = GFX_SLIDERS.map((s) => {
+  const sliderRow = (s: { key: string; label: string; min: number; max: number; step: number }) => {
     const v = gfxNum[s.key] ?? 0;
     return `<div class="gfx-row"><label>${s.label}</label>`
       + `<span class="gfx-val" data-val="${s.key}">${fmtNum(v, s.step)}</span>`
       + `<input type="range" data-gfx="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}"></div>`;
-  }).join("");
+  };
   const toggles = GFX_TOGGLES.map((t) =>
     `<label class="gfx-toggle">${t.label}`
     + `<input type="checkbox" data-gfxt="${t.key}" ${gfxBool[t.key] ? "checked" : ""}></label>`).join("");
-  gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${sliders}`
+  gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${GFX_SLIDERS.map(sliderRow).join("")}`
+    + `<div class="gfx-sec">Плёнка / винтаж</div>${GFX_FILM.map(sliderRow).join("")}`
     + `<div class="gfx-sec">Камера / оптика</div>${toggles}`;
 }
 
