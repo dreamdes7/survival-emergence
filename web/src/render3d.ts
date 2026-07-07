@@ -511,10 +511,14 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   // lifted (negative sink) so the pool surface clears the ground plate instead
   // of dropping under it and hiding the water
   hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.14 },
-  plane: { url: "models/plane.glb", size: 3.2, axis: "xz", sink: 0.08 },
+  plane: { url: "models/plane.glb", size: 7.5, axis: "xz", sink: 0.08 },
   radiotower: { url: "models/radiotower.glb", size: 3.8, axis: "y", sink: 0.03 },
   tent: { url: "models/tent.glb", size: 1.5, axis: "xz", sink: 0.05 },
   tent_unfinished: { url: "models/tent_unfinished.glb", size: 1.5, axis: "xz", sink: 0.05 },
+  // inland ponds (two hand-modelled variants); lifted a touch so the water
+  // surface sits above the plate instead of under it
+  water: { url: "models/water.glb", size: 1.6, axis: "xz", sink: -0.06 },
+  water2: { url: "models/water2.glb", size: 1.6, axis: "xz", sink: -0.06 },
 };
 const models = new Map<string, THREE.Group>();
 
@@ -539,7 +543,8 @@ function loadModels(): void {
         -(bb.min.z + bb.max.z) / 2 * s,
       );
       models.set(key, wrap);
-      if (state && heightGrid.length) buildStructs(state);   // swap in live
+      // swap the model in live: structures AND props (water ponds) both use GLBs
+      if (state && heightGrid.length) { buildStructs(state); buildProps(state); }
     }, undefined, (err) => console.error(`[render3d] model FAILED: ${key}`, err));
   }
 }
@@ -662,6 +667,25 @@ function groundY(wx: number, wz: number): number {
     heightAt(wx + 0.16, wz), heightAt(wx - 0.16, wz),
     heightAt(wx, wz + 0.16), heightAt(wx, wz - 0.16),
   );
+}
+
+// True surface height by raycasting straight DOWN onto the rendered terrain.
+// The plate meshes (Chaikin-smoothed outlines) don't line up exactly with the
+// per-tile plate classification groundY() uses, so on hills the analytic height
+// could sit BELOW the visible mesh and agents/props sank into it. The ray reads
+// the actual mesh top; groundY() stays the fallback before the terrain exists.
+const _downRay = new THREE.Raycaster();
+const _downFrom = new THREE.Vector3();
+const _downDir = new THREE.Vector3(0, -1, 0);
+function surfaceY(wx: number, wz: number): number {
+  const gy = groundY(wx, wz);
+  if (!terrainGroup) return gy;
+  _downFrom.set(wx, 30, wz);
+  _downRay.set(_downFrom, _downDir);
+  const hits = _downRay.intersectObject(terrainGroup, true);
+  // first hit = the highest surface (the mirrored reflection sits below ground);
+  // never return below the analytic floor
+  return hits.length ? Math.max(gy, hits[0].point.y) : gy;
 }
 
 // ── scene bootstrap ───────────────────────────────────────────────────────────
@@ -2125,6 +2149,13 @@ function makePool(): THREE.Group {
   return g;
 }
 
+// A ready-to-place clone of a loaded GLB (already normalised to world size,
+// foot at y=0). Null until the model finishes loading — callers fall back.
+function cloneModel(key: string): THREE.Group | null {
+  const m = models.get(key);
+  return m ? (m.clone(true) as THREE.Group) : null;
+}
+
 const propReflMat = new THREE.MeshBasicMaterial({
   color: 0x16323a, transparent: true, opacity: 0.1, depthWrite: false,
 });
@@ -2143,11 +2174,19 @@ function buildProps(st: WorldState): void {
     else if (k === "rocks") obj = makeRock(node.id);
     else if (k === "orerock") obj = makeRock(node.id, 0x7d766c);
     else if (k === "thicket") obj = makeBush(node.id);
-    else if (k === "spring" || k === "fishing") obj = makePool();
+    else if (k === "spring" || k === "fishing") {
+      // no water body on the beach or bare rock — the sea is right there and a
+      // fake pond reads wrong; ponds belong inland on grass/foliage. Uses both
+      // hand-modelled variants (water / water2), primitive pool as fallback.
+      const tile = st.map.grid[node.y]?.[node.x] ?? "";
+      if (!(tile.includes("sand") || tile.includes("rock") || tile.includes("water"))) {
+        obj = cloneModel(hashStr(node.id + "w") < 0.5 ? "water" : "water2") ?? makePool();
+      }
+    }
     else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
-    const gy = Math.max(0.02, groundY(wx, wz));
+    const gy = Math.max(0.02, surfaceY(wx, wz));
     obj.position.set(wx, gy, wz);
     propsGroup.add(obj);
 
@@ -2715,7 +2754,7 @@ function buildStructs(st: WorldState): void {
   for (const s of st.structures) {
     const obj = makeStructure(s);
     const wx = s.x + 0.5, wz = s.y + 0.5;
-    const gy = Math.max(0.02, groundY(wx, wz));
+    const gy = Math.max(0.02, surfaceY(wx, wz));
     obj.position.set(wx, gy, wz);
     obj.userData.structId = s.id;
     structsGroup.add(obj);
@@ -2742,7 +2781,7 @@ function buildStructs(st: WorldState): void {
       }
       smokes.push({ base, puffs, seed: hashStr(s.id) });
       const flyCols = [0xffd97a, 0xffe9a8, 0xcaf0b4];
-      for (let i = 0; i < 14; i += 1) {
+      for (let i = 0; i < 22; i += 1) {
         const fm = flyMat.clone();
         fm.color.setHex(flyCols[i % 3]);
         const fly = new THREE.Mesh(
@@ -2902,7 +2941,7 @@ function syncAgents3d(st: WorldState): void {
     const tx = t.x, tz = t.z;
     if (!v) {
       const group = makeMeeple3d(a);
-      group.position.set(tx, Math.max(0.02, groundY(tx, tz)), tz);
+      group.position.set(tx, Math.max(0.02, surfaceY(tx, tz)), tz);
       group.userData.agentId = a.id;
       scene.add(group);
       v = { group, x: tx, z: tz, tx, tz, status: a.status };
@@ -3046,7 +3085,7 @@ function tick(): void {
     }
     const walking = dist > 0.05;
     const bob = walking ? Math.abs(Math.sin(performance.now() / 90)) * 0.05 : 0;
-    v.group.position.set(v.x, Math.max(0.02, groundY(v.x, v.z)) + bob, v.z);
+    v.group.position.set(v.x, Math.max(0.02, surfaceY(v.x, v.z)) + bob, v.z);
     if (walking) v.group.rotation.y = Math.atan2(dx, dz);
     // arm swing while walking, relaxed at rest
     const arms = v.group.userData.arms as THREE.Mesh[] | undefined;
@@ -3298,18 +3337,28 @@ function tick(): void {
         0.34 * Math.min(1, t * 7) * (1 - t) * (1 + stormMix * 0.3);
     }
   }
-  // fireflies: only with darkness — a loose fairytale swarm around the fire,
-  // each on its own lazy orbit, blinking out of phase
+  // fireflies: only with darkness — a fairytale swarm. Each one WANDERS (its
+  // roaming point drifts slowly and incommensurately, with a smaller flutter on
+  // top) so no two trace the same clean orbit, and each TWINKLES on its own
+  // clock with long dark gaps — sparks of light drifting through the night, not
+  // beads on a wire.
   for (const f of fireflies) {
-    const t = now * 0.5 + f.seed;
-    const orbit = 0.6 + f.seed * 1.1;
-    f.m.position.set(
-      f.base.x + Math.sin(t * 0.9 + f.seed * 4) * orbit,
-      f.base.y + 0.2 + f.seed * 0.5 + Math.sin(t * 1.7) * 0.35,
-      f.base.z + Math.cos(t * 0.7 + f.seed * 2) * orbit,
-    );
-    (f.m.material as THREE.MeshBasicMaterial).opacity =
-      nightMix * (0.3 + 0.7 * Math.max(0, Math.sin(now * (1.6 + f.seed) + f.seed * 9)));
+    const s = f.seed;
+    const t = now * (0.5 + s * 0.5) + s * 30;
+    // slow roaming centre (two incommensurate sines per axis = no visible loop),
+    // kept fairly close so they read as a swarm HUGGING the fire, not scattered
+    const spread = 0.7 + s * 1.0;
+    const rx = Math.sin(t * 0.23 + s * 17) * spread + Math.sin(t * 0.61 + s * 5) * spread * 0.4;
+    const rz = Math.cos(t * 0.19 + s * 11) * spread + Math.cos(t * 0.53 + s * 8) * spread * 0.4;
+    // small fast flutter + a gentle rise/fall
+    const fx = Math.sin(t * 1.9 + s * 21) * 0.12;
+    const fz = Math.cos(t * 2.3 + s * 13) * 0.12;
+    const ry = 0.12 + s * 0.8 + Math.sin(t * 0.9 + s * 9) * 0.4 + Math.sin(t * 3.3) * 0.06;
+    f.m.position.set(f.base.x + rx + fx, f.base.y + ry, f.base.z + rz + fz);
+    // twinkle: a soft glow spike with a dim mote persisting between blinks, so
+    // the swarm always shimmers (fairytale) instead of mostly going dark
+    const blink = Math.max(0, Math.sin(now * (0.9 + s * 1.6) + s * 40));
+    (f.m.material as THREE.MeshBasicMaterial).opacity = nightMix * (0.1 + 0.9 * Math.pow(blink, 1.8));
   }
   // sparks ride the heat column and wink out
   for (const sp of sparks) {

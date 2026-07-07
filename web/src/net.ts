@@ -50,9 +50,9 @@ export function applyState(next: WorldState) {
   });
   renderSimBar();
   handleWorldChange(next);
-  if (!store.selectedAgentId && next.agents.length) {
-    store.selectedAgentId = next.agents[0].id;
-  }
+  // No auto-select: the camera flies free by default and the follow-cam is
+  // opt-in (click a survivor). Auto-selecting agent[0] every snapshot re-armed
+  // the follow and kept yanking the free camera back onto them.
   deriveEvents(store.previous, next);
   void render();
   renderChrome();
