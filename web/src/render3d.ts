@@ -57,6 +57,8 @@ const GradeShader = {
     uSepia: { value: 0.0 },
     uFlicker: { value: 0.0 },
     uWeave: { value: 0.0 },
+    uHiTint: { value: new THREE.Color(1, 1, 1) },      // time-of-day colour script
+    uShadowTint: { value: new THREE.Color(1, 1, 1) },
   },
   vertexShader: `
     varying vec2 vUv;
@@ -74,6 +76,7 @@ const GradeShader = {
     uniform float uInkAmt, uInkWidth, uComic, uPosterLevels, uPosterAmt;
     uniform float uHalftone, uHalftoneScale, uSat, uPaperAmt, uVignette, uBarrel;
     uniform float uSepia, uFlicker, uWeave;
+    uniform vec3 uHiTint, uShadowTint;
     varying vec2 vUv;
     float hash(vec2 p) { return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
     float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
@@ -107,6 +110,16 @@ const GradeShader = {
       float wB = texture2D(uPaper, bUv * asp * 1.35 + vec2(0.31, 0.47)).g;
       vec2 uv = bUv + (vec2(wA, wB) - 0.5) * (2.0 / uRes);
       vec4 c = texture2D(tDiffuse, uv);
+
+      // WET-ON-WET colour bleed: a whisper of the neighbouring wash creeps in, so
+      // colour boundaries soften like wet paint. Tiny, and only in painterly
+      // presets (scaled by paper), so comic stays crisp and flat.
+      vec2 bl = 1.6 / uRes;
+      vec3 nbr = texture2D(tDiffuse, uv + vec2(bl.x, 0.0)).rgb
+               + texture2D(tDiffuse, uv - vec2(bl.x, 0.0)).rgb
+               + texture2D(tDiffuse, uv + vec2(0.0, bl.y)).rgb
+               + texture2D(tDiffuse, uv - vec2(0.0, bl.y)).rgb;
+      c.rgb = mix(c.rgb, nbr * 0.25, 0.12 * uPaperAmt);
 
       // INK LINE from the normals+depth prepass: Roberts cross over view-space
       // normals (creases, silhouettes) + relative depth jumps (overlaps).
@@ -145,8 +158,11 @@ const GradeShader = {
                - luma(texture2D(tDiffuse, uv - vec2(px.x, 0.0)).rgb);
       float gy = luma(texture2D(tDiffuse, uv + vec2(0.0, px.y)).rgb)
                - luma(texture2D(tDiffuse, uv - vec2(0.0, px.y)).rgb);
-      float edge = min(0.18, (abs(gx) + abs(gy)) * 0.55);
-      c.rgb = pow(max(c.rgb, 0.0), vec3(1.0 + edge * 1.5));
+      // WET EDGE / backrun: pigment pools a little darker along the wash
+      // boundary. Gated by the gradient, so flat areas (sky, open water) are
+      // untouched — this darkens edges, never floods fills to black.
+      float edge = min(0.20, (abs(gx) + abs(gy)) * 0.6);
+      c.rgb = pow(max(c.rgb, 0.0), vec3(1.0 + edge * 1.7 * uPaperAmt));
 
       // pigment turbulence anchored in WORLD space: reconstruct the surface
       // point from the prepass depth and sample noise there, so granulation
@@ -182,9 +198,14 @@ const GradeShader = {
         c.rgb = mix(c.rgb, c.rgb * mix(0.32, 1.0, dotMask), apply);
       }
 
-      // split toning: shadows drift teal, highlights drift gold
-      vec3 shadowTint = vec3(0.86, 1.02, 1.04);
-      vec3 highTint  = vec3(1.08, 1.01, 0.88);
+      // split toning as a COLOUR SCRIPT: shadows drift teal / highlights gold,
+      // but both bend toward the hour's actual light (sun in the highlights, sky
+      // in the shadows) so dawn reads rose, noon cool, dusk amber — the palette
+      // is art-directed by time instead of fixed. Hue only (brightness-normed).
+      vec3 hn = uHiTint / max(0.35, dot(uHiTint, vec3(0.3333)));
+      vec3 sn = uShadowTint / max(0.35, dot(uShadowTint, vec3(0.3333)));
+      vec3 shadowTint = mix(vec3(0.86, 1.02, 1.04), sn, 0.4);
+      vec3 highTint  = mix(vec3(1.08, 1.01, 0.88), hn, 0.4);
       l = dot(c.rgb, vec3(0.299, 0.587, 0.114));
       c.rgb *= mix(shadowTint, highTint, smoothstep(0.15, 0.85, l));
 
@@ -253,6 +274,10 @@ const GradeShader = {
       // screen space is actually correct here; loudness was the overlay tell)
       float paper = texture2D(uPaper, vUv * asp * 2.4).r;
       c.rgb = pigment(c.rgb, 1.0 + (0.91 - paper) * 0.55 * uPaperAmt);
+      // DRY BRUSH: in the lightest passages the paper tooth breaks through, so
+      // highlights read dry and textured rather than flatly bright
+      float dryL = smoothstep(0.74, 0.97, dot(c.rgb, vec3(0.299, 0.587, 0.114)));
+      c.rgb = mix(c.rgb, c.rgb * (0.9 + paper * 0.2), dryL * 0.4 * uPaperAmt);
       gl_FragColor = c;
     }`,
 };
@@ -578,17 +603,17 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   // hand-modelled by the user (near-arbitrary source scale → normalised to these
   // world sizes; tweak the `size` here to nudge each to fit the island)
   cave: { url: "models/cave.glb", size: 2.1, axis: "xz", sink: 0.06 },
-  // lifted (negative sink) so the pool surface clears the ground plate instead
-  // of dropping under it and hiding the water
-  hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.14 },
+  // its water sits at the model's foot, so a hair of LIFT keeps the pool from
+  // z-fighting under the ground while the stone rim still reads as grounded
+  hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.06 },
   plane: { url: "models/plane_updated.glb", size: 7.5, axis: "xz", sink: 0.08 },
   radiotower: { url: "models/radiotower.glb", size: 3.8, axis: "y", sink: 0.03 },
   tent: { url: "models/tent.glb", size: 1.5, axis: "xz", sink: 0.05 },
   tent_unfinished: { url: "models/tent_unfinished.glb", size: 1.5, axis: "xz", sink: 0.05 },
-  // inland ponds (two hand-modelled variants); lifted a touch so the water
-  // surface sits above the plate instead of under it
-  water: { url: "models/water.glb", size: 1.6, axis: "xz", sink: -0.06 },
-  water2: { url: "models/water2.glb", size: 1.6, axis: "xz", sink: -0.06 },
+  // inland ponds (two hand-modelled variants) — foot sits on the ground, a hair
+  // embedded so there's no floating gap
+  water: { url: "models/water.glb", size: 1.6, axis: "xz", sink: 0.04 },
+  water2: { url: "models/water2.glb", size: 1.6, axis: "xz", sink: 0.04 },
 };
 const models = new Map<string, THREE.Group>();
 
@@ -701,7 +726,9 @@ function buildHeights(st: WorldState): void {
 // fixed thresholds, smooth each cut with Chaikin, and extrude. Flat tops,
 // smooth curved walls, an authored silhouette — out of pure generation.
 const PLATE_THRESH = [0.05, 1.2, 2.4, 3.6, 4.8];  // raw-height cuts (0 = coastline)
-const PLATE_TOP = [0.26, 1.0, 1.74, 2.48, 3.22];  // world-space top of each plate
+// world-space top of each plate — the gaps WIDEN with height, so the island
+// rises into a dramatic tiered massif with tall cliffs, not a gentle mound
+const PLATE_TOP = [0.26, 1.1, 2.15, 3.35, 4.7];
 
 function rawHeightAt(wx: number, wz: number): number {
   // bilinear over the smooth corner grid
@@ -919,21 +946,30 @@ function ensureRenderer(stageEl: HTMLElement): void {
   waterMatl.onBeforeCompile = (shader) => {
     shader.uniforms.uTime = { value: 0 };
     shader.uniforms.uAmp = { value: 0.004 };
-    shader.vertexShader = "uniform float uTime;\nuniform float uAmp;\n" +
+    shader.uniforms.uIsland = { value: new THREE.Vector2(islandCX, islandCZ) };
+    shader.uniforms.uShoreR = { value: 24 };
+    shader.vertexShader = "uniform float uTime;\nuniform float uAmp;\nvarying vec2 vWXZ;\n" +
       shader.vertexShader.replace(
         "#include <begin_vertex>",
         `#include <begin_vertex>
+         vWXZ = (modelMatrix * vec4(position, 1.0)).xz;
          transformed.z += sin(position.x * 0.55 + uTime * 1.1) * uAmp
                         + cos(position.y * 0.45 + uTime * 0.8) * uAmp
                         + sin((position.x + position.y) * 0.22 + uTime * 0.5) * uAmp * 1.4;`,
       );
-    shader.fragmentShader = "uniform float uTime;\n" +
+    shader.fragmentShader = "uniform float uTime;\nuniform vec2 uIsland;\nuniform float uShoreR;\nvarying vec2 vWXZ;\n" +
       shader.fragmentShader.replace(
         "#include <map_fragment>",
         `vec4 tA = texture2D(map, vMapUv);
          vec4 tB = texture2D(map, vMapUv * 1.43 + vec2(0.37, 0.11));
          float tw = 0.5 + 0.5 * sin(uTime * 0.55 + (tA.g - tB.g) * 7.0);
-         diffuseColor *= mix(tA, tB, tw);`,
+         diffuseColor *= mix(tA, tB, tw);
+         // DEPTH GRADIENT: turquoise shallows hugging the coast fade to deep blue
+         // out to sea — the tropical-postcard read, stylised (radial to island).
+         float shoreD = distance(vWXZ, uIsland);
+         float shallow = smoothstep(uShoreR * 1.7, uShoreR * 0.82, shoreD);
+         diffuseColor.rgb = mix(diffuseColor.rgb * vec3(0.5, 0.64, 0.92),
+                                diffuseColor.rgb * vec3(0.82, 1.14, 1.12), shallow);`,
       );
     waterShader = shader as unknown as { uniforms: Record<string, { value: number }> };
   };
@@ -3353,6 +3389,8 @@ function tick(): void {
   if (waterShader) {
     waterShader.uniforms.uTime.value = now;
     waterShader.uniforms.uAmp.value = 0.004 + stormMix * 0.09;
+    (waterShader.uniforms.uIsland.value as unknown as THREE.Vector2).set(islandCX, islandCZ);
+    waterShader.uniforms.uShoreR.value = mapN * 0.42;
   }
   if (surfMat) {
     surfMat.uniforms.uTime.value = now;
@@ -3565,6 +3603,9 @@ function tick(): void {
     gu.uSepia.value = gfx.sepia;
     gu.uFlicker.value = gfx.flicker;
     gu.uWeave.value = gfx.weave;
+    // colour script: highlights lean into the sun, shadows into the sky dome
+    (gu.uHiTint.value as THREE.Color).copy(LC.sun);
+    (gu.uShadowTint.value as THREE.Color).copy(LC.top);
   }
   if (bloomPass) bloomPass.strength = gfx.bloom;
   if (tiltPass) tiltPass.uniforms.uMax.value = 2.6 * gfx.focus;
