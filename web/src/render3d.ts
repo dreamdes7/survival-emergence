@@ -626,7 +626,7 @@ function markDecor(obj: THREE.Object3D): void {
 // by footprint width; `sink` buries base plugs slightly into the ground.
 const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; sink: number }> = {
   campfire: { url: "models/campfire.glb", size: 1.0, axis: "xz", sink: 0.05 },
-  lighthouse: { url: "models/lighthouse.glb", size: 3.1, axis: "y", sink: 0.02 },
+  lighthouse: { url: "models/lighthouse.glb", size: 4.65, axis: "y", sink: 0.02 },
   bunker: { url: "models/bunker2.glb", size: 1.1, axis: "xz", sink: 0.05 },
   // hand-modelled by the user (near-arbitrary source scale → normalised to these
   // world sizes; tweak the `size` here to nudge each to fit the island)
@@ -635,7 +635,7 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   // z-fighting under the ground while the stone rim still reads as grounded
   hotspring: { url: "models/hotspring.glb", size: 2.1, axis: "xz", sink: -0.06 },
   plane: { url: "models/plane_updated.glb", size: 7.5, axis: "xz", sink: 0.08 },
-  radiotower: { url: "models/radiotower.glb", size: 3.8, axis: "y", sink: 0.03 },
+  radiotower: { url: "models/radiotower.glb", size: 5.7, axis: "y", sink: 0.03 },
   tent: { url: "models/tent.glb", size: 1.5, axis: "xz", sink: 0.05 },
   tent_unfinished: { url: "models/tent_unfinished.glb", size: 1.5, axis: "xz", sink: 0.05 },
   // inland ponds (two hand-modelled variants) — foot sits on the ground, a hair
