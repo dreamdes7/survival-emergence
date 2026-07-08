@@ -1856,7 +1856,7 @@ function buildGrass(st: WorldState): void {
   const day = st.day || 0;
   // seasons: the noise domain drifts a little every sim day (patches migrate,
   // thicken, die back) and a slow global wave makes lush days and lean days
-  const gLush = 0.98 + 0.22 * Math.sin(day * 0.55 + 2.0);
+  const gLush = 0.86 + 0.22 * Math.sin(day * 0.55 + 2.0);
   const spots: { x: number; y: number; z: number; sx: number; sy: number; c: THREE.Color }[] = [];
   const base = new THREE.Color(0x7fb35c);
   const sstep = (a: number, b: number, x: number): number => {
@@ -1875,7 +1875,7 @@ function buildGrass(st: WorldState): void {
     if (gy < 0.6 || trampled(wx, wz)) return;
     const c = base.clone();
     // deep hearts of a patch grow TALL grass — reeds you could hide in
-    const tall = forceTall || (lush > 0.78 && sB > 0.62);
+    const tall = forceTall || (lush > 0.85 && sB > 0.7);
     // flowers drift in their own patches inside the lush zones
     if (!tall && vnoise(wx, wz, 4, 207) > 0.72 && sB < 0.4 && lush > 0.45) {
       c.setHex(sA < 0.5 ? 0xf2e2b8 : 0xe8b8c8);
@@ -1885,10 +1885,10 @@ function buildGrass(st: WorldState): void {
       c.offsetHSL((sA - 0.5) * 0.07, lush * 0.06,
         (sB - 0.5) * 0.10 + lush * 0.06 - 0.04);
     }
-    const s = (0.65 + lush * 1.15) * (0.75 + sB * 0.5);
+    const s = (0.6 + lush * 0.82) * (0.75 + sB * 0.45);
     spots.push({
       x: wx, y: gy, z: wz,
-      sx: tall ? s * 1.25 : s, sy: tall ? s * 2.5 : s, c,
+      sx: tall ? s * 1.2 : s, sy: tall ? s * 2.05 : s, c,
     });
   };
   for (let ty = 0; ty < n; ty += 1) {
@@ -1897,14 +1897,14 @@ function buildGrass(st: WorldState): void {
       const isGrass = t.includes("grass") && !t.includes("water");
       const isFol = t.includes("foliage");
       if (!isGrass && !isFol) continue;
-      for (let k = 0; k < 10; k += 1) {
+      for (let k = 0; k < 7; k += 1) {
         const wx = tx + hash01(tx, ty, 140 + k);
         const wz = ty + hash01(tx, ty, 150 + k);
         // lushness: two noise octaves shape MEADOW PATCHES, not uniform noise;
         // the domain drifts with the sim day, so patches live their own lives
         const field = vnoise(wx + day * 1.9, wz - day * 1.3, 8, 201) * 0.65
           + vnoise(wx - day * 0.8, wz + day * 1.1, 3.5, 203) * 0.35;
-        const lush = sstep(0.35, 0.74, field);
+        const lush = sstep(0.4, 0.77, field);
         // MOISTURE by elevation: valleys and coastal flats stay green, high dry
         // ridges thin out toward bare rock — an ecological gradient, not a lawn
         const moist = 1 - sstep(1.4, 3.8, heightAt(wx, wz)) * 0.6;
@@ -2224,8 +2224,9 @@ function makeFruitTree(id: string): THREE.Group {
 function makeRock(id: string, tint = C.stone): THREE.Group {
   const g = new THREE.Group();
   const r = hashStr(id);
+  const R = 0.2 + r * 0.16;
   const rock = new THREE.Mesh(
-    new THREE.DodecahedronGeometry(0.2 + r * 0.16, 0),
+    new THREE.DodecahedronGeometry(R, 0),
     new THREE.MeshLambertMaterial({ color: tint, flatShading: true }),
   );
   rock.position.y = 0.12;
@@ -2233,6 +2234,23 @@ function makeRock(id: string, tint = C.stone): THREE.Group {
   rock.scale.y = 0.7;
   rock.castShadow = true;
   g.add(rock);
+  // damp island → moss creeps over the crown of most stones (flattened crusts
+  // of dark green hugging the top). Ore rock (grey-brown) stays barer.
+  const mv = hashStr(id + "moss");
+  if (mv > 0.4) {
+    const mossMat = new THREE.MeshLambertMaterial({ color: 0x50663a, flatShading: true });
+    const patches = 2 + Math.floor(mv * 3);
+    for (let i = 0; i < patches; i += 1) {
+      const a = mv * 17 + i * 2.2;
+      const rad = R * (0.15 + hashStr(id + "mr" + i) * 0.5);
+      const patch = new THREE.Mesh(
+        new THREE.IcosahedronGeometry(R * (0.24 + hashStr(id + "ms" + i) * 0.18), 0), mossMat);
+      patch.position.set(Math.cos(a) * rad, 0.12 + R * (0.32 + hashStr(id + "mh" + i) * 0.18), Math.sin(a) * rad);
+      patch.scale.set(1, 0.32, 1);   // crust, not a blob
+      patch.rotation.y = a;
+      g.add(patch);
+    }
+  }
   return g;
 }
 
@@ -2475,11 +2493,10 @@ function buildProps(st: WorldState): void {
   }
 
   // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
-  // read as MASSES. Now with the odd tree in BLOSSOM (pink/cream crown) and a
-  // rare dead SNAG for character — a mixed, believable stand.
+  // read as MASSES. A rare dead SNAG adds character — a bleak, weathered stand
+  // that suits the island's grim mood (no cheerful blossom here).
   const n = st.map.size;
   const canopyMats = Array.from({ length: 6 }, (_, i) => lamJ(0x628f54, `canopy${i}`, 0.1));
-  const blossomMats = [lamJ(0xe6a6c0, "bloomP", 0.06), lamJ(0xe9dcc0, "bloomC", 0.05)];
   const SNAG = 0x6b5a44;
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
@@ -2515,9 +2532,7 @@ function buildProps(st: WorldState): void {
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
         const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
         const stemH = tall ? s * 1.7 : s;
-        const bloom = hash01(tx, ty, 112 + k) < 0.15;   // in blossom
-        const mat = bloom ? blossomMats[hash01(tx, ty, 113 + k) < 0.6 ? 0 : 1]
-          : canopyMats[(tx * 7 + ty * 13 + k) % 6];
+        const mat = canopyMats[(tx * 7 + ty * 13 + k) % 6];
         const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0), mat);
         blob.position.set(wx, gy + stemH + s * 0.35, wz);
         blob.scale.y = 0.8;
