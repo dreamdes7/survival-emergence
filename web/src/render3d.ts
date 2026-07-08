@@ -1856,7 +1856,7 @@ function buildGrass(st: WorldState): void {
   const day = st.day || 0;
   // seasons: the noise domain drifts a little every sim day (patches migrate,
   // thicken, die back) and a slow global wave makes lush days and lean days
-  const gLush = 0.8 + 0.25 * Math.sin(day * 0.55 + 2.0);
+  const gLush = 0.98 + 0.22 * Math.sin(day * 0.55 + 2.0);
   const spots: { x: number; y: number; z: number; sx: number; sy: number; c: THREE.Color }[] = [];
   const base = new THREE.Color(0x7fb35c);
   const sstep = (a: number, b: number, x: number): number => {
@@ -1897,17 +1897,20 @@ function buildGrass(st: WorldState): void {
       const isGrass = t.includes("grass") && !t.includes("water");
       const isFol = t.includes("foliage");
       if (!isGrass && !isFol) continue;
-      for (let k = 0; k < 6; k += 1) {
+      for (let k = 0; k < 10; k += 1) {
         const wx = tx + hash01(tx, ty, 140 + k);
         const wz = ty + hash01(tx, ty, 150 + k);
         // lushness: two noise octaves shape MEADOW PATCHES, not uniform noise;
         // the domain drifts with the sim day, so patches live their own lives
         const field = vnoise(wx + day * 1.9, wz - day * 1.3, 8, 201) * 0.65
           + vnoise(wx - day * 0.8, wz + day * 1.1, 3.5, 203) * 0.35;
-        const lush = sstep(0.42, 0.78, field);
-        const keep = lush * gLush * (isFol ? 0.42 : 1.0);
+        const lush = sstep(0.35, 0.74, field);
+        // MOISTURE by elevation: valleys and coastal flats stay green, high dry
+        // ridges thin out toward bare rock — an ecological gradient, not a lawn
+        const moist = 1 - sstep(1.4, 3.8, heightAt(wx, wz)) * 0.6;
+        const keep = lush * gLush * (isFol ? 0.62 : 1.0) * moist;
         if (hash01(tx, ty, 130 + k) > keep) continue;
-        put(wx, wz, lush, hash01(tx, ty, 162 + k), hash01(tx, ty, 163 + k));
+        put(wx, wz, lush, hash01(tx, ty, 172 + k), hash01(tx, ty, 184 + k));
       }
     }
   }
@@ -2385,6 +2388,24 @@ function buildFlora(st: WorldState): void {
       }
     }
   }
+  // Wetland reeds ringing the inland ponds — tall, thin, olive; vegetation
+  // follows the water, as it should.
+  for (const node of st.resources) {
+    if (node.quantity <= 0 || node.kind !== "spring") continue;
+    const cx = node.x + 0.5, cz = node.y + 0.5;
+    const reeds = 11 + Math.floor(hash01(node.x, node.y, 600) * 9);
+    for (let i = 0; i < reeds; i += 1) {
+      const a = hash01(node.x, node.y, 610 + i) * 6.283;
+      const rad = 0.68 + hash01(node.x, node.y, 630 + i) * 0.55;
+      const wx = cx + Math.cos(a) * rad, wz = cz + Math.sin(a) * rad;
+      const gy = groundY(wx, wz); if (gy < 0.2) continue;
+      const L = 0.32 + hash01(node.x, node.y, 650 + i) * 0.28;
+      const reed = new THREE.CylinderGeometry(0.004, 0.014, L, 3); reed.translate(0, L / 2, 0);
+      reed.rotateZ((hash01(node.x, node.y, 670 + i) - 0.5) * 0.3);
+      ferns.push(at(bakeColor(reed, 0x6f9a3e), wx, wz, gy, a));
+    }
+  }
+
   const addMerged = (geos: THREE.BufferGeometry[]) => {
     if (!geos.length) return;
     const merged = mergeGeometries(geos, false);
@@ -2454,26 +2475,50 @@ function buildProps(st: WorldState): void {
   }
 
   // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
-  // read as MASSES (references cluster; a lawn with lone lollipops reads cheap).
+  // read as MASSES. Now with the odd tree in BLOSSOM (pink/cream crown) and a
+  // rare dead SNAG for character — a mixed, believable stand.
   const n = st.map.size;
   const canopyMats = Array.from({ length: 6 }, (_, i) => lamJ(0x628f54, `canopy${i}`, 0.1));
+  const blossomMats = [lamJ(0xe6a6c0, "bloomP", 0.06), lamJ(0xe9dcc0, "bloomC", 0.05)];
+  const SNAG = 0x6b5a44;
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
       if (!st.map.grid[ty][tx].includes("foliage")) continue;
       const r = hash01(tx, ty, 91);
-      if (r > 0.4) continue;               // sparser, chunkier groves
-      const count = r < 0.14 ? 2 : 1;
+      if (r > 0.47) continue;              // a touch denser than before
+      const count = r < 0.16 ? 2 : 1;
       for (let k = 0; k < count; k += 1) {
         const ox = hash01(tx, ty, 92 + k) * 0.8 + 0.1;
         const oz = hash01(tx, ty, 95 + k) * 0.8 + 0.1;
         const wx = tx + ox, wz = ty + oz;
         const gy = groundY(wx, wz);
         if (gy < 0.15) continue;
+        // rare dead snag: bare trunk + a couple of stub branches, no canopy
+        if (hash01(tx, ty, 106 + k) < 0.07) {
+          const sh = 0.5 + hash01(tx, ty, 107 + k) * 0.5;
+          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.06, sh, 5), lam(SNAG));
+          trunk.position.set(wx, gy + sh / 2, wz);
+          trunk.rotation.z = (hash01(tx, ty, 108 + k) - 0.5) * 0.22;
+          trunk.castShadow = true;
+          propsGroup.add(trunk);
+          for (let b = 0; b < 3; b += 1) {
+            const bl = new THREE.Mesh(
+              new THREE.CylinderGeometry(0.012, 0.02, 0.16 + hash01(tx, ty, 114 + b) * 0.12, 4), lam(SNAG));
+            const ba = hash01(tx, ty, 116 + b) * 6.28;
+            bl.position.set(wx + Math.cos(ba) * 0.05, gy + sh * (0.55 + b * 0.15), wz + Math.sin(ba) * 0.05);
+            bl.rotation.set(0, ba, 0.9 + hash01(tx, ty, 119 + b) * 0.4);
+            bl.castShadow = true;
+            propsGroup.add(bl);
+          }
+          continue;
+        }
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
         const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
         const stemH = tall ? s * 1.7 : s;
-        const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0),
-          canopyMats[(tx * 7 + ty * 13 + k) % 6]);
+        const bloom = hash01(tx, ty, 112 + k) < 0.15;   // in blossom
+        const mat = bloom ? blossomMats[hash01(tx, ty, 113 + k) < 0.6 ? 0 : 1]
+          : canopyMats[(tx * 7 + ty * 13 + k) % 6];
+        const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0), mat);
         blob.position.set(wx, gy + stemH + s * 0.35, wz);
         blob.scale.y = 0.8;
         blob.castShadow = true;
@@ -2482,8 +2527,7 @@ function buildProps(st: WorldState): void {
         stem.position.set(wx, gy + stemH * 0.5, wz);
         propsGroup.add(stem, blob);
         if (tall) {
-          const top = new THREE.Mesh(new THREE.IcosahedronGeometry(s * 0.55, 0),
-            canopyMats[(tx * 7 + ty * 13 + k + 3) % 6]);
+          const top = new THREE.Mesh(new THREE.IcosahedronGeometry(s * 0.55, 0), mat);
           top.position.set(wx + 0.08, gy + stemH + s * 0.95, wz);
           top.castShadow = true;
           breathers.push({ m: top, phase: hash01(tx, ty, 103 + k) * 20, amp: 0.02, base: 1 });
