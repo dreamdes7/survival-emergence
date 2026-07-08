@@ -615,7 +615,7 @@ function syncAgents(): void {
       dom.lastSaid = a.said;
       dom.bubbleEl.textContent = a.said;
       dom.bubbleEl.classList.add("show");
-      dom.ttl = 6;
+      dom.ttl = bubbleTtl(a.said);
     }
   }
 
@@ -634,6 +634,12 @@ const cineboxEl = document.querySelector<HTMLDivElement>("#cinebox")!;
 type AgentDom = { wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; intentEl: HTMLDivElement; ttl: number; lastSaid: string; lastIntent: string };
 const agentDom = new Map<string, AgentDom>();
 
+// Speech bubbles linger by reading time, not a flat 4-6s — a longer line stays
+// up long enough to actually read (~7s floor, ~18s ceiling).
+function bubbleTtl(said: string): number {
+  return Math.min(18, Math.max(7, 5 + said.length * 0.11));
+}
+
 function ensureAgentDom(id: string, name: string): AgentDom {
   let d = agentDom.get(id);
   if (!d) {
@@ -645,7 +651,8 @@ function ensureAgentDom(id: string, name: string): AgentDom {
     intentEl.className = "agent-intent";
     const nameEl = document.createElement("div");
     nameEl.className = "agent-name";
-    nameEl.style.background = agentCssInk(id);
+    // the agent's colour is now a small accent DOT (via --tint), not a loud fill
+    wrap.style.setProperty("--tint", agentCssInk(id));
     wrap.append(bubbleEl, intentEl, nameEl);
     overlayEl.appendChild(wrap);
     d = { wrap, nameEl, bubbleEl, intentEl, ttl: 0, lastSaid: "", lastIntent: "" };
@@ -675,7 +682,7 @@ function syncAgentDom(state: WorldState): void {
       dom.lastSaid = a.said;
       dom.bubbleEl.textContent = a.said;
       dom.bubbleEl.classList.add("show");
-      dom.ttl = 6;
+      dom.ttl = bubbleTtl(a.said);
     }
   }
   for (const id of [...agentDom.keys()]) {
@@ -695,7 +702,7 @@ function updateOverlay(): void {
   cineboxEl.classList.toggle("show-lb", gfx.letterbox && in3d);
   cineboxEl.classList.toggle("show-vf", gfx.viewfinder && following3d);
   const sc = camera.scale;
-  const items: { d: AgentDom; x: number; y: number }[] = [];
+  const items: { id: string; d: AgentDom; x: number; y: number }[] = [];
   for (const [id, d] of agentDom) {
     if (d.ttl > 0) {
       d.ttl -= dt;
@@ -704,7 +711,7 @@ function updateOverlay(): void {
     if (in3d) {
       const p = agentScreen3d(id);
       if (!p) { d.wrap.style.transform = "translate(-9999px, -9999px)"; continue; }
-      items.push({ d, x: p.x, y: p.y });
+      items.push({ id, d, x: p.x, y: p.y });
       continue;
     }
     const vis = agentVis.get(id);
@@ -714,23 +721,27 @@ function updateOverlay(): void {
     d.wrap.style.transform = `translate(${sx}px, ${sy}px) translate(-50%, -100%)`;
   }
   if (!items.length) return;
-  // greedy de-overlap: closest to the camera (largest y) anchors first, the
-  // rest climb above whatever is already placed
+  // Every label stays GLUED to its own agent — no climbing. Depth order: the
+  // agent nearest the camera (largest y) draws on top and always stays crisp;
+  // a label a nearer one covers is gently DIMMED (never moved), so you can still
+  // read the front and always know which name belongs to which survivor. The
+  // selected agent and anyone currently speaking never dim.
   items.sort((a, b) => b.y - a.y);
-  const placed: { x: number; top: number; bottom: number; w: number }[] = [];
+  const sel = store.selectedAgentId;
+  const placed: { x: number; y: number; w: number; h: number }[] = [];
+  let z = items.length + 10;
   for (const it of items) {
     const w = it.d.wrap.offsetWidth || 60;
-    const h = it.d.wrap.offsetHeight || 26;
-    let y = it.y;                              // element rect: [y-h, y]
-    for (let guard = 0; guard < 16; guard += 1) {
-      const hit = placed.find((r) =>
-        Math.abs(it.x - r.x) < (w + r.w) / 2 - 10
-        && y - h < r.bottom - 4 && y > r.top + 4);
-      if (!hit) break;
-      y = hit.top + 2;                         // step onto the shoulders above
-    }
-    placed.push({ x: it.x, top: y - h, bottom: y, w });
-    it.d.wrap.style.transform = `translate(${it.x}px, ${y}px) translate(-50%, -100%)`;
+    const h = it.d.wrap.offsetHeight || 22;
+    const covered = placed.some((r) =>
+      Math.abs(it.x - r.x) < (w + r.w) / 2 - 6
+      && Math.abs(it.y - r.y) < (h + r.h) / 2 - 2);
+    const keepBright = it.id === sel || it.d.ttl > 0;
+    it.d.wrap.classList.toggle("occluded", covered && !keepBright);
+    it.d.wrap.style.zIndex = String(keepBright ? 999 : z);
+    z -= 1;
+    it.d.wrap.style.transform = `translate(${it.x}px, ${it.y}px) translate(-50%, -100%)`;
+    placed.push({ x: it.x, y: it.y, w, h });
   }
 }
 

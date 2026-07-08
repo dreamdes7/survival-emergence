@@ -961,20 +961,40 @@ body {
   display: flex;
   flex-direction: column;
   align-items: center;
-  gap: 3px;
+  gap: 4px;
   transform-origin: bottom center;
+  transition: opacity 0.28s ease;
 }
+/* clustered survivors: a label a nearer one covers fades back instead of
+   climbing away from its owner */
+.agent-ov.occluded { opacity: 0.26; }
+/* Clean caption chip — a quiet translucent slate, off-white text, and the
+   agent's colour reduced to a small accent dot. No loud fills, no emoji. */
 .agent-name {
+  display: flex;
+  align-items: center;
+  gap: 5px;
   font-family: var(--serif);
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 600;
-  color: #fff;
-  padding: 2px 9px;
+  color: #f1ece1;
+  background: rgba(16, 18, 24, 0.5);
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  padding: 2px 8px 2px 6px;
   border-radius: var(--r-pill);
   white-space: nowrap;
-  text-shadow: 0 1px 2px rgba(0,0,0,0.5);
-  box-shadow: 0 2px 6px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.30);
-  letter-spacing: 0.01em;
+  text-shadow: 0 1px 2px rgba(0,0,0,0.6);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+  letter-spacing: 0.02em;
+}
+.agent-name::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--tint, #cfcabf);
+  box-shadow: 0 0 0 1px rgba(255,255,255,0.28);
 }
 .agent-ov.dead .agent-name { opacity: 0.5; filter: grayscale(0.85); }
 
@@ -998,19 +1018,10 @@ body {
 .agent-bubble.show { display: block; animation: bubble-in 0.2s cubic-bezier(0.2, 0.9, 0.3, 1.15); }
 @keyframes bubble-in { from { opacity: 0; transform: translateY(5px) scale(0.92); } to { opacity: 1; transform: none; } }
 
-/* Intent glyph over each survivor's head — reads the scene as behaviour. */
-.agent-intent {
-  font-size: 13px;
-  line-height: 1;
-  width: 22px; height: 22px;
-  display: flex; align-items: center; justify-content: center;
-  background: var(--glass-strong);
-  border-radius: 50%;
-  box-shadow: var(--sh-float);
-  filter: saturate(1.05);
-}
-.agent-intent:empty { display: none; }
-.agent-ov.dead .agent-intent { opacity: 0.55; }
+/* Intent was a floating emoji circle over each head — it cheapened the look and
+   clashed with the painterly world. Behaviour now reads from the speech bubble
+   and the inspector; the glyph is retired. */
+.agent-intent { display: none; }
 
 /* ── Live inspector (bottom-center, follows selection) ──────────────────────── */
 .inspector {
