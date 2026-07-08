@@ -56,7 +56,7 @@ resources:
 # then progress accumulates over ticks — several builders finish faster).
 buildables:
   campfire:
-    cost: { wood: 3, stone: 2 }
+    cost: { wood: 3, fiber: 1 }   # wood + tinder — the FIRST fire must be reachable
     required_progress: 30
     work_rate: 10
     role: campfire

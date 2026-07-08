@@ -614,19 +614,29 @@ class World:
                 dec = float(phys_cfg.get(stat, {}).get("decay", 0))
                 mult = 1.0
                 if self.is_night and stat == "warmth":   # night chills you, not tires
-                    mult *= 1.4
+                    mult *= 1.75
                 if self.weather == "dust_storm" and stat in ("oxygen", "energy"):
-                    mult *= 1.35
+                    mult *= 1.5
+                # a storm is meant to be OPPRESSIVE — it bites warmth/energy hard
+                # and grinds morale down (huddling matters, shelter matters)
                 if self.weather == "storm" and stat in ("warmth", "energy"):
-                    mult *= 1.35
+                    mult *= 1.7
+                if self.weather == "storm" and stat == "morale":
+                    mult *= 1.8
                 a.physiology[stat] = max(0.0, val - dec * mult)
 
-        # Night cold: exposed agents (no fire, no shelter) lose extra warmth.
-        # Gradual, so nobody freezes the first night — pressure builds over nights.
+        # Night cold: exposed agents (no fire, no shelter) lose extra warmth. The
+        # penalty ESCALATES over consecutive nights — the first night stings, but
+        # a survivor who still has no fire or shelter by night three is in trouble.
         if self.is_night:
+            night_no = self.tick // self.day_length_ticks   # 0,1,2,… nights survived
+            exposed_pen = 2.0 + 0.9 * min(night_no, 4)       # 2.0 → 5.6 by night 4
             for a in self.living_agents():
                 if "warmth" in a.physiology and not self.warm_spot(a):
-                    a.physiology["warmth"] = max(0.0, a.physiology["warmth"] - 1.0)
+                    a.physiology["warmth"] = max(0.0, a.physiology["warmth"] - exposed_pen)
+                    # exposure also robs sleep — the cold gnaws at your reserves
+                    if "energy" in a.physiology:
+                        a.physiology["energy"] = max(0.0, a.physiology["energy"] - 0.8)
 
         # Hazard zones sear anyone standing in or next to them.
         hazards = [s for s in self.structures if s.role == "hazard"]

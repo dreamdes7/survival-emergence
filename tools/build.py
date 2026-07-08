@@ -23,6 +23,29 @@ def _buildables(world) -> dict:
     return world.scenario.get("buildables", {})
 
 
+# Where each raw material comes from — so a blocked build tells the survivor what
+# to actually DO, instead of dead-ending on "need 2 stone".
+_SOURCE_HINT = {
+    "stone": "добудь из скал (rocks) на нагорье",
+    "wood": "нарубить дров у деревьев/пальм",
+    "fiber": "собрать волокно в зарослях (thicket)",
+    "food": "собрать у фруктовых деревьев",
+}
+
+
+def _blocked_msg(world, agent, kind: str, missing: list[str]) -> str:
+    """A build is blocked: name the missing materials, WHERE to get each, and
+    what the survivor could build right now with what they already carry."""
+    src = "; ".join(f"{m}: {_SOURCE_HINT[m.split()[-1]]}"
+                    for m in missing if m.split()[-1] in _SOURCE_HINT)
+    affordable = [k for k, sp in _buildables(world).items()
+                  if k != kind and all(agent.inventory.get(it, 0) >= q
+                                        for it, q in sp.get("cost", {}).items())]
+    tail = f" ({src})" if src else ""
+    alt = f" Сейчас по ресурсам можешь построить: {', '.join(affordable)}." if affordable else ""
+    return f"need {', '.join(missing)} to start a {kind}{tail}.{alt}"
+
+
 def _adjacent_unfinished(world, agent, kind: str):
     for s in world.structures:
         if (s.state.get("buildable_kind") == kind and not s.state.get("complete")
@@ -48,7 +71,7 @@ def _exec_build_structure(world, agent, args) -> str:
         cost = spec.get("cost", {})
         missing = [f"{q:g} {it}" for it, q in cost.items() if agent.inventory.get(it, 0) < q]
         if missing:
-            return f"need {', '.join(missing)} to start a {kind}"
+            return _blocked_msg(world, agent, kind, missing)
         for it, q in cost.items():
             agent.inventory[it] -= q
             if agent.inventory[it] <= 0:
