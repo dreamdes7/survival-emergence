@@ -47,7 +47,12 @@ resources:
   # harvestable props — a chopped tree / mined rock disappears once emptied
   - { kind: wood,       yield_item: wood,  count: 52, quantity: 12, regen: 0.0, terrain: jungle,   consumable: true }  # dense forest
   - { kind: thicket,    yield_item: fiber, count: 22, quantity: 18, regen: 0.0, terrain: jungle,   consumable: true }
-  - { kind: rocks,      yield_item: stone, count: 26, quantity: 12, regen: 0.0, terrain: highland, consumable: true }  # rocky core
+  - { kind: rocks,      yield_item: stone, count: 26, quantity: 12, regen: 0.0, terrain: highland, consumable: true }  # rich lode on the rocky cliffs
+  # loose surface stones scattered across the INTERIOR so stone-gated builds
+  # (workbench/well/smokehouse) are always reachable from an inland camp — the
+  # highland stays the motherlode, these are just what you find lying around
+  - { kind: rocks,      yield_item: stone, count: 16, quantity: 6,  regen: 0.0, terrain: grass,    consumable: true }  # loose stones on the meadow
+  - { kind: rocks,      yield_item: stone, count: 8,  quantity: 6,  regen: 0.0, terrain: jungle,   consumable: true }  # loose stones in the forest
   - { kind: orerock,    yield_item: flint, count: 12, quantity: 10, regen: 0.0, terrain: highland, consumable: true }  # flint for tools
   # currency experiment: rare shell beds on the beach yield beads (no use value)
   - { kind: shell_bed,  yield_item: beads, count: 2,  quantity: 40, regen: 0.0, terrain: beach, blocking: false, consumable: false }
