@@ -326,7 +326,7 @@ const KuwaharaShader = {
     uniform sampler2D tDiffuse;
     uniform vec2 uRes;
     varying vec2 vUv;
-    const int R = 4;
+    const int R = 3;
     void main() {
       vec3 m[8]; vec3 s[8]; float w[8];
       for (int k = 0; k < 8; k++) { m[k] = vec3(0.0); s[k] = vec3(0.0); w[k] = 0.0; }
@@ -3312,9 +3312,16 @@ export function setActive3d(on: boolean): void {
   active = on;
   if (renderer) renderer.domElement.style.display = on ? "" : "none";
   if (on) {
+    // FPS cap: this is a painterly, slow scene — 40fps is indistinguishable from
+    // 60 here and cuts ~a third of the whole postprocess/render load. dt stays
+    // correct because clock.getDelta() measures real elapsed time between ticks.
+    const FRAME_MS = 1000 / 40;
     const loop = () => {
       if (!active || !renderer) return;
       rafId = requestAnimationFrame(loop);
+      const t = performance.now();
+      if (t - lastFrameT < FRAME_MS - 1.5) return;   // too soon — skip this vsync
+      lastFrameT = t;
       tick();
     };
     loop();
@@ -3358,6 +3365,10 @@ const tmpColor = new THREE.Color();
 const tmpVecA = new THREE.Vector3();
 const handheldOffset = new THREE.Vector3();   // operator sway, added post-update
 const clock = new THREE.Clock();
+let lastFrameT = 0;
+let inkTick = 0;
+const lastInkCam = new THREE.Vector3();
+const lastInkTgt = new THREE.Vector3();
 
 function tick(): void {
   if (!renderer || !state) return;
@@ -3371,7 +3382,9 @@ function tick(): void {
     const w = el.clientWidth, h = el.clientHeight;
     const cur = renderer.getSize(new THREE.Vector2());
     if (Math.abs(cur.x - w) > 1 || Math.abs(cur.y - h) > 1) {
-      const pr = Math.min(2, window.devicePixelRatio || 1);
+      // cap at 1.5: the Kuwahara abstraction + paper grain already soften the
+      // image, so 1.5x vs 2x is imperceptible but ~44% fewer fragments to shade
+      const pr = Math.min(1.5, window.devicePixelRatio || 1);
       renderer.setSize(w, h, false);
       renderer.setPixelRatio(pr);
       composer.setSize(w, h);
@@ -3840,21 +3853,32 @@ function tick(): void {
   // ink prepass: solids only (layer 0), one override material, into the
   // half-float normals+depth target the grade shader reads. Shadow updates
   // are deferred to the main render so they aren't paid twice per frame.
+  // It's a WHOLE extra scene pass, and the normals/depth only shift when the
+  // camera moves — so refresh it on camera motion, else only every 2nd frame
+  // (≤25ms of contour lag on a slowly-walking survivor: imperceptible), and
+  // reuse the last target the rest of the time.
   if (inkTarget && inkMat) {
-    renderer.shadowMap.autoUpdate = false;
-    renderer.shadowMap.needsUpdate = false;   // never update inside the prepass
-    const oldBg = scene.background;
-    scene.background = null;
-    scene.overrideMaterial = inkMat;
-    camera.layers.set(0);
-    renderer.setRenderTarget(inkTarget);
-    renderer.setClearColor(0x000000, 0);
-    renderer.clear();
-    renderer.render(scene, camera);
-    renderer.setRenderTarget(null);
-    scene.overrideMaterial = null;
-    scene.background = oldBg;
-    camera.layers.set(0);
+    const camMoved = camera.position.distanceToSquared(lastInkCam) > 1e-7
+      || controls.target.distanceToSquared(lastInkTgt) > 1e-7;
+    if (camMoved || (inkTick & 1) === 0) {
+      renderer.shadowMap.autoUpdate = false;
+      renderer.shadowMap.needsUpdate = false;   // never update inside the prepass
+      const oldBg = scene.background;
+      scene.background = null;
+      scene.overrideMaterial = inkMat;
+      camera.layers.set(0);
+      renderer.setRenderTarget(inkTarget);
+      renderer.setClearColor(0x000000, 0);
+      renderer.clear();
+      renderer.render(scene, camera);
+      renderer.setRenderTarget(null);
+      scene.overrideMaterial = null;
+      scene.background = oldBg;
+      lastInkCam.copy(camera.position);
+      lastInkTgt.copy(controls.target);
+    }
+    inkTick++;
+    camera.layers.set(0);      // main composer render always sees both layers
     camera.layers.enable(1);
   }
 
