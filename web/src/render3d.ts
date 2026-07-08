@@ -17,6 +17,7 @@ import { OutputPass } from "three/examples/jsm/postprocessing/OutputPass.js";
 import { UnrealBloomPass } from "three/examples/jsm/postprocessing/UnrealBloomPass.js";
 import { FXAAShader } from "three/examples/jsm/shaders/FXAAShader.js";
 import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
+import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js";
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
@@ -555,6 +556,7 @@ let propsGroup: THREE.Group | null = null;
 let structsGroup: THREE.Group | null = null;
 let foamGroup: THREE.Group | null = null;
 let cloudsGroup: THREE.Group | null = null;
+let floraGroup: THREE.Group | null = null;
 let fogGroup: THREE.Group | null = null;
 let fogSprites: THREE.Sprite[] = [];
 let skyMesh: THREE.Mesh | null = null;
@@ -1490,6 +1492,7 @@ function buildTerrain(st: WorldState): void {
   buildFog(cx, cz, n);
   buildSkyLife(cx, cz, n);
   buildGrass(st);
+  buildFlora(st);
 
   // First-time camera framing: pulled back so the island floats in open sea.
   camera.position.set(cx + n * 0.12, n * 1.1, cz + n * 1.25);
@@ -2281,6 +2284,118 @@ function makePool(): THREE.Group {
   water.position.y = 0.06;
   g.add(water);
   return g;
+}
+
+// ── ground flora ──────────────────────────────────────────────────────────────
+// Wildflowers, ferns, mushrooms and beach driftwood scattered over the island so
+// the meadow reads as ALIVE (colour!) and the jungle floor and beaches have
+// detail — not one flat green. Everything of a kind is MERGED into a single
+// vertex-coloured mesh (≈3 draw calls total), so the variety is nearly free.
+const FLOWER_HUES = [0xf3f0e6, 0xf5d24b, 0xe8749a, 0xe06a4a, 0xb98cd6, 0xff9e57];
+
+// Give a small part geometry a flat vertex colour and normalise its attributes
+// so a batch of them can be merged into one mesh.
+function bakeColor(geo: THREE.BufferGeometry, hex: number): THREE.BufferGeometry {
+  // Force NON-indexed everywhere: primitives mix indexed (cylinder/sphere) and
+  // non-indexed (icosahedron), and mergeGeometries refuses a mix.
+  const g = geo.index ? geo.toNonIndexed() : geo;
+  g.deleteAttribute("uv");
+  if (!g.getAttribute("normal")) g.computeVertexNormals();
+  const c = new THREE.Color(hex);
+  const cnt = g.getAttribute("position").count;
+  const col = new Float32Array(cnt * 3);
+  for (let i = 0; i < cnt; i += 1) { col[i * 3] = c.r; col[i * 3 + 1] = c.g; col[i * 3 + 2] = c.b; }
+  g.setAttribute("color", new THREE.BufferAttribute(col, 3));
+  return g;
+}
+
+function buildFlora(st: WorldState): void {
+  floraGroup?.removeFromParent();
+  floraGroup = new THREE.Group();
+  const n = st.map.size;
+  const flowers: THREE.BufferGeometry[] = [];
+  const ferns: THREE.BufferGeometry[] = [];
+  const shrooms: THREE.BufferGeometry[] = [];
+  const drift: THREE.BufferGeometry[] = [];
+  // rotate about the item's base, then drop it onto its world spot
+  const at = (geo: THREE.BufferGeometry, wx: number, wz: number, gy: number, rot: number) => {
+    if (rot) geo.rotateY(rot);
+    geo.translate(wx, gy, wz);
+    return geo;
+  };
+  for (let ty = 0; ty < n; ty += 1) {
+    for (let tx = 0; tx < n; tx += 1) {
+      const tile = st.map.grid[ty][tx];
+      const grass = tile.includes("grass"), fol = tile.includes("foliage");
+      const sand = tile.includes("sand") && !tile.includes("water");
+
+      if (grass && hash01(tx, ty, 410) < 0.17) {          // wildflowers in the meadow
+        const cnt = 1 + Math.floor(hash01(tx, ty, 411) * 3);
+        for (let i = 0; i < cnt; i += 1) {
+          const wx = tx + hash01(tx, ty, 420 + i) * 0.8 + 0.1;
+          const wz = ty + hash01(tx, ty, 430 + i) * 0.8 + 0.1;
+          const gy = groundY(wx, wz); if (gy < 0.2) continue;
+          const rr = hash01(tx, ty, 440 + i);
+          const hue = FLOWER_HUES[Math.floor(hash01(tx, ty, 450 + i) * FLOWER_HUES.length)];
+          const h = 0.12 + rr * 0.07;
+          const stem = new THREE.CylinderGeometry(0.007, 0.01, h, 3); stem.translate(0, h / 2, 0);
+          const bloom = new THREE.IcosahedronGeometry(0.045 + rr * 0.025, 0); bloom.scale(1, 0.5, 1); bloom.translate(0, h + 0.01, 0);
+          const ctr = new THREE.SphereGeometry(0.016, 4, 3); ctr.translate(0, h + 0.02, 0);
+          flowers.push(at(bakeColor(stem, 0x5f7a3a), wx, wz, gy, 0));
+          flowers.push(at(bakeColor(bloom, hue), wx, wz, gy, rr * 6));
+          flowers.push(at(bakeColor(ctr, 0xf6e27a), wx, wz, gy, 0));
+        }
+      }
+      if (fol && hash01(tx, ty, 460) < 0.16) {            // ferns on the jungle floor
+        const wx = tx + hash01(tx, ty, 461) * 0.8 + 0.1;
+        const wz = ty + hash01(tx, ty, 462) * 0.8 + 0.1;
+        const gy = groundY(wx, wz); if (gy < 0.2) continue;
+        for (let i = 0; i < 5; i += 1) {
+          const L = 0.16 + hash01(tx, ty, 470 + i) * 0.1;
+          const fr = new THREE.CylinderGeometry(0.003, 0.013, L, 3); fr.translate(0, L / 2, 0);
+          fr.rotateZ(0.5 + hash01(tx, ty, 480 + i) * 0.35);
+          ferns.push(at(bakeColor(fr, 0x3f6b30), wx, wz, gy, (i / 5) * 6.28 + hash01(tx, ty, 490) * 3));
+        }
+      }
+      if (fol && hash01(tx, ty, 500) < 0.05) {            // mushroom clusters in shade
+        const wx = tx + hash01(tx, ty, 501) * 0.7 + 0.15;
+        const wz = ty + hash01(tx, ty, 502) * 0.7 + 0.15;
+        const gy = groundY(wx, wz); if (gy < 0.2) continue;
+        const cnt = 1 + Math.floor(hash01(tx, ty, 503) * 2);
+        const cap = hash01(tx, ty, 504) < 0.5 ? 0xb5472e : 0xc98a4a;
+        for (let i = 0; i < cnt; i += 1) {
+          const ox = (hash01(tx, ty, 510 + i) - 0.5) * 0.16, oz = (hash01(tx, ty, 520 + i) - 0.5) * 0.16;
+          const sh = 0.05 + hash01(tx, ty, 530 + i) * 0.03;
+          const stem = new THREE.CylinderGeometry(0.012, 0.016, sh, 4); stem.translate(ox, sh / 2, oz);
+          const head = new THREE.SphereGeometry(0.03, 5, 3, 0, 6.283, 0, 1.57); head.scale(1, 0.7, 1); head.translate(ox, sh, oz);
+          shrooms.push(at(bakeColor(stem, 0xe8ddc4), wx, wz, gy, 0));
+          shrooms.push(at(bakeColor(head, cap), wx, wz, gy, 0));
+        }
+      }
+      if (sand && hash01(tx, ty, 540) < 0.045) {          // driftwood on the beach
+        const wx = tx + hash01(tx, ty, 541) * 0.7 + 0.15;
+        const wz = ty + hash01(tx, ty, 542) * 0.7 + 0.15;
+        const gy = groundY(wx, wz); if (gy < 0.05 || gy > 0.5) continue;
+        const rot = hash01(tx, ty, 543) * 6.28;
+        const L = 0.3 + hash01(tx, ty, 544) * 0.22;
+        const a = new THREE.CylinderGeometry(0.025, 0.032, L, 5); a.rotateZ(1.45); a.translate(0, 0.03, 0);
+        const b = new THREE.CylinderGeometry(0.018, 0.024, L * 0.55, 5); b.rotateZ(1.1); b.translate(L * 0.34, 0.05, 0.03);
+        drift.push(at(bakeColor(a, 0xb8ab96), wx, wz, gy, rot));
+        drift.push(at(bakeColor(b, 0xa89880), wx, wz, gy, rot));
+      }
+    }
+  }
+  const addMerged = (geos: THREE.BufferGeometry[]) => {
+    if (!geos.length) return;
+    const merged = mergeGeometries(geos, false);
+    if (!merged) return;
+    const mesh = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({ vertexColors: true, flatShading: true }));
+    mesh.castShadow = true;
+    mesh.frustumCulled = false;   // one mesh spanning the whole island
+    floraGroup!.add(mesh);
+  };
+  addMerged(flowers); addMerged(ferns); addMerged(shrooms); addMerged(drift);
+  scene.add(floraGroup);
 }
 
 // A ready-to-place clone of a loaded GLB (already normalised to world size,
