@@ -816,6 +816,20 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
   // embedded so there's no floating gap
   water: { url: "models/water.glb", size: 1.6, axis: "xz", sink: 0.04 },
   water2: { url: "models/water2.glb", size: 1.6, axis: "xz", sink: 0.04 },
+  // user-authored buildables — normalised to each footprint's world size
+  well: { url: "models/homemade_stone_well.glb", size: 1.7, axis: "xz", sink: 0.05 },
+  workbench: { url: "models/island_workbench.glb", size: 1.7, axis: "xz", sink: 0.05 },
+  store: { url: "models/makeshift_storage_shed.glb", size: 2.5, axis: "xz", sink: 0.05 },
+  water_still: { url: "models/rainwater_collector.glb", size: 1.7, axis: "xz", sink: 0.05 },
+  garden: { url: "models/raised_garden_bed.glb", size: 2.6, axis: "xz", sink: 0.05 },
+  smokehouse: { url: "models/smokehouse_drying_rack.glb", size: 1.9, axis: "xz", sink: 0.05 },
+  fishing_rig: { url: "models/fishing_lever_rig.glb", size: 1.4, axis: "xz", sink: 0.05 },
+  // user-authored nature props (replace the primitive rocks/bush on the nodes)
+  boulder: { url: "models/beach_boulder_cluster.glb", size: 1.0, axis: "xz", sink: 0.06 },
+  basalt: { url: "models/volcanic_basalt.glb", size: 0.95, axis: "xz", sink: 0.06 },
+  coral: { url: "models/coral_limestone.glb", size: 1.0, axis: "xz", sink: 0.05 },
+  amber_ore: { url: "models/amber_ore_pile.glb", size: 1.05, axis: "xz", sink: 0.05 },
+  saltbush: { url: "models/silver_saltbush.glb", size: 0.95, axis: "xz", sink: 0.04 },
 };
 const models = new Map<string, THREE.Group>();
 
@@ -2977,10 +2991,18 @@ function buildProps(st: WorldState, force = false): void {
     const k = node.kind;
     if (k === "wood") obj = makePalm(node.id);
     else if (k === "fruit_tree") obj = makeFruitTree(node.id);
-    else if (k === "rocks") obj = makeRock(node.id);
-    else if (k === "orerock") obj = makeRock(node.id, 0x7d766c);
-    else if (k === "thicket") obj = makeBush(node.id);
-    else if (k === "spring" || k === "fishing") {
+    // authored rock/bush GLBs (low-poly), with the primitive as fallback until
+    // the model loads. Stone alternates basalt/boulder for variety.
+    else if (k === "rocks") obj = cloneModel(hashStr(node.id) < 0.5 ? "basalt" : "boulder") ?? makeRock(node.id);
+    else if (k === "orerock") obj = cloneModel("amber_ore") ?? makeRock(node.id, 0x7d766c);
+    else if (k === "thicket") obj = cloneModel("saltbush") ?? makeBush(node.id);
+    else if (k === "shell_bed") obj = cloneModel("coral") ?? makeRock(node.id, 0xe8dcc8);
+    else if (k === "fishing") {
+      // a lever rig on the shore — the fishing node finally has a presence
+      // (it rendered nothing before, being on sand where ponds are suppressed)
+      obj = cloneModel("fishing_rig");
+    }
+    else if (k === "spring") {
       // no water body on the beach or bare rock — the sea is right there and a
       // fake pond reads wrong; ponds belong inland on grass/foliage. Uses both
       // hand-modelled variants (water / water2), primitive pool as fallback.
@@ -2989,7 +3011,6 @@ function buildProps(st: WorldState, force = false): void {
         obj = cloneModel(hashStr(node.id + "w") < 0.5 ? "water" : "water2") ?? makePool();
       }
     }
-    else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
     // Pools seat through seatOnMesh at their REAL visual radius — a pond whose
@@ -3221,6 +3242,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "water_still": {
+      if (useModel("water_still")) break;
       g.add(cyl(0.3, 0.34, 0.12, 8, 0x8a7a55, 0, 0.06, 0));
       const wtr = cyl(0.24, 0.24, 0.04, 8, 0x53aabb, 0, 0.13, 0);
       (wtr.material as THREE.MeshLambertMaterial).flatShading = false;
@@ -3229,6 +3251,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "well": {
+      if (useModel("well")) break;
       g.add(cyl(0.28, 0.3, 0.26, 8, STONEW, 0, 0.13, 0));
       g.add(cyl(0.02, 0.02, 0.5, 4, WOOD_D, -0.24, 0.4, 0));
       g.add(cyl(0.02, 0.02, 0.5, 4, WOOD_D, 0.24, 0.4, 0));
@@ -3236,12 +3259,14 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "store": case "storage_crate": case "supply_pile": {
+      if (s.kind === "store" && useModel("store")) break;
       g.add(box(0.34, 0.34, 0.34, WOOD, -0.2, 0.17, 0.05));
       g.add(box(0.3, 0.3, 0.3, WOOD_D, 0.18, 0.15, -0.08));
       g.add(box(0.28, 0.28, 0.28, WOOD, 0, 0.46, 0));
       break;
     }
     case "workbench": {
+      if (useModel("workbench")) break;
       g.add(box(0.7, 0.06, 0.4, WOOD, 0, 0.3, 0));
       g.add(box(0.06, 0.3, 0.06, WOOD_D, -0.28, 0.15, -0.14));
       g.add(box(0.06, 0.3, 0.06, WOOD_D, 0.28, 0.15, 0.14));
@@ -3249,8 +3274,10 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "smokehouse": {
-      g.add(box(0.5, 0.42, 0.44, WOOD_D, 0, 0.21, 0));
-      g.add(cone(0.4, 0.26, 4, 0x6d4c2c, 0, 0.55, 0));
+      if (!useModel("smokehouse")) {
+        g.add(box(0.5, 0.42, 0.44, WOOD_D, 0, 0.21, 0));
+        g.add(cone(0.4, 0.26, 4, 0x6d4c2c, 0, 0.55, 0));
+      }
       const puff = new THREE.Mesh(new THREE.SphereGeometry(0.09, 5, 4),
         new THREE.MeshLambertMaterial({ color: 0xcccccc, transparent: true, opacity: 0.5 }));
       puff.position.set(0.06, 0.82, 0);
@@ -3259,6 +3286,7 @@ function makeStructure(s: StructureState): THREE.Group {
       break;
     }
     case "garden": {
+      if (useModel("garden")) break;
       g.add(box(0.8, 0.08, 0.5, 0x8a6a45, 0, 0.04, 0));
       for (let rIdx = 0; rIdx < 2; rIdx += 1)
         for (let i = 0; i < 3; i += 1) {
