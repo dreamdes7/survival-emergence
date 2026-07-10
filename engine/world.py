@@ -859,13 +859,29 @@ class World:
         # ── food spoilage: raw food rots in the pack over days, preserved keeps ──
         # Makes stockpiling raw food fail, so a smokehouse (dried food) and a
         # shared store become worth building rather than hand-to-mouth foraging.
+        # Rate 0.15/tick = 1.8/day: a survivor CAN carry a day's meals (the prompt
+        # teaches "носи запас с собой" — the world must not silently delete it),
+        # but a raw hoard still evaporates in days unless smoked or stored. The old
+        # 0.3 out-ate the owner 4:1 — 45 of 70 gathered food rotted UNNOTICED in
+        # packs while the camp starved to death around full fruit trees far away.
         from engine.models import PERISHABLE_FOOD
         for a in self.living_agents():
+            lost_unit = False
             for item in list(a.inventory):
                 if item in PERISHABLE_FOOD and a.inventory[item] > 0:
-                    a.inventory[item] = max(0.0, a.inventory[item] - 0.3)
+                    before = a.inventory[item]
+                    a.inventory[item] = max(0.0, before - 0.15)
+                    if int(a.inventory[item]) < int(before):
+                        lost_unit = True          # a whole meal just went bad
                     if a.inventory[item] <= 0:
                         del a.inventory[item]
+            # Rot is FELT, not silent: you'd notice fruit going soft in your pack.
+            # One quiet observation per day keeps it informative, not spammy.
+            if lost_unit and getattr(a, "_last_rot_day", -1) != self.day:
+                a._last_rot_day = self.day
+                a.memory.add(self.tick, self.day, "observation",
+                             "часть еды в рюкзаке испортилась — сырое тут долго "
+                             "не живёт, впрок его не потаскаешь", 1.7)
 
         # Quiet crimes surface late: a stolen thing is missed hours after it's taken.
         self._resolve_thefts()

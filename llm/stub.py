@@ -17,7 +17,7 @@ class HeuristicLLM:
     def _nearest_node(agent, items=None):
         best, bd = None, 10**9
         for n in agent.known_nodes.values():
-            if n.quantity <= 0:
+            if n.quantity < 1:
                 continue
             if items is not None and n.yield_item not in items:
                 continue
@@ -283,7 +283,7 @@ class HeuristicLLM:
             for nid, node in agent.known_nodes.items():
                 if node.yield_item not in vital_items:
                     continue
-                if node.quantity <= 0:
+                if node.quantity < 1:
                     continue
                 if nid not in o.known_nodes:
                     return {
@@ -422,7 +422,7 @@ class HeuristicLLM:
         from engine.models import FOOD_ITEMS, WATER_ITEMS
         vital = FOOD_ITEMS | WATER_ITEMS
         for nid, node in agent.known_nodes.items():
-            if node.yield_item not in vital or node.quantity <= 0:
+            if node.yield_item not in vital or node.quantity < 1:
                 continue
             for o in world.agents:
                 if o is agent or o.status != "active":
@@ -445,7 +445,7 @@ class HeuristicLLM:
         for nid, node in agent.known_nodes.items():
             if nid in claims:
                 continue
-            if node.quantity <= 0:
+            if node.quantity < 1:
                 continue
             if node.yield_item not in vital:
                 continue

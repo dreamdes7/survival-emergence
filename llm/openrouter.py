@@ -132,7 +132,10 @@ def _ticks_to_relief(agent, world, stat, speed) -> int:
             return 0
         best = None
         for n in agent.known_nodes.values():
-            if getattr(n, "yield_item", None) in items and n.quantity > 0:
+            # >= 1, not > 0: a depleted tree dripping regen (qty 0.04) is a GHOST
+            # source — the countdown once sent a starving agent to one ("источник
+            # в ~1") and he died beside it. Only a real meal counts as relief.
+            if getattr(n, "yield_item", None) in items and n.quantity >= 1:
                 d = chebyshev(agent.x, agent.y, n.x, n.y)
                 best = d if best is None else min(best, d)
         if stat == "thirst":
@@ -748,7 +751,9 @@ class OpenRouterLLM:
         # Nearest-N alone can flood the list with one material (six wood nodes) and
         # leave the agent blind to food/water entirely. Guarantee the nearest node
         # of EACH vital category first, then pad with whatever else is closest.
-        known = sorted((n for n in agent.known_nodes.values() if n.quantity > 0),
+        # quantity >= 1 (not > 0): a drip-regen depleted node shows as "qty0" and
+        # reads like food that isn't there — ghosts don't belong on the map.
+        known = sorted((n for n in agent.known_nodes.values() if n.quantity >= 1),
                        key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))
         per_cat = 1 if fast else 2
         cap = 5 if fast else 9
