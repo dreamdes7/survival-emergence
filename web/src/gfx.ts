@@ -35,7 +35,64 @@ export type Gfx = {
   pixel: number;        // block size in display px; 1 = off (A Short Hike look)
   colorBits: number;    // colour depth per channel in bits; 8 = off (full colour)
   dither: number;       // 0 = hard bands … 1 = full ordered dither (needs colorBits < 8)
+  // ── world palette (island MATERIAL colours, not a post filter) ───────────────
+  palette: string;      // WORLD_PALETTES key — rebuilds the terrain on switch
 };
+
+// A world palette recolours the island itself — plate tops, cliff walls, the
+// submerged shelf, the canopy — where film profiles only grade the captured
+// frame. Together they give authored "looks" instead of one stock render.
+export type WorldPalette = {
+  beach: number;                         // plate-0 top (the sand ring)
+  tops: [number, number, number, number]; // plate 1..4 tops (low grass → summit)
+  wallLow: number; wallHigh: number;     // cliff walls: wet base / rock above
+  shelf: [number, number];               // glowing shallows pair
+  tuft: number; dressRock: number;       // rim grass / wall-foot rocks
+  canopy: number; canopySnag: number;    // jungle blob green / dead snag
+  meadow: number;                        // scattered undergrowth tufts
+};
+
+export const WORLD_PALETTES: Record<string, WorldPalette> = {
+  // the shipped look — bright tropical lagoon
+  lagoon: {
+    beach: 0xe9ddb6, tops: [0x9fc37e, 0x93bb74, 0x89ad84, 0xaaa69e],
+    wallLow: 0xcfbf9a, wallHigh: 0x9aa1a5, shelf: [0x83c9be, 0x63a9a0],
+    tuft: 0x7ba763, dressRock: 0x9d9890, canopy: 0x628f54, canopySnag: 0x6b5a44,
+    meadow: 0x86a86a,
+  },
+  // golden hour, always — warm dry grass, honeyed rock (A Short Hike mood)
+  gloaming: {
+    beach: 0xf0dca6, tops: [0xc4b168, 0xb3a25c, 0x998e55, 0xa89a80],
+    wallLow: 0xd8b183, wallHigh: 0x8f7c68, shelf: [0x8fd0b8, 0x5fae9d],
+    tuft: 0xb8a45a, dressRock: 0xa08a72, canopy: 0x8a8f45, canopySnag: 0x7c5236,
+    meadow: 0xc0aa58,
+  },
+  // cold northern greens under a pale sky — the Bad North key
+  boreal: {
+    beach: 0xded6c2, tops: [0x8aa878, 0x7d9b73, 0x71886f, 0x9aa0a2],
+    wallLow: 0xb5ab97, wallHigh: 0x7e878c, shelf: [0x7fb9b4, 0x5f9799],
+    tuft: 0x6f8f68, dressRock: 0x8f8f8c, canopy: 0x4e7350, canopySnag: 0x5f5346,
+    meadow: 0x74936b,
+  },
+  // ash-grey volcanic gloom — the island at its grimmest (blood reads loudest here)
+  ashfall: {
+    beach: 0xcabfa8, tops: [0x7e8a6b, 0x74806a, 0x6a7369, 0x8a8a86],
+    wallLow: 0x9a9182, wallHigh: 0x5f6467, shelf: [0x6fa8a2, 0x4d8683],
+    tuft: 0x6b7d5c, dressRock: 0x77746d, canopy: 0x44584a, canopySnag: 0x4a4038,
+    meadow: 0x5f7355,
+  },
+};
+
+export const PALETTE_LABELS: Record<string, string> = {
+  lagoon: "Lagoon", gloaming: "Gloaming", boreal: "Boreal", ashfall: "Ashfall",
+};
+
+// Palette-change hook: the renderer registers a terrain-rebuild here and the UI
+// pings it after mutating gfx.palette. Lives in this leaf module so ui.ts never
+// has to import the renderer (render3d imports ui — a direct import would cycle).
+const paletteListeners: (() => void)[] = [];
+export function onPaletteChange(fn: () => void): void { paletteListeners.push(fn); }
+export function notifyPaletteChange(): void { for (const fn of paletteListeners) fn(); }
 
 // A film stock (Dehancer-style): a tone curve (toe lift / shoulder rolloff /
 // contrast / S), a channel colour response (how the dye layers push shadows vs
@@ -82,7 +139,7 @@ const WATERCOLOR: Gfx = {
   ink: 0.85, inkWidth: 0, inkSilhouette: true, comic: 0, posterLevels: 6, posterAmt: 0.13,
   halftone: 0, halftoneScale: 5, saturation: 1.14, paper: 1, vignette: 0.14,
   barrel: 0, bloom: 0.22, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95, palette: "lagoon",
 };
 
 // Old-film cartoon: keeps the painterly base but ages it — warm faded duotone,
@@ -93,7 +150,7 @@ const VINTAGE: Gfx = {
   ink: 1.0, inkWidth: 0.3, inkSilhouette: true, comic: 0, posterLevels: 5, posterAmt: 0.3,
   halftone: 0, halftoneScale: 5, saturation: 0.84, paper: 0.9, vignette: 0.36,
   barrel: 0.07, bloom: 0.36, focus: 1, sepia: 0.62, flicker: 0.5, weave: 0.4,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95, palette: "lagoon",
 };
 
 // Bold cel + ink + Ben-Day dots: comic / old-cartoon. Flatter fills, fewer,
@@ -104,7 +161,7 @@ const COMIC: Gfx = {
   ink: 1.5, inkWidth: 1.15, inkSilhouette: true, comic: 1, posterLevels: 4, posterAmt: 0.9,
   halftone: 0.6, halftoneScale: 5, saturation: 1.34, paper: 0.4, vignette: 0.2,
   barrel: 0.1, bloom: 0.26, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95, palette: "lagoon",
 };
 
 export const PRESETS: Record<string, Gfx> = {
@@ -120,7 +177,7 @@ const DEFAULTS: Gfx = {
   ink: 1.0, inkWidth: 0, inkSilhouette: true, comic: 0, posterLevels: 2, posterAmt: 0,
   halftone: 0, halftoneScale: 5, saturation: 1.0, paper: 0.2, vignette: 0,
   barrel: 0, bloom: 0.14, focus: 0, sepia: 0, flicker: 0, weave: 0.1,
-  letterbox: false, viewfinder: true, handheld: 0, film: "none", renderScale: 1.5, pixel: 1, colorBits: 3, dither: 0.5,
+  letterbox: false, viewfinder: true, handheld: 0, film: "none", renderScale: 1.5, pixel: 1, colorBits: 3, dither: 0.5, palette: "lagoon",
 };
 
 // Bumped when a default changes in a way that should override an existing saved

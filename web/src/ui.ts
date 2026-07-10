@@ -6,7 +6,8 @@ import { applyConfigReq, fetchProviderModels } from "./api";
 import { requiredProgress, store } from "./store";
 import { setInterviewAgent } from "./interview";
 import { agentCssInk, escapeAttr, escapeHtml, genderLabel, intentIcon } from "./utils";
-import { applyPreset, FILM_LABELS, FILM_PROFILES, gfx, PRESETS, saveGfx } from "./gfx";
+import { applyPreset, FILM_LABELS, FILM_PROFILES, gfx, notifyPaletteChange,
+         PALETTE_LABELS, PRESETS, saveGfx, WORLD_PALETTES } from "./gfx";
 import { enhanceNumberInputs, enhanceSelects } from "./widgets";
 import type { AgentState, FeedEntry, ForgeConfig, StructureState, WorldState } from "./types";
 
@@ -619,7 +620,12 @@ function renderGfxPanel(): void {
     `<option value="${k}" ${gfx.film === k ? "selected" : ""}>${FILM_LABELS[k] ?? k}</option>`).join("");
   const filmSelect = `<div class="gfx-row gfx-selrow"><label>Film profile</label>`
     + `<select id="gfx-film" class="gfx-select">${filmOpts}</select></div>`;
+  const palOpts = Object.keys(WORLD_PALETTES).map((k) =>
+    `<option value="${k}" ${gfx.palette === k ? "selected" : ""}>${PALETTE_LABELS[k] ?? k}</option>`).join("");
+  const palSelect = `<div class="gfx-row gfx-selrow"><label>World palette</label>`
+    + `<select id="gfx-palette" class="gfx-select">${palOpts}</select></div>`;
   gfxControlsEl.innerHTML = `<div class="gfx-sec">Quality</div>${GFX_QUALITY.map(sliderRow).join("")}`
+    + `<div class="gfx-sec">World palette</div>${palSelect}`
     + `<div class="gfx-sec">Pixel / dither</div>${GFX_PIXEL.map(sliderRow).join("")}`
     + `<div class="gfx-sec">Style</div>${GFX_SLIDERS.map(sliderRow).join("")}`
     + toggleRow("inkSilhouette", "Outline whole objects only")
@@ -691,6 +697,10 @@ export function bindGfxPanel(): void {
     } else if (t.id === "gfx-film") {
       gfx.film = t.value;
       saveGfx();
+    } else if (t.id === "gfx-palette") {
+      gfx.palette = t.value;
+      saveGfx();
+      notifyPaletteChange();     // renderer rebuilds the island in the new colours
     }
   });
   gfxControlsEl.addEventListener("click", (e) => {

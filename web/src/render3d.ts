@@ -21,7 +21,15 @@ import { mergeGeometries } from "three/examples/jsm/utils/BufferGeometryUtils.js
 import type { AgentState, StructureState, WorldState } from "./types";
 import { agentHue, hslToRgbInt } from "./utils";
 import { store } from "./store";
-import { gfx, FILM_PROFILES } from "./gfx";
+import { gfx, FILM_PROFILES, WORLD_PALETTES, onPaletteChange } from "./gfx";
+
+// The active world palette — island material colours (see gfx.WORLD_PALETTES).
+function pal() {
+  return WORLD_PALETTES[gfx.palette] ?? WORLD_PALETTES.lagoon;
+}
+// A palette switch invalidates the built terrain; the next state sync rebuilds
+// the island (and props/structs rebuild each sync anyway) in the new colours.
+onPaletteChange(() => invalidate3d());
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
@@ -1562,6 +1570,107 @@ function classifyLoops(loops: Loop[]): { outer: Loop; holes: Loop[] }[] {
   return shells;
 }
 
+// ── waterfalls: high terraces spill over their cliffs (A Short Hike layering) ──
+// Deterministic from the height field: find lips where a high plate drops 2+
+// levels, pick a couple of well-separated ones, and hang an animated ribbon of
+// falling water down the wall with mist and a foam pool at its foot. Pure
+// decoration — but it makes the tiered massif read as one living watershed.
+let waterfallGroup: THREE.Group | null = null;
+let waterfallMats: THREE.MeshBasicMaterial[] = [];
+
+function streakTexture(): THREE.CanvasTexture {
+  const c = document.createElement("canvas");
+  c.width = 64; c.height = 256;
+  const ctx = c.getContext("2d")!;
+  ctx.clearRect(0, 0, 64, 256);
+  // long soft vertical streaks, varying alpha — reads as rushing water when scrolled
+  for (let i = 0; i < 26; i += 1) {
+    const x = Math.random() * 64, w = 1.5 + Math.random() * 3.5;
+    const a = 0.25 + Math.random() * 0.5;
+    const g = ctx.createLinearGradient(0, 0, 0, 256);
+    g.addColorStop(0, `rgba(255,255,255,0)`);
+    g.addColorStop(0.3, `rgba(255,255,255,${a})`);
+    g.addColorStop(0.7, `rgba(235,250,250,${a * 0.8})`);
+    g.addColorStop(1, `rgba(255,255,255,0)`);
+    ctx.fillStyle = g;
+    ctx.fillRect(x, 0, w, 256);
+  }
+  const tex = new THREE.CanvasTexture(c);
+  tex.wrapS = tex.wrapT = THREE.RepeatWrapping;
+  return tex;
+}
+
+function buildWaterfalls(n: number): void {
+  waterfallGroup?.removeFromParent();
+  waterfallGroup = new THREE.Group();
+  waterfallMats = [];
+  // candidate lips: a mid/high plate cell whose near neighbour sits 2+ plates lower
+  type Lip = { x: number; z: number; dx: number; dz: number; top: number; bot: number; drop: number };
+  const lips: Lip[] = [];
+  for (let z = 2; z < n - 2; z += 1) {
+    for (let x = 2; x < n - 2; x += 1) {
+      const lv = plateLevelAt(x + 0.5, z + 0.5);
+      if (lv < 2) continue;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+        const nl = plateLevelAt(x + 0.5 + dx * 1.7, z + 0.5 + dz * 1.7);
+        if (nl >= 0 && nl <= lv - 2) {
+          lips.push({ x: x + 0.5 + dx * 0.9, z: z + 0.5 + dz * 0.9, dx, dz,
+                      top: PLATE_TOP[lv], bot: PLATE_TOP[nl], drop: lv - nl });
+        }
+      }
+    }
+  }
+  // favour the tallest drops; keep them far apart so each reads as a landmark
+  lips.sort((a, b) => b.drop - a.drop
+    || hashStr(`wf${a.x},${a.z}`) - hashStr(`wf${b.x},${b.z}`));
+  const picked: Lip[] = [];
+  for (const l of lips) {
+    if (picked.every((p) => Math.hypot(p.x - l.x, p.z - l.z) > 13)) picked.push(l);
+    if (picked.length >= 2) break;
+  }
+  for (const l of picked) {
+    const h = l.top - l.bot + 0.22;
+    const yaw = Math.atan2(l.dx, l.dz);
+    // back sheet: deep glassy teal; front sheet: scrolling white streaks
+    const back = new THREE.Mesh(
+      new THREE.PlaneGeometry(1.15, h),
+      new THREE.MeshBasicMaterial({ color: 0x9fd9d2, transparent: true, opacity: 0.42,
+                                    depthWrite: false, side: THREE.DoubleSide }));
+    const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true,
+      opacity: 0.85, depthWrite: false, side: THREE.DoubleSide, map: streakTexture() });
+    mat.map!.repeat.set(1, Math.max(1, h * 0.6));
+    const front = new THREE.Mesh(new THREE.PlaneGeometry(1.0, h), mat);
+    waterfallMats.push(mat);
+    const cx = l.x, cz = l.z, cy = l.bot + h / 2 - 0.06;
+    for (const [m, off] of [[back, 0.02], [front, 0.09]] as const) {
+      m.position.set(cx + l.dx * off, cy, cz + l.dz * off);
+      m.rotation.y = yaw;
+      waterfallGroup.add(m);
+    }
+    // lip curl: a small bright roll where the water leaves the top plate
+    const curl = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.0, 6),
+      new THREE.MeshBasicMaterial({ color: 0xeafaf7, transparent: true, opacity: 0.9 }));
+    curl.rotation.z = Math.PI / 2;
+    curl.rotation.y = yaw;
+    curl.position.set(cx - l.dx * 0.06, l.top + 0.05, cz - l.dz * 0.06);
+    waterfallGroup.add(curl);
+    // foam pool + mist at the foot
+    const foam = new THREE.Mesh(new THREE.CircleGeometry(0.62, 14),
+      new THREE.MeshBasicMaterial({ color: 0xf2fbfa, transparent: true, opacity: 0.75,
+                                    depthWrite: false }));
+    foam.rotation.x = -Math.PI / 2;
+    foam.position.set(cx + l.dx * 0.5, l.bot + 0.045, cz + l.dz * 0.5);
+    waterfallGroup.add(foam);
+    const mist = new THREE.Mesh(new THREE.SphereGeometry(0.34, 8, 6),
+      new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16,
+                                    depthWrite: false }));
+    mist.scale.set(1.6, 0.7, 1.6);
+    mist.position.set(cx + l.dx * 0.4, l.bot + 0.2, cz + l.dz * 0.4);
+    waterfallGroup.add(mist);
+  }
+  terrainGroup?.add(waterfallGroup);
+}
+
 // ── terrain: the island as SCULPTURE — stacked extruded plates ────────────────
 function buildTerrain(st: WorldState): void {
   terrainGroup?.removeFromParent();
@@ -1587,7 +1696,7 @@ function buildTerrain(st: WorldState): void {
       });
       geo.rotateX(-Math.PI / 2);
       geo.translate(0, -1.32, 0);
-      const mesh = new THREE.Mesh(geo, [lamS(0x83c9be), lamS(0x63a9a0)]);
+      const mesh = new THREE.Mesh(geo, [lamS(pal().shelf[0]), lamS(pal().shelf[1])]);
       mesh.receiveShadow = true;
       terrainGroup.add(mesh);
     }
@@ -1595,7 +1704,8 @@ function buildTerrain(st: WorldState): void {
 
   // One plate per level: smooth contour -> Shape (with holes) -> extrusion with
   // a soft bevel lip. Flat tops, smooth vertical walls, authored silhouette.
-  const topColors = [0xe9ddb6, 0x9fc37e, 0x93bb74, 0x89ad84, 0xaaa69e];
+  // Colours come from the active world palette (toggleable looks, not one stock).
+  const topColors = [pal().beach, ...pal().tops];
   // every terrain surface shares the brush wash + per-vertex macro tint
   const washed = (color: number): THREE.MeshLambertMaterial => {
     const m = lamS(color);
@@ -1604,12 +1714,12 @@ function buildTerrain(st: WorldState): void {
     patchTint(m);          // per-pixel yellow↔blue tone patches over the surface
     return m;
   };
-  const wallLow = washed(0xcfbf9a);            // wet-sand base walls
-  const wallHigh = washed(0x9aa1a5);           // grey rock walls above
+  const wallLow = washed(pal().wallLow);       // wet-sand base walls
+  const wallHigh = washed(pal().wallHigh);     // rock walls above
   const BEV = 0.12;
   const dress = new THREE.Group();             // rim grass + wall-foot rocks
-  const tuftMat = lamS(0x7ba763);
-  const rockMat = lam(0x9d9890);
+  const tuftMat = lamS(pal().tuft);
+  const rockMat = lam(pal().dressRock);
   for (let k = 0; k < PLATE_THRESH.length; k += 1) {
     const thr = PLATE_THRESH[k];
     const solid = (x: number, y: number) =>
@@ -1707,6 +1817,7 @@ function buildTerrain(st: WorldState): void {
   waterMesh.position.set(cx, 0, cz);
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildSurf(st);
+  buildWaterfalls(n);
   buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
   buildFog(cx, cz, n);
@@ -2696,7 +2807,14 @@ function buildProps(st: WorldState): void {
     else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
-    const gy = Math.max(0.02, surfaceY(wx, wz));
+    // Seat on the LOWEST nearby surface so props at a terrace lip settle into
+    // the step instead of hovering: pools sample wide (a pond can't overhang a
+    // cliff), trees/rocks just enough to kill the worst float.
+    const rad = k === "spring" || k === "fishing" ? 0.42 : 0.2;
+    let gy = surfaceY(wx, wz);
+    for (const [ox, oz] of [[-rad, 0], [rad, 0], [0, -rad], [0, rad]] as const)
+      gy = Math.min(gy, surfaceY(wx + ox, wz + oz));
+    gy = Math.max(0.02, gy);
     obj.position.set(wx, gy, wz);
     // spin each prop to a stable per-id heading so a grove of palms/trees/rocks
     // doesn't read as clones all facing the same way (reflection clone inherits it)
@@ -2722,8 +2840,8 @@ function buildProps(st: WorldState): void {
   // that suits the island's grim mood (no cheerful blossom here).
   const n = st.map.size;
   // more materials + wide leaf jitter so a grove reads as many green shades
-  const canopyMats = Array.from({ length: 12 }, (_, i) => lamJLeaf(0x628f54, `canopy${i}`));
-  const SNAG = 0x6b5a44;
+  const canopyMats = Array.from({ length: 12 }, (_, i) => lamJLeaf(pal().canopy, `canopy${i}`));
+  const SNAG = pal().canopySnag;
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
       if (!st.map.grid[ty][tx].includes("foliage")) continue;
@@ -2774,6 +2892,47 @@ function buildProps(st: WorldState): void {
           breathers.push({ m: top, phase: hash01(tx, ty, 103 + k) * 20, amp: 0.02, base: 1 });
           propsGroup.add(top);
         }
+      }
+    }
+  }
+
+  // Undergrowth: open meadow tiles get sparse tufts, ferns and pebbles so the
+  // ground reads as LAYERED vegetation, not empty green felt (the ref's trick:
+  // richness lives at the smallest scale). Merged-cheap primitives, low density.
+  const meadowMat = lamJ(pal().meadow, "meadow", 0.08);
+  const fernMat = lamJ(pal().canopy, "fern", 0.12);
+  const pebbleMat = lam(pal().dressRock);
+  for (let ty = 0; ty < n; ty += 1) {
+    for (let tx = 0; tx < n; tx += 1) {
+      const t = st.map.grid[ty][tx];
+      if (!t.includes("grass") || t.includes("foliage")) continue;
+      const r = hash01(tx, ty, 171);
+      if (r > 0.16) continue;
+      const wx = tx + hash01(tx, ty, 172) * 0.8 + 0.1;
+      const wz = ty + hash01(tx, ty, 173) * 0.8 + 0.1;
+      const gy = groundY(wx, wz);
+      if (gy < 0.15) continue;
+      if (r < 0.035) {                       // a small fern: three leaning blades
+        for (let b = 0; b < 3; b += 1) {
+          const ba = hash01(tx, ty, 175 + b) * 6.28;
+          const bh = 0.14 + hash01(tx, ty, 179 + b) * 0.1;
+          const blade = new THREE.Mesh(new THREE.ConeGeometry(0.028, bh, 4), fernMat);
+          blade.position.set(wx + Math.cos(ba) * 0.05, gy + bh * 0.4, wz + Math.sin(ba) * 0.05);
+          blade.rotation.set(Math.cos(ba) * 0.55, 0, Math.sin(ba) * 0.55);
+          propsGroup.add(blade);
+        }
+      } else if (r < 0.12) {                 // grass tuft: 1-2 soft cones
+        const th = 0.1 + hash01(tx, ty, 183) * 0.12;
+        const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.05, th, 5), meadowMat);
+        tuft.position.set(wx, gy + th / 2, wz);
+        tuft.rotation.z = (hash01(tx, ty, 184) - 0.5) * 0.3;
+        propsGroup.add(tuft);
+      } else {                               // a lone pebble
+        const pr = 0.03 + hash01(tx, ty, 187) * 0.035;
+        const peb = new THREE.Mesh(new THREE.DodecahedronGeometry(pr, 0), pebbleMat);
+        peb.position.set(wx, gy + pr * 0.5, wz);
+        peb.rotation.set(hash01(tx, ty, 188) * 6, hash01(tx, ty, 189) * 6, 0);
+        propsGroup.add(peb);
       }
     }
   }
@@ -3318,8 +3477,17 @@ function buildStructs(st: WorldState): void {
   });
   for (const s of st.structures) {
     const obj = makeStructure(s);
-    const wx = s.x + 0.5, wz = s.y + 0.5;
-    const gy = Math.max(0.02, surfaceY(wx, wz));
+    // Anchor at the FOOTPRINT centre (a 3×3 cave anchored at its top-left tile
+    // hung a full tile past its logical rect — over cliff lips that meant 90%
+    // of the model floating in the air), and seat on the LOWEST plate under the
+    // footprint: sinking a little into a terrace lip reads fine, hovering never.
+    const sw = s.w || 1, sh = s.h || 1;
+    const wx = s.x + sw / 2, wz = s.y + sh / 2;
+    let gy = surfaceY(wx, wz);
+    const inx = Math.max(0.3, sw / 2 - 0.25), inz = Math.max(0.3, sh / 2 - 0.25);
+    for (const [ox, oz] of [[-inx, -inz], [inx, -inz], [-inx, inz], [inx, inz]] as const)
+      gy = Math.min(gy, surfaceY(wx + ox, wz + oz));
+    gy = Math.max(0.02, gy);
     obj.position.set(wx, gy, wz);
     obj.userData.structId = s.id;
     structsGroup.add(obj);
@@ -3881,6 +4049,10 @@ function tick(): void {
   if (grassShader) {
     grassShader.uniforms.uTime.value = now;
     grassShader.uniforms.uWind.value = 0.35 + stormMix * 1.3;
+  }
+  // waterfalls: scroll the streak sheets downward — the whole illusion
+  for (const m of waterfallMats) {
+    if (m.map) m.map.offset.y = now * 0.55;
   }
   // living fire: layered breathing + sideways licks + the occasional tall
   // tongue of flame (a sharpened sine spike), each layer on its own phase
