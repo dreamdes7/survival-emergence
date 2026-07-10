@@ -738,6 +738,7 @@ let fireLights: THREE.PointLight[] = [];
 let inkTarget: THREE.WebGLRenderTarget | null = null;
 let inkMat: THREE.ShaderMaterial | null = null;
 let lastRenderPr = 0;   // so a renderScale change re-applies even without a resize
+let perfHud: HTMLDivElement | null = null;   // ?perf FPS/draws/tris overlay
 type Swayer = { m: THREE.Object3D; phase: number; amp: number; base: number };
 let swayers: Swayer[] = [];
 let breathers: Swayer[] = [];               // canopy blobs pulsing in the wind
@@ -1203,10 +1204,9 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   sun = new THREE.DirectionalLight(0xfff2dd, 1.9);
   sun.castShadow = true;
-  // 4096 over the island frustum: 2x the linear texel density of the old 2048,
-  // so small props (rocks, reeds) cast a shadow with actual shape instead of a
-  // few blocky texels.
-  sun.shadow.mapSize.set(4096, 4096);
+  // 2048: 4096 quadruples the shadow-pass fill cost (16M vs 67M texels) for a
+  // barely-visible gain — small props barely shadow anyway. Perf beats crispness.
+  sun.shadow.mapSize.set(2048, 2048);
   // normalBias offsets the shadow lookup along the surface normal — the correct
   // cure for peter-panning (shadows detaching / "sliding off" their caster).
   // With it doing the anti-acne work, the constant bias can be tiny, which stops
@@ -3177,6 +3177,13 @@ function buildProps(st: WorldState, force = false): void {
       }
     }
     if (!obj) continue;
+    // The authored rock/bush GLBs are the higher-poly assets: on dozens of nodes
+    // their shadows were the biggest per-frame cost added (drawn again into the
+    // shadow map). They're small and low to the ground — kill their shadow-cast,
+    // keep only receive. (Palms/fruit-trees stay, they read as real shadows.)
+    if (k === "rocks" || k === "orerock" || k === "thicket" || k === "shell_bed" || k === "fishing") {
+      obj.traverse((o) => { const m = o as THREE.Mesh; if (m.isMesh) m.castShadow = false; });
+    }
     const wx = node.x + 0.5, wz = node.y + 0.5;
     // Pools seat through seatOnMesh at their REAL visual radius — a pond whose
     // rim overhangs a cliff slides back onto the terrace (a pond hovering on
@@ -4032,13 +4039,35 @@ export function setActive3d(on: boolean): void {
     // 60 here and cuts ~a third of the whole postprocess/render load. dt stays
     // correct because clock.getDelta() measures real elapsed time between ticks.
     const FRAME_MS = 1000 / 40;
+    // Perf HUD (add ?perf to the URL): live FPS + draw calls + triangles, so a
+    // lag report becomes a measurement instead of a guess.
+    const showPerf = new URLSearchParams(location.search).has("perf");
+    if (showPerf && !perfHud) {
+      perfHud = document.createElement("div");
+      perfHud.style.cssText = "position:fixed;top:8px;left:8px;z-index:99999;font:12px monospace;"
+        + "background:rgba(0,0,0,.6);color:#7fffa0;padding:4px 7px;border-radius:5px;white-space:pre;pointer-events:none";
+      document.body.appendChild(perfHud);
+    }
+    let acc = 0, frames = 0, lastHud = performance.now();
     const loop = () => {
       if (!active || !renderer) return;
       rafId = requestAnimationFrame(loop);
       const t = performance.now();
       if (t - lastFrameT < FRAME_MS - 1.5) return;   // too soon — skip this vsync
+      const frameDt = t - lastFrameT;
       lastFrameT = t;
       tick();
+      if (perfHud) {
+        acc += frameDt; frames += 1;
+        if (t - lastHud > 400) {
+          const fps = frames / (acc / 1000);
+          const info = renderer.info.render;
+          perfHud.textContent =
+            `FPS ${fps.toFixed(0)}\ndraws ${info.calls}\ntris ${(info.triangles / 1000).toFixed(0)}k`
+            + `\nframe ${(acc / frames).toFixed(1)}ms`;
+          acc = 0; frames = 0; lastHud = t;
+        }
+      }
     };
     loop();
   } else {
