@@ -4186,8 +4186,12 @@ function tick(): void {
   const gt = performance.now() / 1000;
   const gust = stormMix * (0.55 + 0.45 * Math.sin(gt * 0.5) * Math.cos(gt * 0.21 + 1.1));
 
+  // Phase 5 — palette-aware light: tint & scale the time-of-day light per palette
+  // so Gloaming glows warm, Boreal runs cool-pale, Ashfall goes leaden and dim.
+  const lg = pal().light;
   sun.color.copy(LC.sun);
-  sun.intensity = LC.sunI * (1 - stormMix * 0.5 - gust * 0.14) + flash * 1.7;
+  sun.color.r *= lg.sun[0]; sun.color.g *= lg.sun[1]; sun.color.b *= lg.sun[2];
+  sun.intensity = LC.sunI * lg.sunMul * (1 - stormMix * 0.5 - gust * 0.14) + flash * 1.7;
   const sunR = 62;
   sun.position.set(
     islandCX + Math.sin(LC.azim) * Math.cos(LC.elev * 1.35) * sunR,
@@ -4195,8 +4199,9 @@ function tick(): void {
     islandCZ - Math.cos(LC.azim) * Math.cos(LC.elev * 1.35) * sunR * 0.55,
   );
   ambient.color.copy(LC.sky);
+  ambient.color.r *= lg.amb[0]; ambient.color.g *= lg.amb[1]; ambient.color.b *= lg.amb[2];
   ambient.groundColor.copy(LC.gnd);
-  ambient.intensity = LC.hemiI * (1 - stormMix * 0.3 - gust * 0.1) + flash * 1.1;
+  ambient.intensity = LC.hemiI * lg.ambMul * (1 - stormMix * 0.3 - gust * 0.1) + flash * 1.1;
   // heavy, low overcast: toward slate and then darkened, gusting darker still
   tmpColor.copy(LC.fog).lerp(stormGrey, stormMix * 0.5).lerp(stormDark, stormMix * 0.4);
   tmpColor.multiplyScalar(1 - stormMix * 0.16 - gust * 0.07);

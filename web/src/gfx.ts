@@ -50,6 +50,9 @@ export type WorldPalette = {
   tuft: number; dressRock: number;       // rim grass / wall-foot rocks
   canopy: number; canopySnag: number;    // jungle blob green / dead snag
   meadow: number;                        // scattered undergrowth tufts
+  // light grade (phase 5): per-channel tint × intensity multipliers laid over the
+  // time-of-day light, so each palette is a whole LOOK, not just recoloured dirt.
+  light: { sun: [number, number, number]; amb: [number, number, number]; sunMul: number; ambMul: number };
 };
 
 export const WORLD_PALETTES: Record<string, WorldPalette> = {
@@ -59,6 +62,7 @@ export const WORLD_PALETTES: Record<string, WorldPalette> = {
     wallLow: 0xcfbf9a, wallHigh: 0x9aa1a5, shelf: [0x83c9be, 0x63a9a0],
     tuft: 0x7ba763, dressRock: 0x9d9890, canopy: 0x628f54, canopySnag: 0x6b5a44,
     meadow: 0x86a86a,
+    light: { sun: [1, 1, 1], amb: [1, 1, 1], sunMul: 1, ambMul: 1 },
   },
   // golden hour, always — warm dry grass, honeyed rock (A Short Hike mood)
   gloaming: {
@@ -66,6 +70,7 @@ export const WORLD_PALETTES: Record<string, WorldPalette> = {
     wallLow: 0xd8b183, wallHigh: 0x8f7c68, shelf: [0x8fd0b8, 0x5fae9d],
     tuft: 0xb8a45a, dressRock: 0xa08a72, canopy: 0x8a8f45, canopySnag: 0x7c5236,
     meadow: 0xc0aa58,
+    light: { sun: [1.1, 0.98, 0.82], amb: [1.04, 0.98, 0.9], sunMul: 1.02, ambMul: 0.94 },
   },
   // cold northern greens under a pale sky — the Bad North key
   boreal: {
@@ -73,6 +78,7 @@ export const WORLD_PALETTES: Record<string, WorldPalette> = {
     wallLow: 0xb5ab97, wallHigh: 0x7e878c, shelf: [0x7fb9b4, 0x5f9799],
     tuft: 0x6f8f68, dressRock: 0x8f8f8c, canopy: 0x4e7350, canopySnag: 0x5f5346,
     meadow: 0x74936b,
+    light: { sun: [0.94, 0.99, 1.06], amb: [0.95, 1.0, 1.06], sunMul: 0.96, ambMul: 1.05 },
   },
   // ash-grey volcanic gloom — the island at its grimmest (blood reads loudest here)
   ashfall: {
@@ -80,6 +86,7 @@ export const WORLD_PALETTES: Record<string, WorldPalette> = {
     wallLow: 0x9a9182, wallHigh: 0x5f6467, shelf: [0x6fa8a2, 0x4d8683],
     tuft: 0x6b7d5c, dressRock: 0x77746d, canopy: 0x44584a, canopySnag: 0x4a4038,
     meadow: 0x5f7355,
+    light: { sun: [0.9, 0.9, 0.94], amb: [0.9, 0.92, 0.96], sunMul: 0.82, ambMul: 0.9 },
   },
 };
 
