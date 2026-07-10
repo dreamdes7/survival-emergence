@@ -267,7 +267,7 @@ function rosterRowsHtml(count: number, cfg: ForgeConfig): string {
 // no config has loaded yet).
 const DEFAULT_FORGE: ForgeConfig = {
   scenario: "island", seed: 0, provider: "openrouter",
-  sim: { max_days: 4, api_tick_seconds: 1, emergency_multiplier: 1.3 },
+  sim: { max_days: 4, api_tick_seconds: 1, emergency_multiplier: 1.0 },
   llm: { fallback_policy: "stub", thinking: "full" },
   agents: { count: 5, model_override: "", persona_mode: "blank", roster: [] },
   budget: { usd_cap: 0, context_tokens_per_agent_tick: 32000, max_output_tokens: 1024 },
@@ -291,7 +291,7 @@ function forgeFieldsHtml(cfg: ForgeConfig): string {
       ${["blank", "library", "self_select", "custom", "mixed"].map((m) =>
         `<option value="${m}"${(cfg.agents.persona_mode ?? "blank") === m ? " selected" : ""}>${m}</option>`).join("")}
     </select>`)}
-    ${field("emergency gate ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 1.3}" title="crit×N band where the heuristic overrides the brain; research: ~1.2, 0 = off">`)}
+    ${field("emergency gate ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 1.0}" title="crit×N band where the heuristic overrides the brain; 1.0=deathbed only, 0=pure/off">`)}
     ${field("LLM fail →", "fallback_policy", `<select name="fallback_policy">
       <option value="stub"${(cfg.llm?.fallback_policy ?? "stub") === "stub" ? " selected" : ""}>stub (never stall)</option>
       <option value="wait"${(cfg.llm?.fallback_policy ?? "stub") === "wait" ? " selected" : ""}>wait (clean data)</option>

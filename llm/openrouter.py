@@ -114,6 +114,81 @@ def _phys_urgency(physiology: dict, phys_cfg: dict) -> str:
     return "\n".join(lines)
 
 
+def _ticks_to_relief(agent, world, stat, speed) -> int:
+    """Roughly how many turns until the agent can satisfy `stat`: 0 if it can act
+    in place (rest anywhere; food/water already in the pack), else distance to the
+    nearest known source over move speed. 99 = no known source."""
+    from engine.models import chebyshev, STAT_RESTORE
+    _tool, items = STAT_RESTORE.get(stat, (None, None))
+    if stat == "energy":
+        return 0
+    if items:                                   # hunger / thirst
+        if any(agent.inventory.get(i, 0) > 0 for i in items):
+            return 0
+        best = None
+        for n in agent.known_nodes.values():
+            if getattr(n, "yield_item", None) in items and n.quantity > 0:
+                d = chebyshev(agent.x, agent.y, n.x, n.y)
+                best = d if best is None else min(best, d)
+        if stat == "thirst":
+            for s in world.structures:
+                if s.role == "water" and s.state.get("complete"):
+                    d = chebyshev(agent.x, agent.y, s.x, s.y)
+                    best = d if best is None else min(best, d)
+        return 99 if best is None else best // speed + 1
+    if stat == "warmth":
+        if world.warm_spot(agent):
+            return 0
+        best = None
+        for s in world.structures:
+            if s.role in ("campfire", "hotspring", "shelter") and s.state.get("complete", True):
+                d = chebyshev(agent.x, agent.y, s.x, s.y)
+                best = d if best is None else min(best, d)
+        return 99 if best is None else best // speed + 1
+    return 0
+
+
+def _survival_foresight(agent, world) -> str:
+    """Hand the agent the SAME arithmetic the emergency gate used to act on — but
+    as INFORMATION, not as an override. 'Your water lasts ~4 turns, the nearest is
+    5 away — you won't make it, go now.' The model decides; no heuristic plays it.
+    Surfaces only while a need is actually approaching the point of no return, so
+    it trains proactive resupply instead of chatting until a stub takes the wheel."""
+    phys_cfg = world.scenario.get("physiology", {})
+    speed = max(1, int(getattr(world, "move_speed", 1)))
+    names = {"thirst": "вода", "hunger": "еда", "warmth": "тепло"}
+    lines = []
+    for stat in ("thirst", "hunger", "warmth"):
+        if stat not in agent.physiology:
+            continue
+        val = agent.physiology[stat]
+        cfg = phys_cfg.get(stat, {})
+        decay = float(cfg.get("decay", 1.0))
+        if stat == "warmth" and world.is_night:
+            decay *= 1.75
+        if stat == "warmth" and world.weather == "storm":
+            decay *= 1.7
+        if decay <= 0:
+            continue
+        ttd = val / decay                        # turns until this need floors you
+        ttr = _ticks_to_relief(agent, world, stat, speed)
+        # Surface with LEAD TIME (~8 turns of slack) so the agent can finish what
+        # it's doing and resupply BEFORE the crunch — the whole point is proactive
+        # upkeep, not last-second panic. Farther source → warning appears earlier.
+        if ttd > ttr + 8:
+            continue
+        n = names.get(stat, stat)
+        if ttr >= 90:
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., а источника ты не знаешь — ищи заранее")
+        elif ttd <= ttr:
+            lines.append(f"  ⛔ {n}: запаса на ~{ttd:.0f} ход., ближайший источник в ~{ttr} — НЕ УСПЕВАЕШЬ, иди НЕМЕДЛЕННО")
+        elif ttd <= ttr + 2:
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — впритык, иди сейчас")
+        else:
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — пополни, пока не поздно")
+    return "\n".join(lines)
+
+
 def _psyche_urgency(psyche: dict) -> str:
     """Turn low psychosocial drives into a FELT lack (not an order): the model
     is meant to act on the restlessness — grow close, be useful, leave a mark —
@@ -538,6 +613,13 @@ class OpenRouterLLM:
             "\nКАК ТЫ УСТРОЕН (это не приказы — это про тебя):\n"
             "- СНАЧАЛА НЕ УМРИ. Если в состоянии есть ⚠/❗/💀 — еда, вода, тепло или сон "
             "важнее всего.\n"
+            "- РИТМ ВЫЖИВАНИЯ: жажда и голод возвращаются ПОСТОЯННО. Пей и ешь ЗАРАНЕЕ — "
+            "проходя мимо воды или еды, пополняйся, не жди значка ⚠. Носи немного воды и "
+            "еды с собой, чтобы не бегать к источнику в последний момент. Даже увлёкшись "
+            "стройкой, делом или разговором — раз в день поешь и попей, иначе свалишься "
+            "замертво у недостроенной стены, как бы ни был занят. Строки ⏳/⛔ ниже — "
+            "трезвый расчёт: на сколько ходов хватит запаса и далеко ли источник; верь им "
+            "и выходи ПОКА успеваешь, а не когда уже поздно.\n"
             "- ЗАКОНЫ ОСТРОВА (это ФАКТЫ мира, не мнения — не спорь с ними и не выдумывай "
             "своих): в тихую ночь греет горящий костёр (нужны дрова; без ухода гаснет). "
             "В ШТОРМ ветер срывает тепло — костёр и горячий источник НЕ спасают; держат "
@@ -559,6 +641,9 @@ class OpenRouterLLM:
         )
 
         phys_text = _phys_urgency(agent.physiology, world.scenario.get("physiology", {}))
+        foresight = _survival_foresight(agent, world)
+        foresight_block = (f"Успеешь ли пополниться (расчёт, не приказ):\n{foresight}\n"
+                           if foresight else "")
         psyche_text = _psyche_urgency(getattr(agent, "psyche", {}))
         feel_block = (f"Что ты чувствуешь (сверх выживания):\n{psyche_text}\n"
                       if psyche_text else "")
@@ -801,6 +886,7 @@ class OpenRouterLLM:
                 f"День {world.day}, {phase}{weather}. Ты на ({agent.x},{agent.y}){place_here}.\n"
                 f"{plan_block}"
                 f"Твоё состояние:\n{phys_text}{dread_line}\n"
+                f"{foresight_block}"
                 f"{feel_block}"
                 f"{gov_block}"
                 f"Инвентарь: {inv}\n"
@@ -822,6 +908,7 @@ class OpenRouterLLM:
                 f"{plan_block}"
                 f"Пол: {gender_ru}\n"
                 f"Твоё состояние:\n{phys_text}{dread_line}\n"
+                f"{foresight_block}"
                 f"{feel_block}"
                 f"{gov_block}"
                 f"{role_line}"

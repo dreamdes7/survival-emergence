@@ -12,16 +12,24 @@ from .persona import Persona
 
 
 def _emergency_gate(agent, world) -> dict | None:
-    """If any lethal stat is below crit*multiplier, bypass the LLM and force a
-    survival action via the heuristic stub. Prevents agents from chatting while
-    dying. The multiplier (world.emergency_multiplier, default 2.0) sets how wide
-    this override band is; set it to 0 to disable the gate entirely — research
-    runs lower it so the heuristic rarely speaks for the model.
+    """A THIN DEATHBED BACKSTOP — not a co-pilot.
 
-    The returned decision is tagged source="emergency" so provenance can measure
-    exactly how much of an agent's behaviour the gate — not the brain — authored.
+    Philosophy (why it's this narrow): if a heuristic authors a large share of an
+    agent's turns, we're studying the STUB, not the model. So the intelligence that
+    used to live here — 'your water lasts 4 turns, the spring is 5 away, go now' —
+    was moved into the PROMPT (see _survival_foresight): the agent is now TOLD the
+    danger and decides for itself. This gate only catches the case where the model
+    was already screaming-at (state shows ❗/💀) and STILL didn't save itself, i.e.
+    a genuine failure of the brain, right at the edge of death.
+
+    Fires only below `critical * emergency_multiplier`. Default multiplier 1.0 =
+    fires strictly inside the ❗/💀 band the prompt already flagged. Set it to 0 for
+    a PURE run (no backstop — agents live or die entirely by their own choices; the
+    honest experiment now that foresight carries them). Every firing is tagged
+    source="emergency" and counted, so the heuristic-authored share IS the run's
+    contamination metric — it should trend toward zero.
     """
-    mult = float(getattr(world, "emergency_multiplier", 2.0))
+    mult = float(getattr(world, "emergency_multiplier", 1.0))
     if mult <= 0:
         return None
     phys_cfg = world.scenario.get("physiology", {})

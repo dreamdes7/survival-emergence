@@ -286,7 +286,7 @@ def apply_runtime_policy(world: World, cfg: dict) -> None:
     runtime (emergency gate, fallback policy, scenes, dreams) reads them per tick."""
     sim = cfg.get("sim", {})
     llm_cfg = cfg.get("llm", {})
-    world.emergency_multiplier = float(sim.get("emergency_multiplier", 1.3))
+    world.emergency_multiplier = float(sim.get("emergency_multiplier", 1.0))
     world.fallback_policy = str(llm_cfg.get("fallback_policy", "stub"))
     world.dialogue_scene_lines = int(sim.get("dialogue_scene_lines", 4))
     world.dreams_enabled = bool(llm_cfg.get("dreams", True))

@@ -12,12 +12,14 @@ sim:
   tick_seconds: 0         # 0 = run as fast as possible (headless)
   api_tick_seconds: 1     # observer API cadence
   move_speed: 3           # tiles an agent crosses per go_to (faster traversal)
-  # Emergency gate: if a lethal stat < critical*emergency_multiplier, the heuristic
-  # overrides the brain to avert death. Wider band = more heuristic contamination.
-  # 2.0 proved far too paternalistic under the V9.19 scarcity (41% of a healthy
-  # run's decisions came from the gate, not the model) — 1.3 keeps it a last-resort
-  # deathguard while the model owns its own survival. 0 disables entirely.
-  emergency_multiplier: 1.3
+  # Emergency gate = a THIN DEATHBED BACKSTOP, not a co-pilot. The survival math
+  # ("water lasts 4 turns, spring is 5 away, go now") now lives in the PROMPT
+  # (_survival_foresight), so the MODEL self-preserves; the gate only catches a
+  # brain that ignored ❗/💀 and is dying anyway. Fires below critical×this.
+  #   1.0 = deathbed only (default) — heuristic-authored share should trend to ~0
+  #   0   = PURE run: no backstop, agents live or die by their own choices
+  #  >1.5 = paternalistic (the old contamination problem — avoid)
+  emergency_multiplier: 1.0
   # Conversation scenes: a say_to that lands on an adjacent agent plays out up to
   # N extra replies in the same tick (real dialogue instead of one line per tick).
   # 0 = off. Real-LLM replies use a compact cheap prompt, stubs use a phrase pool.
