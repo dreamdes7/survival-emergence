@@ -1829,6 +1829,75 @@ function buildSeaStacks(st: WorldState, n: number): void {
   terrainGroup?.add(seaStackGroup);
 }
 
+// Streams (phase 1): each inland spring feeds a creek that runs downhill along
+// the REAL mesh (steepest descent) to the sea, threading the terraces into one
+// watershed — the reference's signature. A hand-built ribbon of water quads
+// seated on the surface, UV-scrolled so it flows.
+let streamGroup: THREE.Group | null = null;
+let streamMats: THREE.MeshBasicMaterial[] = [];
+function buildStreams(st: WorldState, n: number): void {
+  streamGroup?.removeFromParent();
+  streamGroup = new THREE.Group();
+  streamMats = [];
+  terrainGroup?.updateMatrixWorld(true);
+  for (const node of st.resources) {
+    if (node.quantity <= 0 || node.kind !== "spring") continue;
+    const tile = st.map.grid[node.y]?.[node.x] ?? "";
+    if (tile.includes("sand") || tile.includes("water")) continue;   // coast springs skip
+    // steepest-descent path from the spring to the shore
+    const path: THREE.Vector3[] = [];
+    let px = node.x + 0.5, pz = node.y + 0.5;
+    let py = surfaceY(px, pz);
+    for (let step = 0; step < 90; step += 1) {
+      path.push(new THREE.Vector3(px, py + 0.04, pz));
+      if (py < 0.12) break;                       // reached sea level
+      let bx = px, bz = pz, by = py;
+      for (let a = 0; a < 12; a += 1) {           // sample a ring, take the lowest
+        const ang = (a / 12) * Math.PI * 2;
+        const sx = px + Math.cos(ang) * 0.5, sz = pz + Math.sin(ang) * 0.5;
+        const sy = surfaceY(sx, sz);
+        if (sy < by - 0.002) { bx = sx; bz = sz; by = sy; }
+      }
+      if (bx === px && bz === pz) break;          // local minimum — pooled, stop
+      px = bx; pz = bz; py = by;
+    }
+    if (path.length < 3) continue;
+    // build a ribbon: perpendicular offsets at each point, triangle strip
+    const pos: number[] = [], uv: number[] = [];
+    let run = 0;
+    for (let i = 0; i < path.length; i += 1) {
+      const prev = path[Math.max(0, i - 1)], next = path[Math.min(path.length - 1, i + 1)];
+      let dx = next.x - prev.x, dz = next.z - prev.z;
+      const L = Math.hypot(dx, dz) || 1; dx /= L; dz /= L;
+      if (i > 0) run += path[i].distanceTo(path[i - 1]);
+      const half = 0.16 + Math.min(0.22, i * 0.01);   // widens downstream
+      const lx = path[i].x - dz * half, lz = path[i].z + dx * half;
+      const rx = path[i].x + dz * half, rz = path[i].z - dx * half;
+      pos.push(lx, path[i].y, lz, rx, path[i].y, rz);
+      uv.push(run, 0, run, 1);
+    }
+    const idx: number[] = [];
+    for (let i = 0; i < path.length - 1; i += 1) {
+      const a = i * 2;
+      idx.push(a, a + 1, a + 2, a + 1, a + 3, a + 2);
+    }
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
+    geo.setIndex(idx);
+    geo.computeVertexNormals();
+    const mat = new THREE.MeshBasicMaterial({
+      color: 0x8fd0ce, transparent: true, opacity: 0.62, depthWrite: false,
+      side: THREE.DoubleSide, map: streakTexture(),
+    });
+    mat.map!.wrapS = mat.map!.wrapT = THREE.RepeatWrapping;
+    mat.map!.repeat.set(0.5, 1);
+    streamMats.push(mat);
+    streamGroup.add(new THREE.Mesh(geo, mat));
+  }
+  terrainGroup?.add(streamGroup);
+}
+
 // ── terrain: the island as SCULPTURE — stacked extruded plates ────────────────
 function buildTerrain(st: WorldState): void {
   terrainGroup?.removeFromParent();
@@ -1976,6 +2045,7 @@ function buildTerrain(st: WorldState): void {
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildSurf(st);
   buildWaterfalls(n);
+  buildStreams(st, n);
   buildSeaStacks(st, n);
   buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
@@ -2935,18 +3005,27 @@ function buildFlora(st: WorldState): void {
             }
             continue;
           }
+          // Phase 2 — biome by elevation: low jungle is broad + warm green; the
+          // higher the plate, the darker, cooler and more spire-like the crown
+          // (a conifer-belt read), so the tiers each have their own silhouette.
+          const lvl = plateLevelAt(wx, wz);
+          const highland = lvl >= 3;
           const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
-          const tall = hash01(tx, ty, 102 + k) < 0.22;
+          const tall = highland || hash01(tx, ty, 102 + k) < 0.22;
           const stemH = tall ? s * 1.7 : s;
-          const green = jitter(pal().canopy, `can${tx},${ty},${k}`, 0.14).getHex();
-          const blob = new THREE.IcosahedronGeometry(s, 0); blob.scale(1, 0.8, 1);
+          const baseGreen = new THREE.Color(pal().canopy);
+          if (highland) baseGreen.offsetHSL(-0.03, -0.06, -0.12);   // darker, cooler
+          const green = jitter(baseGreen.getHex(), `can${tx},${ty},${k}`, 0.12).getHex();
+          const blob = new THREE.IcosahedronGeometry(s, 0);
+          blob.scale(highland ? 0.78 : 1, highland ? 1.35 : 0.8, highland ? 0.78 : 1);
           blob.translate(wx, gy + stemH + s * 0.35, wz);
           canopy.push(bakeColor(blob, green));
           const stem = new THREE.CylinderGeometry(0.04, 0.05, stemH, 4); stem.translate(wx, gy + stemH * 0.5, wz);
           trunks.push(bakeColor(stem, C.trunk));
           if (tall) {
             const top = new THREE.IcosahedronGeometry(s * 0.55, 0);
-            top.translate(wx + 0.08, gy + stemH + s * 0.95, wz);
+            if (highland) top.scale(0.7, 1.4, 0.7);
+            top.translate(wx + (highland ? 0 : 0.08), gy + stemH + s * (highland ? 1.15 : 0.95), wz);
             canopy.push(bakeColor(top, green));
           }
         }
@@ -4265,6 +4344,10 @@ function tick(): void {
   // waterfalls: scroll the streak sheets downward — the whole illusion
   for (const m of waterfallMats) {
     if (m.map) m.map.offset.y = now * 0.55;
+  }
+  // streams flow along their length (u), a touch slower than the falls
+  for (const m of streamMats) {
+    if (m.map) m.map.offset.x = now * 0.3;
   }
   // living fire: layered breathing + sideways licks + the occasional tall
   // tongue of flame (a sharpened sine spike), each layer on its own phase
