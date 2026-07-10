@@ -34,14 +34,20 @@ _SOURCE_HINT = {
 
 
 def _blocked_msg(world, agent, kind: str, missing: list[str]) -> str:
-    """A build is blocked: name the missing materials, WHERE to get each, and
-    what the survivor could build right now with what they already carry."""
+    """A build is blocked: name the missing materials and WHERE to get each.
+    One material short → focus ('get it and come back'), no distractions: the
+    day-4 wipeout run showed an agent one fiber short of the camp's first fire
+    being offered 'store, signpost' instead — and never trying again. Alternatives
+    are only worth mentioning when the build is far out of reach."""
     src = "; ".join(f"{m}: {_SOURCE_HINT[m.split()[-1]]}"
                     for m in missing if m.split()[-1] in _SOURCE_HINT)
+    tail = f" ({src})" if src else ""
+    if len(missing) == 1:
+        return (f"need {missing[0]} to start a {kind}{tail}. "
+                f"Ты в одном шаге: добудь и возвращайся строить.")
     affordable = [k for k, sp in _buildables(world).items()
                   if k != kind and all(agent.inventory.get(it, 0) >= q
                                         for it, q in sp.get("cost", {}).items())]
-    tail = f" ({src})" if src else ""
     alt = f" Сейчас по ресурсам можешь построить: {', '.join(affordable)}." if affordable else ""
     return f"need {', '.join(missing)} to start a {kind}{tail}.{alt}"
 
@@ -204,12 +210,13 @@ def _exec_grab(world, agent, args) -> str:
 def build_tools(world) -> list[Tool]:
     kinds = ", ".join(_buildables(world).keys()) or "none"
     return [
-        Tool("build_structure", f"Build a structure ({kinds}); costs materials, takes time.",
-             "build", {"kind": "what to build"}, execute=_exec_build_structure),
-        Tool("maintain", "Feed wood to an adjacent campfire to keep it burning.",
+        Tool("build_structure", f"Построить ({kinds}): платишь материалы при закладке, "
+                                f"потом каждый ход добавляет прогресс — начал, так дострой.",
+             "build", {"kind": "что строить"}, execute=_exec_build_structure),
+        Tool("maintain", "Подбросить дров в соседний костёр, чтобы не погас.",
              "build", available=_avail_maintain, execute=_exec_maintain),
-        Tool("stash", "Put an item into an adjacent shared store.", "build",
-             {"item": "item", "qty": "amount"}, available=_avail_store_tool, execute=_exec_stash),
-        Tool("grab", "Take an item from an adjacent shared store.", "build",
-             {"item": "item", "qty": "amount"}, available=_avail_store_tool, execute=_exec_grab),
+        Tool("stash", "Сложить вещь в общий склад рядом.", "build",
+             {"item": "что", "qty": "сколько"}, available=_avail_store_tool, execute=_exec_stash),
+        Tool("grab", "Взять вещь из общего склада рядом.", "build",
+             {"item": "что", "qty": "сколько"}, available=_avail_store_tool, execute=_exec_grab),
     ]

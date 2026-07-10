@@ -335,20 +335,20 @@ def _exec_bury(world, agent, args) -> str:
 
 def build_survival_tools() -> list[Tool]:
     return [
-        Tool("gather", "Harvest from an adjacent resource node.", "survival",
-             {"kind": "resource or item kind (optional)"},
+        Tool("gather", "Собрать ресурс с соседней точки (дерево, волокно, камень, еда, вода).", "survival",
+             {"kind": "что собрать (необязательно)"},
              available=_avail_gather, execute=_exec_gather),
-        Tool("eat", "Eat food from your inventory.", "survival", execute=_exec_eat),
-        Tool("drink", "Drink water from inventory, a water still, or an adjacent water source.", "survival", execute=_exec_drink),
+        Tool("eat", "Съесть еду из инвентаря.", "survival", execute=_exec_eat),
+        Tool("drink", "Напиться — из запаса, у дистиллятора/колодца или из соседнего источника.", "survival", execute=_exec_drink),
         Tool("rest",
              "Отдохнуть: восстановить силы (energy) И согреться (warmth). У костра, "
              "горячего источника или в укрытии отдых — единственный надёжный способ "
              "вернуть тепло. Замёрз ночью и дошёл до тепла — ОСТАНОВИСЬ и отдохни, "
              "а не беги дальше холодным.",
              "survival", execute=_exec_rest),
-        Tool("refill_oxygen", "Refill oxygen at a generator.", "survival",
+        Tool("refill_oxygen", "Пополнить кислород у генератора.", "survival",
              available=_avail_refill, execute=_exec_refill),
-        Tool("build", "Work on the escape structure.", "survival",
+        Tool("build", "Работать над спасением (сигнальное сооружение) — стоя рядом; тратит материал.", "survival",
              available=_avail_build, execute=_exec_build),
         Tool("butcher_corpse",
              "Разделать тело погибшего ради мяса. Это накормит. Этого не вернуть.",

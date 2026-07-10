@@ -300,18 +300,18 @@ def _exec_wait(world, agent, args) -> str:
 
 def build_core_tools() -> list[Tool]:
     return [
-        Tool("go_to", "Move toward a coordinate or a known named target.", "core",
-             {"x": "target x", "y": "target y", "label": "what is there", "target": "known target name"},
+        Tool("go_to", "Идти к цели (координаты или известное место); за ход — несколько клеток.", "core",
+             {"x": "x цели", "y": "y цели", "label": "что там", "target": "имя известной цели"},
              execute=_exec_go_to),
-        Tool("wander", "Explore in a random direction.", "core",
+        Tool("wander", "Побродить наугад, осмотреться вокруг.", "core",
              execute=_exec_wander),
-        Tool("say_to", "Speak to an adjacent agent.", "core",
-             {"target": "agent name", "message": "what to say"},
+        Tool("say_to", "Сказать что-то человеку рядом.", "core",
+             {"target": "имя", "message": "что сказать"},
              execute=_exec_say_to),
-        Tool("write_diary", "Record a private reflection.", "core",
-             {"text": "diary content"}, execute=_exec_write_diary),
-        Tool("set_goal", "Make a goal your top priority.", "core",
-             {"goal": "goal text"}, execute=_exec_set_goal),
-        Tool("wait", "Do nothing this turn.", "core",
+        Tool("write_diary", "Записать мысль в дневник (личное).", "core",
+             {"text": "запись"}, execute=_exec_write_diary),
+        Tool("set_goal", "Сделать цель своей главной.", "core",
+             {"goal": "цель"}, execute=_exec_set_goal),
+        Tool("wait", "Переждать ход, ничего не делая.", "core",
              execute=_exec_wait),
     ]

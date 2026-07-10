@@ -69,7 +69,11 @@ resources:
 # then progress accumulates over ticks — several builders finish faster).
 buildables:
   campfire:
-    cost: { wood: 3, fiber: 1 }   # wood + tinder — the FIRST fire must be reachable
+    # Wood ONLY — the first fire must never be gated on a second material. The
+    # day-4 wipeout traced to exactly this: an agent with wood but no fiber failed
+    # `build campfire` once, got distracted, and the whole camp froze. Dry wood
+    # alone starts a fire (bow drill); fiber stays the cost of tents/stills/gardens.
+    cost: { wood: 3 }
     required_progress: 30
     work_rate: 10
     role: campfire

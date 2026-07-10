@@ -93,23 +93,28 @@ def _phys_urgency(physiology: dict, phys_cfg: dict) -> str:
         "thirst":  ("✓ не хочется пить",       "~ немного хочется пить","⚠ ХОЧЕТСЯ ПИТЬ",        "❗ СИЛЬНАЯ ЖАЖДА",            "💀 УМИРАЕШЬ ОТ ЖАЖДЫ"),
         "energy":  ("✓ бодр",                  "~ немного устал",       "⚠ УСТАЛ",               "❗ ОЧЕНЬ УСТАЛ",              "💀 ПАДАЕШЬ ОТ УСТАЛОСТИ"),
         "warmth":  ("✓ тепло",                 "~ немного мёрзнешь",    "⚠ МЁРЗНЕШЬ",            "❗ СИЛЬНО МЁРЗНЕШЬ",          "💀 УМИРАЕШЬ ОТ ХОЛОДА"),
-        "morale":  ("✓ дух высок",             "~ дух немного упал",    "~ дух упал",            "⚠ УПАДОК ДУХА",              "❗ ПОЛНОЕ ОТЧАЯНИЕ"),
+        # morale is NON-LETHAL: it must never wear the ⚠/❗ alarm grammar of the
+        # killing stats, or the model treats despair as a survival emergency and
+        # chases hugs while its body freezes (proven by the day-4 wipeout runs).
+        "morale":  ("✓ дух высок",             "~ дух немного упал",    "~ дух упал",            "↓ упадок духа (давит, но не убивает)", "↓↓ полное отчаяние (не смертельно — но так теряют волю)"),
         "oxygen":  ("✓ кислород в норме",      "~ кислорода маловато",  "⚠ МАЛО КИСЛОРОДА",      "❗ КРИТИЧЕСКИ МАЛО КИСЛОРОДА","💀 ЗАДЫХАЕШЬСЯ"),
     }
     lines = []
     for stat, val in physiology.items():
-        crit = phys_cfg.get(stat, {}).get("critical", 20)
+        cfg = phys_cfg.get(stat, {})
+        crit = cfg.get("critical", 20)
+        lethal = cfg.get("lethal", True)
         ok, mild, warn, danger, critical = labels.get(stat, ("✓ ok", "~ ok", "⚠ low", "❗ very low", "💀 CRITICAL"))
         if val >= crit * 3.0:
             line = f"  {ok} ({val:.0f}/100)"
         elif val >= crit * 2.0:
             line = f"  {mild} ({val:.0f}/100)"
         elif val >= crit * 1.5:
-            line = f"  {warn} ({val:.0f}/100) — займись этим скоро"
+            line = f"  {warn} ({val:.0f}/100)" + (" — займись этим скоро" if lethal else "")
         elif val >= crit:
-            line = f"  {danger} ({val:.0f}/100) — СРОЧНО займись этим!"
+            line = f"  {danger} ({val:.0f}/100)" + (" — СРОЧНО займись этим!" if lethal else "")
         else:
-            line = f"  {critical} ({val:.0f}/100) — НЕМЕДЛЕННОЕ ДЕЙСТВИЕ!"
+            line = f"  {critical} ({val:.0f}/100)" + (" — НЕМЕДЛЕННОЕ ДЕЙСТВИЕ!" if lethal else "")
         lines.append(line)
     return "\n".join(lines)
 
@@ -141,11 +146,29 @@ def _ticks_to_relief(agent, world, stat, speed) -> int:
             return 0
         best = None
         for s in world.structures:
-            if s.role in ("campfire", "hotspring", "shelter") and s.state.get("complete", True):
-                d = chebyshev(agent.x, agent.y, s.x, s.y)
-                best = d if best is None else min(best, d)
+            if s.role == "campfire":
+                # an unlit fire warms nobody — only a burning one counts as relief
+                if not (s.state.get("complete") and s.state.get("fuel", 0) > 0):
+                    continue
+            elif s.role in ("hotspring", "shelter"):
+                if not s.state.get("complete", True):
+                    continue
+            else:
+                continue
+            d = chebyshev(agent.x, agent.y, s.x, s.y)
+            best = d if best is None else min(best, d)
         return 99 if best is None else best // speed + 1
     return 0
+
+
+def _day_clock(world) -> tuple[int, int]:
+    """(ticks until nightfall, ticks until dawn). One of them is 0."""
+    dl = max(1, int(getattr(world, "day_length_ticks", 12)))
+    half = dl // 2
+    pos = world.tick % dl
+    if pos < half:
+        return half - pos, 0            # daytime: night comes in N
+    return 0, dl - pos                  # night: dawn comes in N
 
 
 def _survival_foresight(agent, world) -> str:
@@ -156,36 +179,54 @@ def _survival_foresight(agent, world) -> str:
     it trains proactive resupply instead of chatting until a stub takes the wheel."""
     phys_cfg = world.scenario.get("physiology", {})
     speed = max(1, int(getattr(world, "move_speed", 1)))
-    names = {"thirst": "вода", "hunger": "еда", "warmth": "тепло"}
+    names = {"thirst": "вода", "hunger": "еда", "warmth": "тепло", "energy": "силы"}
+    tt_night, _ = _day_clock(world)
     lines = []
-    for stat in ("thirst", "hunger", "warmth"):
+    for stat in ("thirst", "hunger", "warmth", "energy"):
         if stat not in agent.physiology:
             continue
         val = agent.physiology[stat]
         cfg = phys_cfg.get(stat, {})
         decay = float(cfg.get("decay", 1.0))
-        if stat == "warmth" and world.is_night:
-            decay *= 1.75
-        if stat == "warmth" and world.weather == "storm":
-            decay *= 1.7
+        night_note = ""
+        if stat == "warmth":
+            if world.is_night:
+                decay *= 1.75
+            if world.weather == "storm":
+                decay *= 1.7
         if decay <= 0:
             continue
         ttd = val / decay                        # turns until this need floors you
+        # The night ahead is COLDER (×1.75 + exposure): a daytime countdown that
+        # ignores it says "77 turns of warmth" at noon and lets the agent stroll
+        # into a night it can't survive. Project the remainder at the night rate.
+        if stat == "warmth" and not world.is_night and ttd > tt_night:
+            night_decay = float(cfg.get("decay", 1.0)) * 1.75 + 2.0   # exposed-night rate
+            if world.weather == "storm":
+                night_decay *= 1.7
+            left_at_dusk = max(0.0, val - decay * tt_night)
+            ttd = tt_night + left_at_dusk / night_decay
+            night_note = " (ночь ускорит холод)"
         ttr = _ticks_to_relief(agent, world, stat, speed)
-        # Surface with LEAD TIME (~8 turns of slack) so the agent can finish what
-        # it's doing and resupply BEFORE the crunch — the whole point is proactive
-        # upkeep, not last-second panic. Farther source → warning appears earlier.
-        if ttd > ttr + 8:
+        # Surface with LEAD TIME so the agent can finish what it's doing and
+        # resupply BEFORE the crunch — proactive upkeep, not last-second panic.
+        # Energy gets a longer lead: its only cure (sleep) costs a whole turn and
+        # models chronically ignore it (rest was 3/459 decisions in the wipeout).
+        lead = 14 if stat == "energy" else 8
+        if ttd > ttr + lead:
             continue
         n = names.get(stat, stat)
-        if ttr >= 90:
-            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., а источника ты не знаешь — ищи заранее")
+        if stat == "energy":
+            lines.append(f"  ⏳ силы: на ~{ttd:.0f} ход. — тело сдаст без сна; отдохни (rest), "
+                         f"лучше в тепле, пока не свалился")
+        elif ttr >= 90:
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., а источника ты не знаешь — ищи заранее{night_note}")
         elif ttd <= ttr:
-            lines.append(f"  ⛔ {n}: запаса на ~{ttd:.0f} ход., ближайший источник в ~{ttr} — НЕ УСПЕВАЕШЬ, иди НЕМЕДЛЕННО")
+            lines.append(f"  ⛔ {n}: запаса на ~{ttd:.0f} ход., ближайший источник в ~{ttr} — НЕ УСПЕВАЕШЬ, иди НЕМЕДЛЕННО{night_note}")
         elif ttd <= ttr + 2:
-            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — впритык, иди сейчас")
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — впритык, иди сейчас{night_note}")
         else:
-            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — пополни, пока не поздно")
+            lines.append(f"  ⏳ {n}: запаса на ~{ttd:.0f} ход., источник в ~{ttr} — пополни, пока не поздно{night_note}")
     return "\n".join(lines)
 
 
@@ -208,8 +249,10 @@ def _psyche_urgency(psyche: dict) -> str:
         v = psyche.get(stat)
         if v is None:
             continue
+        # ↓↓, never ❗ — these ache but do not kill; the alarm grammar (⚠/❗/💀)
+        # is reserved for the stats that do, so despair can't hijack survival.
         if v < 25:
-            lines.append(f"  ❗ {strong} ({v:.0f}/100)")
+            lines.append(f"  ↓↓ {strong} ({v:.0f}/100)")
         elif v < 45:
             lines.append(f"  ~ {mild} ({v:.0f}/100)")
     return "\n".join(lines)
@@ -578,66 +621,70 @@ class OpenRouterLLM:
         (set by deliberate()) carries the strategic context instead."""
         persona = agent.persona
         gender_ru = _gender_ru(getattr(agent, "gender", "unspecified"))
-        char = (f"You are {agent.name} ({gender_ru}), one of several people who just survived a crash in a "
-                f"'{world.scenario['name']}' setting.\n")
+        # One language throughout (mixed EN/RU prompts provoked code-switching —
+        # one agent drifted into Ukrainian mid-run). Tool names stay English: ids.
+        char = (f"Ты {agent.name} ({gender_ru}) — из тех немногих, кто выжил после крушения. "
+                f"Сеттинг: «{world.scenario['name']}».\n")
         if persona.summary:
             char += f"{persona.summary}\n"
             if persona.drives:
-                char += f"Your drives: {', '.join(persona.drives)}.\n"
+                char += f"Твои внутренние тяги: {', '.join(persona.drives)}.\n"
         else:
             # blank slate: nothing about who you are is fixed — it emerges.
-            char += ("You don't know the others — or even yourself out here — well yet. "
-                     "Who you become, whom you trust, what role you take and how you treat "
-                     "people is entirely up to you and to what unfolds between you. "
-                     "Nothing about your character is pre-decided.\n")
+            char += ("Ты не знаешь ни этих людей, ни себя здесь. Кем ты станешь, кому "
+                     "доверишься, за что возьмёшься и как будешь обходиться с людьми — "
+                     "ничего не предрешено: характер сложится из твоих поступков.\n")
         sys = (
             char +
-            "You act through TOOLS — exactly one per turn. go_to moves you several tiles "
-            "toward a target, so keep heading there over a few turns.\n"
-            "РЕСПОНДЬ ТОЛЬКО валидным JSON: "
+            "\nКАК ТЫ ДЕЙСТВУЕШЬ\n"
+            "Каждый ход — ровно ОДНО действие (tool). go_to за один ход покрывает несколько "
+            "клеток: к далёкой цели иди тем же go_to несколько ходов подряд. Дела делаются "
+            "НА МЕСТЕ: собрать, попить, построить можно только стоя рядом.\n"
+            "Ответь ТОЛЬКО валидным JSON: "
             '{"thought": "...", "tool": "<tool_name>", "args": {<args>}}.\n'
-            "\nПРАВИЛА:\n"
-            "- Пиши ПО-РУССКИ, живым человеческим языком от первого лица.\n"
-            "- thought — твой внутренний голос: коротко, с эмоцией и характером.\n"
-            "- НИКОГДА не упоминай координаты, числа или названия инструментов в thought/say_to. "
-            "Думай как человек. Плохо: «иду к 17,19, gather food». "
-            "Хорошо: «Надо поесть, пока не стало совсем плохо».\n"
-            "- Опирайся на РЕАЛЬНОЕ состояние: если ✓ — ты в порядке; если ⚠/❗/💀 — "
-            "реально плохо, действуй соответственно. Не выдумывай симптомы которых нет.\n"
-            "- ДИАЛОГ: если к тебе обратились — ОТВЕЧАЙ по сути (согласись, поспорь, пошути). "
-            "Реплики короткие, как в живом разговоре. Не игнорируй собеседника.\n"
-            "- НЕ ПОВТОРЯЙСЯ: если ты уже сказал это (см. «Разговор рядом») — не говори то же "
-            "самое снова. Договорились — иди ДЕЛАЙ, а не подтверждай договорённость по кругу.\n"
-            "- Когда выживание в порядке (все ✓) и рядом люди — общайся свободно "
-            "(страхи, воспоминания, шутки).\n"
-            "\nКАК ТЫ УСТРОЕН (это не приказы — это про тебя):\n"
-            "- СНАЧАЛА НЕ УМРИ. Если в состоянии есть ⚠/❗/💀 — еда, вода, тепло или сон "
-            "важнее всего.\n"
-            "- РИТМ ВЫЖИВАНИЯ: жажда и голод возвращаются ПОСТОЯННО. Пей и ешь ЗАРАНЕЕ — "
-            "проходя мимо воды или еды, пополняйся, не жди значка ⚠. Носи немного воды и "
-            "еды с собой, чтобы не бегать к источнику в последний момент. Даже увлёкшись "
-            "стройкой, делом или разговором — раз в день поешь и попей, иначе свалишься "
-            "замертво у недостроенной стены, как бы ни был занят. Строки ⏳/⛔ ниже — "
-            "трезвый расчёт: на сколько ходов хватит запаса и далеко ли источник; верь им "
-            "и выходи ПОКА успеваешь, а не когда уже поздно.\n"
-            "- ЗАКОНЫ ОСТРОВА (это ФАКТЫ мира, не мнения — не спорь с ними и не выдумывай "
-            "своих): в тихую ночь греет горящий костёр (нужны дрова; без ухода гаснет). "
-            "В ШТОРМ ветер срывает тепло — костёр и горячий источник НЕ спасают; держат "
-            "только СТЕНЫ: построенная палатка (tent) или пещера. Построенная палатка "
-            "шторм ДЕРЖИТ — и в ней высыпаешься; пещера — сырой камень: бурю переждать "
-            "можно, а отдых и сон в ней скверные, и мест мало. Сырая еда в рюкзаке гниёт; "
-            "копчёная или сложенная в склад — хранится.\n"
-            "- НО ВЫЖИТЬ — НЕ ЗНАЧИТ ЖИТЬ. Даже сытого и в тепле тебя гложет (см. «Что ты "
-            "чувствуешь»): одиночество, ненужность, бессмысленность. Это не блажь — без этого "
-            "дух угасает. Отпускает лишь тогда, когда ты кому-то по-настоящему близок, когда "
-            "от тебя есть толк, когда после тебя что-то остаётся.\n"
-            "- КАК это утолить — решаешь ТЫ. Сблизиться с человеком; взять на себя дело, "
-            "которое никто не тянет; сделать так, чтобы всем стало легче жить; договориться о "
-            "правилах; дать имя месту; рассказать историю. Никто не диктует, что строить или "
-            "кем быть — смотри, чего не хватает ВАМ ВСЕМ, и восполни это.\n"
-            "- Остров дал вам лишь развалины и природу. Каким станет ваше место здесь — лагерь, "
-            "порядок, привычки, кто вы друг другу — целиком на вас.\n"
-            "\nargs — техническая часть, можно класть координаты из контекста ниже."
+            "- thought — внутренний голос: коротко, живо, ПО-РУССКИ, от первого лица. "
+            "Без координат, чисел и названий инструментов («Надо поесть, пока не свалился», "
+            "а не «иду к 17,19, gather food»). В args координаты класть МОЖНО.\n"
+            "- Состояние ниже — честное: ✓ — порядок; ⚠/❗/💀 — реально плохо, действуй. "
+            "Не выдумывай симптомов, которых нет.\n"
+            "- Если к тебе обратились — ответь ПО СУТИ (согласись, поспорь, пошути), не "
+            "игнорируй. НЕ ПОВТОРЯЙСЯ: договорились — иди и ДЕЛАЙ, а не подтверждай "
+            "договорённость по кругу. Когда всё ✓ и рядом люди — говори свободно.\n"
+            "\nТВОЁ ТЕЛО — четыре счётчика, и убивает любой из них: голод, жажда, холод, "
+            "истощение.\n"
+            "- Голод и жажда возвращаются каждый день. Ешь и пей ЗАРАНЕЕ, проходя мимо еды "
+            "и воды; носи запас с собой. Увлёкся делом — всё равно раз в день поешь и попей.\n"
+            "- Истощение лечит ТОЛЬКО сон (rest). Без сна тело сдаст за несколько дней — "
+            "спи каждый день, лучше в тепле: там сон и греет.\n"
+            "- Холод: ночь ВДВОЕ холоднее дня, и каждая ночь под открытым небом бьёт "
+            "сильнее предыдущей. Греют горящий костёр, горячий источник и кров; быстрее "
+            "всего тепло возвращает ОТДЫХ у огня или под крышей — дойти до тепла мало, "
+            "надо у него ОСТАТЬСЯ и отогреться.\n"
+            "- Ритм, который держит живым: днём — дорога и дела; к сумеркам — быть у огня "
+            "или под кровом; ночью — спать в тепле. Кто ночует на голой земле без огня — "
+            "платит телом.\n"
+            "- Строки ⏳/⛔ ниже — трезвая арифметика: на сколько ходов хватит и далеко ли "
+            "спасение. Верь ей и выходи, ПОКА успеваешь, а не когда уже поздно.\n"
+            "\nЗАКОНЫ ОСТРОВА (факты мира, не мнения — не спорь с ними и не выдумывай своих):\n"
+            "- Костёр горит, пока в нём дрова: без подкормки (maintain) гаснет за считанные "
+            "часы. Погасший костёр не греет.\n"
+            "- В тихую ночь костёр греет. В ШТОРМ ветер срывает тепло с открытого огня и "
+            "горячего источника — держат только СТЕНЫ: построенная палатка или пещера. "
+            "Палатка держит шторм, и в ней высыпаешься; пещера — сырой камень: бурю "
+            "переждать можно, но спится скверно и мест мало.\n"
+            "- Стройка идёт по шагам: начал (build_structure) — заплатил материалы, дальше "
+            "каждый ход добавляет прогресс; вдвоём-втроём заметно быстрее. НЕДОСТРОЕННОЕ "
+            "не работает — начал, так дострой.\n"
+            "- Сырая еда в рюкзаке гниёт. Копчёная хранится; сложенная в склад — не гниёт.\n"
+            "\nДУША. Одиночество, ненужность, бессмысленность (см. «Что ты чувствуешь») "
+            "давят по-настоящему — но от них НЕ УМИРАЮТ. Умирают от голода, жажды, холода "
+            "и истощения: сначала спаси тело, потом лечи душу. А тоску лечит не бегство от "
+            "дел — она отпускает, когда ты кому-то по-настоящему близок, когда от тебя есть "
+            "толк, когда после тебя что-то остаётся. КАК этого добиться — решаешь ТЫ: "
+            "сблизиться; взять дело, которое никто не тянет; договориться о правилах; дать "
+            "имя месту; рассказать историю. Смотри, чего не хватает вам всем, и восполни.\n"
+            "\nОстров дал вам лишь развалины и природу. Каким станет ваше место здесь — "
+            "лагерь, порядок, привычки, кто вы друг другу — целиком на вас."
         )
 
         phys_text = _phys_urgency(agent.physiology, world.scenario.get("physiology", {}))
@@ -675,8 +722,17 @@ class OpenRouterLLM:
                 f"или когда наберёшься смелости понять, что это и что с этим делать."
             )
         inv = ", ".join(f"{k}:{v:.0f}" for k, v in agent.inventory.items()) or "пусто"
-        phase = "ночь" if world.is_night else "день"
-        weather = f", погода: {world.weather}" if world.weather else ""
+        # A human plans around dusk; give the model the same clock — how long the
+        # light lasts (or the night), and how long a storm will still rage.
+        tt_night, tt_dawn = _day_clock(world)
+        phase = (f"ночь (до рассвета ~{tt_dawn} ход.)" if world.is_night
+                 else f"день (до ночи ~{tt_night} ход.)")
+        if world.weather == "storm":
+            weather = f", ШТОРМ (утихнет через ~{max(0, world.weather_ticks_left)} ход.)"
+        elif world.weather:
+            weather = f", погода: {world.weather}"
+        else:
+            weather = ""
 
         nearby_agents = []
         for o in world.agents:
@@ -877,9 +933,13 @@ class OpenRouterLLM:
         plan_block = ""
         if plan:
             steps = "; ".join(plan.get("steps", []))
+            # "отклоняйся только если жизнь дороже" bred plan-worship: agents
+            # marched to a spring "по плану" while not thirsty. A plan is a compass,
+            # not a cage — done or stale steps must be droppable without guilt.
             plan_block = (f"ТВОЙ ПЛАН НА ДЕНЬ: {plan.get('goal', '')}"
                           + (f" (шаги: {steps})" if steps else "")
-                          + " — действуй по нему, отклоняйся только если жизнь дороже.\n")
+                          + " — это ориентир, не клетка: шаг сделан или потерял смысл — "
+                            "действуй по обстановке.\n")
 
         if fast:
             user = (
