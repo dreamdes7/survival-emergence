@@ -982,6 +982,46 @@ function heightAt(wx: number, wz: number): number {
   return level < 0 ? SEA_FLOOR : PLATE_TOP[level];
 }
 
+// ── seatOnMesh: THE one placement law ─────────────────────────────────────────
+// Sample the REAL rendered mesh in a ring of the object's visual radius. If the
+// footprint straddles a cliff, SLIDE the object away from the lip (inward) until
+// it stands on one level; if no flat spot is reachable, seat on the LOWEST
+// sampled ground — so nothing ever hangs in the air. This exists because every
+// float/sink bug came from trusting the analytic height field (groundY et al.),
+// which diverges from the Chaikin-smoothed sculpture near walls. The mesh is
+// the only truth; everything that stands on the island seats through here.
+function seatOnMesh(x: number, z: number, r: number, maxSlide = 1.6):
+    { x: number; z: number; y: number; flat: boolean } {
+  let cx = x, cz = z;
+  const ring = (px: number, pz: number): number[] => {
+    const hs: number[] = [surfaceY(px, pz)];
+    for (let i = 0; i < 8; i += 1) {
+      const a = (i / 8) * Math.PI * 2;
+      hs.push(surfaceY(px + Math.cos(a) * r, pz + Math.sin(a) * r));
+    }
+    return hs;
+  };
+  for (let step = 0; step < 7; step += 1) {
+    const hs = ring(cx, cz);
+    const top = Math.max(...hs);
+    if (!hs.some((h) => top - h > 0.3)) {
+      return { x: cx, z: cz, y: Math.min(...hs), flat: true };
+    }
+    // push away from every low (over-the-edge) direction, gently toward solid
+    let dx = 0, dz = 0;
+    for (let i = 1; i < hs.length; i += 1) {
+      const a = ((i - 1) / 8) * Math.PI * 2;
+      const w = top - hs[i] > 0.3 ? -1 : 0.35;
+      dx += Math.cos(a) * w; dz += Math.sin(a) * w;
+    }
+    const len = Math.hypot(dx, dz) || 1;
+    cx += (dx / len) * 0.28; cz += (dz / len) * 0.28;
+    if (Math.hypot(cx - x, cz - z) > maxSlide) break;
+  }
+  const hs = ring(cx, cz);
+  return { x: cx, z: cz, y: Math.min(...hs), flat: false };
+}
+
 // Placement height: near a plate rim the bevel dips below PLATE_TOP, so a
 // single-point sample let props and meeples sink into the lip. Take the max
 // over a small footprint instead — standing slightly proud beats being buried.
@@ -1645,50 +1685,75 @@ function buildWaterfalls(n: number): void {
   // favour the tallest drops; keep them far apart so each reads as a landmark
   lips.sort((a, b) => b.drop - a.drop
     || hashStr(`wf${a.x},${a.z}`) - hashStr(`wf${b.x},${b.z}`));
+  // gather extra candidates — the real-wall probe below may reject some
   const picked: Lip[] = [];
   for (const l of lips) {
     if (picked.every((p) => Math.hypot(p.x - l.x, p.z - l.z) > 11)) picked.push(l);
-    if (picked.length >= 3) break;
+    if (picked.length >= 8) break;
   }
+  // The analytic lips above are only a cheap PREFILTER. The ribbon itself is
+  // pinned to the REAL rendered wall: probe the mesh along the fall direction
+  // in small steps until the actual cliff face is found (a sharp real-height
+  // drop). No real wall within reach → no waterfall — a ribbon hanging in the
+  // air (the screenshot bug) is forbidden by construction.
+  terrainGroup?.updateMatrixWorld(true);
+  let placed = 0;
   for (const l of picked) {
-    const h = l.top - l.bot + 0.22;
+    const x0 = l.x - l.dx * 0.9, z0 = l.z - l.dz * 0.9;
+    let prevH = surfaceY(x0, z0);
+    let wall: { x: number; z: number; top: number; bot: number } | null = null;
+    for (let t = 0.1; t <= 3.0; t += 0.1) {
+      const px = x0 + l.dx * t, pz = z0 + l.dz * t;
+      const h = surfaceY(px, pz);
+      if (prevH - h > 0.6) {
+        wall = { x: px - l.dx * 0.05, z: pz - l.dz * 0.05, top: prevH, bot: h };
+        break;
+      }
+      prevH = h;
+    }
+    if (!wall || wall.top < 0.5) continue;
+    placed += 1;
+    const h = wall.top - wall.bot + 0.1;
     const yaw = Math.atan2(l.dx, l.dz);
+    const cy = wall.bot + h / 2 - 0.03;
     // back sheet: deep glassy teal; front sheet: scrolling white streaks
     const back = new THREE.Mesh(
-      new THREE.PlaneGeometry(1.15, h),
+      new THREE.PlaneGeometry(1.05, h),
       new THREE.MeshBasicMaterial({ color: 0x9fd9d2, transparent: true, opacity: 0.42,
                                     depthWrite: false, side: THREE.DoubleSide }));
     const mat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true,
       opacity: 0.85, depthWrite: false, side: THREE.DoubleSide, map: streakTexture() });
     mat.map!.repeat.set(1, Math.max(1, h * 0.6));
-    const front = new THREE.Mesh(new THREE.PlaneGeometry(1.0, h), mat);
+    const front = new THREE.Mesh(new THREE.PlaneGeometry(0.9, h), mat);
     waterfallMats.push(mat);
-    const cx = l.x, cz = l.z, cy = l.bot + h / 2 - 0.06;
-    for (const [m, off] of [[back, 0.02], [front, 0.09]] as const) {
-      m.position.set(cx + l.dx * off, cy, cz + l.dz * off);
+    for (const [m, off] of [[back, 0.03], [front, 0.09]] as const) {
+      m.position.set(wall.x + l.dx * off, cy, wall.z + l.dz * off);
       m.rotation.y = yaw;
       waterfallGroup.add(m);
     }
-    // lip curl: a small bright roll where the water leaves the top plate
-    const curl = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.09, 1.0, 6),
+    // lip curl exactly at the REAL top edge
+    const curl = new THREE.Mesh(new THREE.CylinderGeometry(0.08, 0.08, 0.9, 6),
       new THREE.MeshBasicMaterial({ color: 0xeafaf7, transparent: true, opacity: 0.9 }));
     curl.rotation.z = Math.PI / 2;
     curl.rotation.y = yaw;
-    curl.position.set(cx - l.dx * 0.06, l.top + 0.05, cz - l.dz * 0.06);
+    curl.position.set(wall.x - l.dx * 0.04, wall.top + 0.04, wall.z - l.dz * 0.04);
     waterfallGroup.add(curl);
-    // foam pool + mist at the foot
-    const foam = new THREE.Mesh(new THREE.CircleGeometry(0.62, 14),
+    // foam pool + mist seated on the REAL lower surface
+    const footX = wall.x + l.dx * 0.55, footZ = wall.z + l.dz * 0.55;
+    const footY = surfaceY(footX, footZ);
+    const foam = new THREE.Mesh(new THREE.CircleGeometry(0.58, 14),
       new THREE.MeshBasicMaterial({ color: 0xf2fbfa, transparent: true, opacity: 0.75,
                                     depthWrite: false }));
     foam.rotation.x = -Math.PI / 2;
-    foam.position.set(cx + l.dx * 0.5, l.bot + 0.045, cz + l.dz * 0.5);
+    foam.position.set(footX, footY + 0.045, footZ);
     waterfallGroup.add(foam);
-    const mist = new THREE.Mesh(new THREE.SphereGeometry(0.34, 8, 6),
+    const mist = new THREE.Mesh(new THREE.SphereGeometry(0.32, 8, 6),
       new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.16,
                                     depthWrite: false }));
     mist.scale.set(1.6, 0.7, 1.6);
-    mist.position.set(cx + l.dx * 0.4, l.bot + 0.2, cz + l.dz * 0.4);
+    mist.position.set(footX - l.dx * 0.1, footY + 0.2, footZ - l.dz * 0.1);
     waterfallGroup.add(mist);
+    if (placed >= 3) break;
   }
   terrainGroup?.add(waterfallGroup);
 }
@@ -2829,16 +2894,24 @@ function buildProps(st: WorldState): void {
     else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
-    // Seating: pools take the LOWEST nearby surface (a pond can't overhang a
-    // cliff — it settles into the step); everything else takes the MEDIAN so a
-    // tree at a lip neither hovers on air nor sinks into the upper plate.
+    // Pools seat through seatOnMesh at their REAL visual radius — a pond whose
+    // rim overhangs a cliff slides back onto the terrace (a pond hovering on
+    // air was the screenshot bug: the old sample radius was smaller than the
+    // pool disc). Trees/rocks: median of a small ring — a palm leaning over a
+    // lip is charming, standing on air is not.
     const isPool = k === "spring" || k === "fishing";
-    const rad = isPool ? 0.42 : 0.2;
-    const samples = [surfaceY(wx, wz),
-      surfaceY(wx - rad, wz), surfaceY(wx + rad, wz),
-      surfaceY(wx, wz - rad), surfaceY(wx, wz + rad)].sort((a, b) => a - b);
-    const gy = Math.max(0.02, isPool ? samples[0] : samples[2]);
-    obj.position.set(wx, gy, wz);
+    let px = wx, pz = wz, gy: number;
+    if (isPool) {
+      const seat = seatOnMesh(wx, wz, 0.8, 1.6);
+      px = seat.x; pz = seat.z; gy = Math.max(0.02, seat.y);
+    } else {
+      const rad = 0.2;
+      const samples = [surfaceY(wx, wz),
+        surfaceY(wx - rad, wz), surfaceY(wx + rad, wz),
+        surfaceY(wx, wz - rad), surfaceY(wx, wz + rad)].sort((a, b) => a - b);
+      gy = Math.max(0.02, samples[2]);
+    }
+    obj.position.set(px, gy, pz);
     // spin each prop to a stable per-id heading so a grove of palms/trees/rocks
     // doesn't read as clones all facing the same way (reflection clone inherits it)
     obj.rotation.y = hashStr(node.id + "yaw") * Math.PI * 2;
@@ -3500,27 +3573,14 @@ function buildStructs(st: WorldState): void {
   });
   for (const s of st.structures) {
     const obj = makeStructure(s);
-    // Anchor at the FOOTPRINT centre (a 3×3 cave anchored at its top-left tile
-    // hung a full tile past its logical rect). Seat at the MAJORITY (median)
-    // level under the footprint — min-seating buried a lip-straddling cave
-    // inside the upper cliff — and when part of the footprint hangs over a
-    // lower step, fill under it with a rock foundation (Bad North cliff houses):
-    // nothing floats, nothing sinks.
+    // Seat through seatOnMesh — the one placement law. Anchored at the
+    // FOOTPRINT centre, sampled at the model's visual radius on the REAL mesh;
+    // a lip-straddling cave slides back onto its terrace instead of hovering
+    // (or growing a foundation cube — that hack is dead).
     const sw = s.w || 1, sh = s.h || 1;
-    const wx = s.x + sw / 2, wz = s.y + sh / 2;
-    const inx = Math.max(0.3, sw / 2 - 0.25), inz = Math.max(0.3, sh / 2 - 0.25);
-    const hs = [surfaceY(wx, wz),
-      surfaceY(wx - inx, wz - inz), surfaceY(wx + inx, wz - inz),
-      surfaceY(wx - inx, wz + inz), surfaceY(wx + inx, wz + inz)].sort((a, b) => a - b);
-    const gy = Math.max(0.02, hs[2]);
-    if (gy - hs[0] > 0.18) {
-      const drop = gy - hs[0] + 0.12;
-      const found = new THREE.Mesh(
-        new THREE.BoxGeometry(sw * 0.82, drop, sh * 0.82), lam(pal().wallHigh));
-      found.position.set(wx, gy - drop / 2 + 0.02, wz);
-      found.castShadow = found.receiveShadow = true;
-      structsGroup.add(found);
-    }
+    const seat = seatOnMesh(s.x + sw / 2, s.y + sh / 2,
+                            Math.max(sw, sh) / 2 * 0.8, 2.0);
+    const wx = seat.x, wz = seat.z, gy = Math.max(0.02, seat.y);
     obj.position.set(wx, gy, wz);
     obj.userData.structId = s.id;
     structsGroup.add(obj);
