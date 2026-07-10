@@ -804,7 +804,14 @@ function loadModels(): void {
     loader.load(def.url, (gltf) => {
       const root = gltf.scene;
       root.traverse((o) => {
-        if ((o as THREE.Mesh).isMesh) { o.castShadow = true; o.receiveShadow = true; }
+        const mesh = o as THREE.Mesh;
+        if (mesh.isMesh) {
+          mesh.castShadow = true; mesh.receiveShadow = true;
+          // structures/props are GLB models with their own materials — give them
+          // the same painterly broken light as the code-built props.
+          const mats = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+          for (const mat of mats) if (mat) smudgeNormals(mat);
+        }
       });
       const bb = new THREE.Box3().setFromObject(root);
       const size = bb.getSize(new THREE.Vector3());
