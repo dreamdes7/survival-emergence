@@ -967,7 +967,11 @@ class World:
             for a in living:
                 if chebyshev(a.x, a.y, pn["x"], pn["y"]) <= 4 and a.id not in pn["endorsers"]:
                     pn["endorsers"].append(a.id)
-                    if a.id != pn["by_id"]:
+                    if pn.get("inherited"):
+                        a.memory.add(self.tick, self.day, "observation",
+                                     f"это место с давних пор зовут «{pn['name']}» — "
+                                     f"так называли его те, кто был здесь до нас", 1.6)
+                    elif a.id != pn["by_id"]:
                         a.memory.add(self.tick, self.day, "observation",
                                      f"это место {pn['by']} зовёт «{pn['name']}»", 1.3)
             if not pn.get("famous") and len(pn["endorsers"]) >= need:

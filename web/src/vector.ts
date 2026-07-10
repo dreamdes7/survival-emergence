@@ -785,6 +785,21 @@ function drawGrave(S: number): Graphics {
   return g;
 }
 
+function drawRuin(S: number): Graphics {
+  const g = new Graphics();
+  dropShadow(g, S * 0.4, -1);
+  // a broken footprint: toppled posts and a few stones left standing
+  g.rect(-S * 0.4, -S * 0.08, S * 0.8, S * 0.14).fill(V.stoneDark)
+    .stroke({ width: 1, color: V.shadow, alpha: 0.5 });
+  g.rect(-S * 0.34, -S * 0.36, 3, S * 0.3).fill(V.woodDark);           // leaning stump
+  g.rect(S * 0.22, -S * 0.28, 3, S * 0.22).fill(V.woodDark);
+  g.poly([-S * 0.1, -S * 0.06, S * 0.02, -S * 0.3, S * 0.12, -S * 0.06])
+    .fill(V.stone).stroke({ width: 1, color: V.stoneDark });           // a standing stone
+  g.circle(-S * 0.24, -S * 0.02, 2).fill(V.stone);                     // scattered rubble
+  g.circle(S * 0.3, -S * 0.02, 1.6).fill(V.stone);
+  return g;
+}
+
 function drawCave(S: number): Graphics {
   const g = new Graphics();
   dropShadow(g, S * 0.5, -2);
@@ -932,6 +947,7 @@ export function buildVectorStructure(s: StructureState, pw: number, ph: number):
     case "signpost": return drawSignpost(S);
     case "watchtower": return drawWatchtower(S);
     case "grave": return drawGrave(S);
+    case "ruin": return drawRuin(S);
     case "cave": return drawCave(S);
     case "hotspring": return drawHotspring(S);
     case "lighthouse": return drawLighthouse(Boolean(st.active), S);

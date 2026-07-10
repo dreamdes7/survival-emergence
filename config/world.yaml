@@ -5,6 +5,17 @@
 scenario: mars            # mars | island
 seed: 42
 
+# ── Palimpsest — cross-run island memory (off by default) ─────────────────────
+# The island remembers past runs on the SAME seed: graves, ruins, inherited
+# place-names and found diaries surface in the next run as weathered artifacts —
+# history nobody alive wrote, misread into myth. Keyed by (scenario, seed).
+#   off       — normal run: no reading, no trace left (default)
+#   on        — dig up past layers AND leave a new one (IF this run earns it)
+#   read_only — dig up the past, but leave no trace (experiments/demos)
+# A quality floor keeps junk out: a run that built/buried/named too little leaves
+# no layer. Raise/lower it with palimpsest_floor (default 5.0).
+palimpsest: off
+
 sim:
   max_days: 4
   day_length_ticks: 12    # ticks per sim-day

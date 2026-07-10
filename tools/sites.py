@@ -68,7 +68,7 @@ _PLACE_RU = {
     "campfire": "костёр", "tent": "шалаш", "store": "склад", "well": "колодец",
     "water_still": "опреснитель", "workbench": "верстак", "smokehouse": "коптильня",
     "garden": "грядка", "signpost": "указатель", "watchtower": "дозорная вышка",
-    "cave": "пещера", "hotspring": "горячий источник",
+    "cave": "пещера", "hotspring": "горячий источник", "ruin": "руины",
 }
 
 
@@ -91,21 +91,51 @@ def _avail_examine(world, agent) -> bool:
 
 def _examine_place(world, agent, s) -> str:
     log = s.state.get("log", [])
+    st = s.state or {}
+    inherited = bool(st.get("inherited"))       # dug up from a past run (palimpsest)
+
     if s.kind == "grave":
-        of = s.state.get("of", "неизвестного")
-        by = s.state.get("buried_by", "кто-то")
+        of = st.get("of", "неизвестного")
+        by = st.get("buried_by", "")
         # to stand at a grave is to grieve — and grief is a form of belonging
         if getattr(agent, "psyche", None):
             if agent.psyche.get("purpose") is not None:
                 agent.psyche["purpose"] = min(100.0, agent.psyche["purpose"] + 8)
             if agent.psyche.get("belonging") is not None:
                 agent.psyche["belonging"] = min(100.0, agent.psyche["belonging"] + 6)
+        if inherited:
+            agent.dread = min(100.0, getattr(agent, "dread", 0.0) + 4)
+            agent.memory.add(world.tick, world.day, "reflection",
+                             f"древняя могила. {of} — кто это был? здесь были люди до нас", 2.3)
+            world.place_note(s.x, s.y, f"{agent.name} нашёл старую могилу {of}")
+            worn = " Имя почти стёрлось." if st.get("weathered") else ""
+            return f"старая, чужая могила. на ней имя: {of}.{worn} кто похоронил — неизвестно"
         agent.memory.add(world.tick, world.day, "reflection",
                          f"постоял у могилы {of}. её выкопал {by}", 2.0)
         world.place_note(s.x, s.y, f"{agent.name} приходил к могиле {of}")
         extra = [e["text"] for e in log[-4:] if by not in e["text"]]
         tail = f" Здесь также: {'; '.join(extra)}." if extra else ""
-        return f"могила {of}. похоронил {by}, день {s.state.get('day', '?')}.{tail}"
+        return f"могила {of}. похоронил {by}, день {st.get('day', '?')}.{tail}"
+
+    if s.kind == "ruin":
+        was = _PLACE_RU.get(st.get("was", ""), st.get("was", "что-то"))
+        agent.memory.add(world.tick, world.day, "reflection",
+                         f"развалины — когда-то здесь был {was}. не мы это строили", 2.1)
+        world.place_note(s.x, s.y, f"{agent.name} осматривал развалины")
+        hist = "; ".join(e["text"] for e in log[-3:])
+        tail = f" Ещё различимо: {hist}." if hist else ""
+        return f"развалины. когда-то это был {was}, давно заброшен.{tail}"
+
+    # a signpost — fresh notes, or a found relic (diary/inscription from before)
+    notes = st.get("notes", [])
+    if notes:
+        if inherited:
+            agent.memory.add(world.tick, world.day, "observation",
+                             f"нашёл чью-то старую запись: «{notes[-1]['text']}»", 2.2)
+        reads = " | ".join(f'{n["by"]}: «{n["text"]}»' for n in notes[-4:])
+        pre = "выцветшая находка — " if inherited else "надпись гласит — "
+        return pre + reads
+
     kind_ru = _PLACE_RU.get(s.kind, s.kind)
     if not log:
         return f"{kind_ru}: тихое место, ничего примечательного здесь не случилось"

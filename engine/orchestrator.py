@@ -383,6 +383,10 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
     resolve_names(world, llm, scenario)
     from engine.session_log import new_run_id
     run_id = new_run_id(scenario, cfg)
+    # Palimpsest: raise the strata of past runs on THIS seed into the new world
+    # (weathered graves, ruins, inherited place-names, found diaries). off by default.
+    from engine import palimpsest
+    dug = palimpsest.excavate(world, cfg, scenario)
     recorder = build_recorder(world, cfg, scenario, run_id=run_id)
     narrator = build_narrator(world, cfg, llm)
     reflect_with_llm = bool(cfg.get("llm", {}).get("reflect_with_llm", True))
@@ -398,6 +402,9 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
         f"{sim['max_days']} days x {day_len} ticks")
     say("  roster: " + ", ".join(
         f"{a.name}[{a.persona.id.split(':')[-1]}|{a.model}]" for a in world.agents))
+    if dug and dug.get("placed"):
+        say(f"  🏝️  PALIMPSEST: excavated {dug['placed']} artifact(s) from "
+            f"{dug['layers']} past layer(s) ({dug['weathered']} lost to time)")
     say("=" * 78)
 
     for t in range(max_ticks):
@@ -460,6 +467,18 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
                 "calls": b.calls, "prompt_tokens": b.prompt_tokens,
                 "completion_tokens": b.completion_tokens, "cost_usd": round(b.cost, 4),
             })
+
+    # Palimpsest: this run leaves a stratum for the next one — but ONLY if it made
+    # enough that's worth remembering (the quality floor keeps junk out of the canon).
+    laid = palimpsest.deposit(world, cfg, scenario, run_id)
+    if laid is not None and not quiet:
+        if laid.get("written"):
+            print(f"\n  🏝️  PALIMPSEST: laid down layer {laid['layer']} "
+                  f"({laid['artifacts']} artifacts, score {laid['score']}) — "
+                  f"the next run on this seed will dig it up")
+        else:
+            print(f"\n  🏝️  PALIMPSEST: no layer laid — {laid.get('reason','')} "
+                  f"(score {laid.get('score')} < floor {laid.get('floor')})")
     if not quiet:
         _summary(world, llm, recorder)
     return recorder
