@@ -3244,6 +3244,37 @@ function makeStructure(s: StructureState): THREE.Group {
       g.add(gem);
       break;
     }
+    case "grave": {
+      // a low mound of turned earth with a plain wooden cross at its head
+      const mound = new THREE.Mesh(new THREE.SphereGeometry(0.26, 8, 6), lam(0x5d5546));
+      mound.scale.set(1.0, 0.35, 0.62);
+      mound.position.y = 0.04;
+      mound.castShadow = true;
+      g.add(mound);
+      g.add(cyl(0.02, 0.024, 0.42, 5, WOOD_D, 0, 0.21, -0.16));
+      g.add(box(0.2, 0.035, 0.03, WOOD_D, 0, 0.3, -0.16));
+      break;
+    }
+    case "ruin": {
+      // the weathered remains of what a past run built: stumps, a leaning
+      // post, scattered stones (palimpsest strata surfacing in the new world)
+      g.add(cyl(0.2, 0.24, 0.05, 7, 0x4a463e, 0, 0.025, 0));      // old footprint
+      const post = cyl(0.03, 0.038, 0.42, 5, WOOD_D, -0.18, 0.18, 0.1);
+      post.rotation.z = 0.35;
+      post.castShadow = true;
+      g.add(post);
+      g.add(cyl(0.034, 0.04, 0.16, 5, 0x5c4426, 0.2, 0.08, -0.12));  // broken stump
+      for (let i = 0; i < 4; i += 1) {
+        const r = hashStr(`ru${i}${s.id}`);
+        const stone = new THREE.Mesh(
+          new THREE.DodecahedronGeometry(0.05 + r * 0.05, 0), lam(0x8a877e));
+        stone.position.set(Math.cos(r * 6.28) * 0.22, 0.045, Math.sin(r * 6.28) * 0.2);
+        stone.rotation.set(r * 4, r * 7, r * 2);
+        stone.castShadow = true;
+        g.add(stone);
+      }
+      break;
+    }
     default: {
       const w = fp * 0.55, hgt = 0.4 + Math.min(1.2, fp * 0.3);
       g.add(box(w, hgt, w * 0.8, ROLE_COLOR_3D[s.role] ?? 0x9a8f7a, 0, hgt / 2, 0));
