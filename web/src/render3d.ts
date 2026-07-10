@@ -27,9 +27,19 @@ import { gfx, FILM_PROFILES, WORLD_PALETTES, onPaletteChange } from "./gfx";
 function pal() {
   return WORLD_PALETTES[gfx.palette] ?? WORLD_PALETTES.lagoon;
 }
-// A palette switch invalidates the built terrain; the next state sync rebuilds
-// the island (and props/structs rebuild each sync anyway) in the new colours.
-onPaletteChange(() => invalidate3d());
+// A palette switch rebuilds the island IMMEDIATELY from the cached state —
+// waiting for the next sim tick meant a paused world never showed the new
+// colours at all. Falls back to invalidation when no world is built yet.
+onPaletteChange(() => {
+  invalidate3d();
+  if (state && renderer) {
+    buildTerrain(state);
+    buildProps(state);
+    buildStructs(state);
+    buildGrass(state);
+    builtMapKey = `${state.scenario}:${state.map.size}`;
+  }
+});
 import { openAgentModal, openStructModal, renderChrome } from "./ui";
 import { chaikin, maskLoops } from "./vector";
 
