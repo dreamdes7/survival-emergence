@@ -571,7 +571,7 @@ const GFX_SLIDERS: { key: string; label: string; min: number; max: number; step:
   { key: "bloom", label: "Bloom", min: 0, max: 1, step: 0.02 },
   { key: "focus", label: "Depth of field", min: 0, max: 2, step: 0.05 },
   { key: "vignette", label: "Vignette", min: 0, max: 0.5, step: 0.01 },
-  { key: "barrel", label: "Lens distortion", min: 0, max: 0.35, step: 0.01 },
+  { key: "barrel", label: "Lens (bow + fringe)", min: 0, max: 0.35, step: 0.01 },
   { key: "handheld", label: "Camera shake", min: 0, max: 2, step: 0.05 },
 ];
 const GFX_FILM: { key: string; label: string; min: number; max: number; step: number }[] = [

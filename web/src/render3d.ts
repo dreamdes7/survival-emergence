@@ -138,7 +138,27 @@ const GradeShader = {
       float wA = texture2D(uPaper, bUv * asp * 1.35).g;
       float wB = texture2D(uPaper, bUv * asp * 1.35 + vec2(0.31, 0.47)).g;
       vec2 uv = bUv + (vec2(wA, wB) - 0.5) * (2.0 / uRes);
-      vec4 c = texture2D(tDiffuse, uv);
+
+      // ── CINEMATIC LENS ─────────────────────────────────────────────────────
+      // Radial chromatic aberration: R/G/B are sampled at slightly different
+      // radii, so the image fringes cyan/red toward the corners like real glass
+      // (grows with the lens slider; a whisper is always on). And the frame
+      // border FADES to black instead of smearing the clamped edge pixel — that
+      // stretched-edge smear was the old barrel's whole ugliness.
+      vec2 lc = uv - 0.5;
+      float lr2 = dot(lc, lc);
+      vec2 caOff = lc * lr2 * (0.0016 + uBarrel * 0.030);
+      vec4 c;
+      c.r = texture2D(tDiffuse, uv + caOff).r;
+      c.g = texture2D(tDiffuse, uv).g;
+      c.b = texture2D(tDiffuse, uv - caOff).b;
+      c.a = 1.0;
+      vec2 ef = smoothstep(vec2(0.0), vec2(0.010), uv)
+              * smoothstep(vec2(0.0), vec2(0.010), 1.0 - uv);
+      c.rgb *= ef.x * ef.y;
+      // optical falloff: the corners drink a little light as the lens dials up,
+      // so glass reads as glass (cos⁴ vignette), coherent with the barrel bow
+      c.rgb *= 1.0 - lr2 * uBarrel * 1.4;
 
       // WET-ON-WET colour bleed: a whisper of the neighbouring wash creeps in, so
       // colour boundaries soften like wet paint. Tiny, and only in painterly
