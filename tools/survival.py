@@ -340,7 +340,12 @@ def build_survival_tools() -> list[Tool]:
              available=_avail_gather, execute=_exec_gather),
         Tool("eat", "Eat food from your inventory.", "survival", execute=_exec_eat),
         Tool("drink", "Drink water from inventory, a water still, or an adjacent water source.", "survival", execute=_exec_drink),
-        Tool("rest", "Recover energy (faster in shelter).", "survival", execute=_exec_rest),
+        Tool("rest",
+             "Отдохнуть: восстановить силы (energy) И согреться (warmth). У костра, "
+             "горячего источника или в укрытии отдых — единственный надёжный способ "
+             "вернуть тепло. Замёрз ночью и дошёл до тепла — ОСТАНОВИСЬ и отдохни, "
+             "а не беги дальше холодным.",
+             "survival", execute=_exec_rest),
         Tool("refill_oxygen", "Refill oxygen at a generator.", "survival",
              available=_avail_refill, execute=_exec_refill),
         Tool("build", "Work on the escape structure.", "survival",
