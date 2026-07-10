@@ -34,8 +34,8 @@ onPaletteChange(() => {
   invalidate3d();
   if (state && renderer) {
     buildTerrain(state);
-    buildProps(state);
-    buildStructs(state);
+    buildProps(state, true);
+    buildStructs(state, true);
     buildGrass(state);
     builtMapKey = `${state.scenario}:${state.map.size}`;
   }
@@ -847,8 +847,9 @@ function loadModels(): void {
         -(bb.min.z + bb.max.z) / 2 * s,
       );
       models.set(key, wrap);
-      // swap the model in live: structures AND props (water ponds) both use GLBs
-      if (state && heightGrid.length) { buildStructs(state); buildProps(state); }
+      // swap the model in live: structures AND props (water ponds) both use GLBs.
+      // force=true — the signature didn't change, only the model became available.
+      if (state && heightGrid.length) { buildStructs(state, true); buildProps(state, true); }
     }, undefined, (err) => console.error(`[render3d] model FAILED: ${key}`, err));
   }
 }
@@ -2758,6 +2759,12 @@ function buildFlora(st: WorldState): void {
   const ferns: THREE.BufferGeometry[] = [];
   const shrooms: THREE.BufferGeometry[] = [];
   const drift: THREE.BufferGeometry[] = [];
+  const tufts: THREE.BufferGeometry[] = [];   // grass tufts + pebbles (merged undergrowth)
+  const tuftHi = new THREE.Color(pal().meadow), tuftLo = new THREE.Color(pal().tuft);
+  const pebbleHex = pal().dressRock;
+  const canopy: THREE.BufferGeometry[] = [];  // jungle canopy blobs (was 100s of meshes)
+  const trunks: THREE.BufferGeometry[] = [];  // their stems + dead snags
+  const SNAG = pal().canopySnag;
   // rotate about the item's base, then drop it onto its world spot
   const at = (geo: THREE.BufferGeometry, wx: number, wz: number, gy: number, rot: number) => {
     if (rot) geo.rotateY(rot);
@@ -2770,6 +2777,30 @@ function buildFlora(st: WorldState): void {
       const grass = tile.includes("grass"), fol = tile.includes("foliage");
       const sand = tile.includes("sand") && !tile.includes("water");
 
+      if (grass && hash01(tx, ty, 700) < 0.5) {           // undergrowth: tufts + pebbles
+        const cnt = 1 + Math.floor(hash01(tx, ty, 701) * 2);
+        for (let i = 0; i < cnt; i += 1) {
+          const wx = tx + hash01(tx, ty, 710 + i) * 0.85 + 0.08;
+          const wz = ty + hash01(tx, ty, 720 + i) * 0.85 + 0.08;
+          const gy = groundY(wx, wz); if (gy < 0.18) continue;
+          const rr = hash01(tx, ty, 730 + i);
+          if (rr < 0.24) {                                  // a pebble
+            const pr = 0.03 + hash01(tx, ty, 740 + i) * 0.04;
+            const peb = new THREE.IcosahedronGeometry(pr, 0);
+            peb.scale(1, 0.7, 1); peb.translate(0, pr * 0.35, 0);
+            tufts.push(at(bakeColor(peb, pebbleHex), wx, wz, gy, rr * 6));
+          } else {                                          // a fan of 3 grass blades
+            const blades = 3;
+            const tint = tuftLo.clone().lerp(tuftHi, hash01(tx, ty, 745 + i));
+            for (let b = 0; b < blades; b += 1) {
+              const bh = 0.1 + hash01(tx, ty, 750 + i * 3 + b) * 0.14;
+              const bl = new THREE.CylinderGeometry(0.004, 0.016, bh, 3); bl.translate(0, bh / 2, 0);
+              bl.rotateZ((b - 1) * 0.32 + (hash01(tx, ty, 760 + b) - 0.5) * 0.2);
+              tufts.push(at(bakeColor(bl, tint.getHex()), wx, wz, gy, (b / blades) * 6.28 + rr * 3));
+            }
+          }
+        }
+      }
       if (grass && hash01(tx, ty, 410) < 0.17) {          // wildflowers in the meadow
         const cnt = 1 + Math.floor(hash01(tx, ty, 411) * 3);
         for (let i = 0; i < cnt; i += 1) {
@@ -2813,6 +2844,42 @@ function buildFlora(st: WorldState): void {
           shrooms.push(at(bakeColor(head, cap), wx, wz, gy, 0));
         }
       }
+      if (fol && hash01(tx, ty, 91) < 0.47) {             // jungle canopy (merged masses)
+        const cnt = hash01(tx, ty, 91) < 0.16 ? 2 : 1;
+        for (let k = 0; k < cnt; k += 1) {
+          const wx = tx + hash01(tx, ty, 92 + k) * 0.8 + 0.1;
+          const wz = ty + hash01(tx, ty, 95 + k) * 0.8 + 0.1;
+          const gy = groundY(wx, wz); if (gy < 0.15) continue;
+          if (hash01(tx, ty, 106 + k) < 0.07) {            // rare dead snag
+            const sh = 0.5 + hash01(tx, ty, 107 + k) * 0.5;
+            const tr = new THREE.CylinderGeometry(0.03, 0.06, sh, 5); tr.translate(0, sh / 2, 0);
+            tr.rotateZ((hash01(tx, ty, 108 + k) - 0.5) * 0.22);
+            trunks.push(at(bakeColor(tr, SNAG), wx, wz, gy, 0));
+            for (let b = 0; b < 3; b += 1) {
+              const ba = hash01(tx, ty, 116 + b) * 6.28;
+              const bl = new THREE.CylinderGeometry(0.012, 0.02, 0.16 + hash01(tx, ty, 114 + b) * 0.12, 4);
+              bl.translate(0, sh * (0.55 + b * 0.15), 0);
+              bl.rotateZ(0.9 + hash01(tx, ty, 119 + b) * 0.4);
+              trunks.push(at(bakeColor(bl, SNAG), wx + Math.cos(ba) * 0.05, wz + Math.sin(ba) * 0.05, gy, ba));
+            }
+            continue;
+          }
+          const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
+          const tall = hash01(tx, ty, 102 + k) < 0.22;
+          const stemH = tall ? s * 1.7 : s;
+          const green = jitter(pal().canopy, `can${tx},${ty},${k}`, 0.14).getHex();
+          const blob = new THREE.IcosahedronGeometry(s, 0); blob.scale(1, 0.8, 1);
+          blob.translate(wx, gy + stemH + s * 0.35, wz);
+          canopy.push(bakeColor(blob, green));
+          const stem = new THREE.CylinderGeometry(0.04, 0.05, stemH, 4); stem.translate(wx, gy + stemH * 0.5, wz);
+          trunks.push(bakeColor(stem, C.trunk));
+          if (tall) {
+            const top = new THREE.IcosahedronGeometry(s * 0.55, 0);
+            top.translate(wx + 0.08, gy + stemH + s * 0.95, wz);
+            canopy.push(bakeColor(top, green));
+          }
+        }
+      }
       if (sand && hash01(tx, ty, 540) < 0.045) {          // driftwood on the beach
         const wx = tx + hash01(tx, ty, 541) * 0.7 + 0.15;
         const wz = ty + hash01(tx, ty, 542) * 0.7 + 0.15;
@@ -2854,6 +2921,7 @@ function buildFlora(st: WorldState): void {
     floraGroup!.add(mesh);
   };
   addMerged(flowers); addMerged(ferns); addMerged(shrooms); addMerged(drift);
+  addMerged(tufts); addMerged(canopy); addMerged(trunks);
   scene.add(floraGroup);
 }
 
@@ -2868,7 +2936,37 @@ const propReflMat = new THREE.MeshBasicMaterial({
   color: 0x16323a, transparent: true, opacity: 0.1, depthWrite: false,
 });
 
-function buildProps(st: WorldState): void {
+// FNV-1a over a string, folded into a running 32-bit hash. Cheap enough to run
+// over every id each sync; used to skip prop/struct rebuilds when nothing changed.
+function fnv(h: number, s: string): number {
+  for (let i = 0; i < s.length; i += 1) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return h;
+}
+let propsSig = -1;
+let structsSig = -1;
+
+// Props (trees, rocks, ponds) change ONLY when a node crosses the render
+// threshold (chopped / depleted). buildProps used to rebuild hundreds of meshes
+// EVERY backend tick (~1/s) — the stutter the island "lagged" from. Now it's
+// gated on this signature and rebuilds only on real change.
+function propsSignature(st: WorldState): number {
+  let h = 2166136261;
+  for (const n of st.resources) if (n.quantity >= 1) h = fnv(h, n.id);
+  return h | 0;
+}
+function structsSignature(st: WorldState): number {
+  let h = 2166136261;
+  for (const s of st.structures) {
+    const lit = s.state?.complete && ((s.state?.fuel as number) ?? 0) > 0 ? "L" : "";
+    h = fnv(h, `${s.id}:${s.kind}:${s.state?.complete ? 1 : 0}${lit}`);
+  }
+  return h | 0;
+}
+
+function buildProps(st: WorldState, force = false): void {
+  const sig = propsSignature(st);
+  if (!force && sig === propsSig && propsGroup) return;
+  propsSig = sig;
   propsGroup?.removeFromParent();
   propsGroup = new THREE.Group();
   swayers = [];
@@ -2931,107 +3029,11 @@ function buildProps(st: WorldState): void {
     }
   }
 
-  // Decorative groves: foliage tiles get purely-visual canopy blobs so forests
-  // read as MASSES. A rare dead SNAG adds character — a bleak, weathered stand
-  // that suits the island's grim mood (no cheerful blossom here).
-  const n = st.map.size;
-  // more materials + wide leaf jitter so a grove reads as many green shades
-  const canopyMats = Array.from({ length: 12 }, (_, i) => lamJLeaf(pal().canopy, `canopy${i}`));
-  const SNAG = pal().canopySnag;
-  for (let ty = 0; ty < n; ty += 1) {
-    for (let tx = 0; tx < n; tx += 1) {
-      if (!st.map.grid[ty][tx].includes("foliage")) continue;
-      const r = hash01(tx, ty, 91);
-      if (r > 0.47) continue;              // a touch denser than before
-      const count = r < 0.16 ? 2 : 1;
-      for (let k = 0; k < count; k += 1) {
-        const ox = hash01(tx, ty, 92 + k) * 0.8 + 0.1;
-        const oz = hash01(tx, ty, 95 + k) * 0.8 + 0.1;
-        const wx = tx + ox, wz = ty + oz;
-        const gy = groundY(wx, wz);
-        if (gy < 0.15) continue;
-        // rare dead snag: bare trunk + a couple of stub branches, no canopy
-        if (hash01(tx, ty, 106 + k) < 0.07) {
-          const sh = 0.5 + hash01(tx, ty, 107 + k) * 0.5;
-          const trunk = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.06, sh, 5), lam(SNAG));
-          trunk.position.set(wx, gy + sh / 2, wz);
-          trunk.rotation.z = (hash01(tx, ty, 108 + k) - 0.5) * 0.22;
-          trunk.castShadow = true;
-          propsGroup.add(trunk);
-          for (let b = 0; b < 3; b += 1) {
-            const bl = new THREE.Mesh(
-              new THREE.CylinderGeometry(0.012, 0.02, 0.16 + hash01(tx, ty, 114 + b) * 0.12, 4), lam(SNAG));
-            const ba = hash01(tx, ty, 116 + b) * 6.28;
-            bl.position.set(wx + Math.cos(ba) * 0.05, gy + sh * (0.55 + b * 0.15), wz + Math.sin(ba) * 0.05);
-            bl.rotation.set(0, ba, 0.9 + hash01(tx, ty, 119 + b) * 0.4);
-            bl.castShadow = true;
-            propsGroup.add(bl);
-          }
-          continue;
-        }
-        const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
-        const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
-        const stemH = tall ? s * 1.7 : s;
-        const mat = canopyMats[(tx * 7 + ty * 13 + k) % 12];
-        const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0), mat);
-        blob.position.set(wx, gy + stemH + s * 0.35, wz);
-        blob.scale.y = 0.8;
-        blob.castShadow = true;
-        breathers.push({ m: blob, phase: hash01(tx, ty, 99 + k) * 20, amp: 0.02, base: 1 });
-        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.05, stemH, 4), lam(C.trunk));
-        stem.position.set(wx, gy + stemH * 0.5, wz);
-        propsGroup.add(stem, blob);
-        if (tall) {
-          const top = new THREE.Mesh(new THREE.IcosahedronGeometry(s * 0.55, 0), mat);
-          top.position.set(wx + 0.08, gy + stemH + s * 0.95, wz);
-          top.castShadow = true;
-          breathers.push({ m: top, phase: hash01(tx, ty, 103 + k) * 20, amp: 0.02, base: 1 });
-          propsGroup.add(top);
-        }
-      }
-    }
-  }
+  // (decorative canopy groves moved to buildFlora — merged into ~2 draw calls,
+  // built once per map instead of rebuilt on every node change.)
 
-  // Undergrowth: open meadow tiles get sparse tufts, ferns and pebbles so the
-  // ground reads as LAYERED vegetation, not empty green felt (the ref's trick:
-  // richness lives at the smallest scale). Merged-cheap primitives, low density.
-  const meadowMat = lamJ(pal().meadow, "meadow", 0.08);
-  const fernMat = lamJ(pal().canopy, "fern", 0.12);
-  const pebbleMat = lam(pal().dressRock);
-  for (let ty = 0; ty < n; ty += 1) {
-    for (let tx = 0; tx < n; tx += 1) {
-      const t = st.map.grid[ty][tx];
-      if (!t.includes("grass") || t.includes("foliage")) continue;
-      const r = hash01(tx, ty, 171);
-      if (r > 0.16) continue;
-      const wx = tx + hash01(tx, ty, 172) * 0.8 + 0.1;
-      const wz = ty + hash01(tx, ty, 173) * 0.8 + 0.1;
-      const gy = groundY(wx, wz);
-      if (gy < 0.15) continue;
-      if (r < 0.035) {                       // a small fern: three leaning blades
-        for (let b = 0; b < 3; b += 1) {
-          const ba = hash01(tx, ty, 175 + b) * 6.28;
-          const bh = 0.14 + hash01(tx, ty, 179 + b) * 0.1;
-          const blade = new THREE.Mesh(new THREE.ConeGeometry(0.028, bh, 4), fernMat);
-          blade.position.set(wx + Math.cos(ba) * 0.05, gy + bh * 0.4, wz + Math.sin(ba) * 0.05);
-          blade.rotation.set(Math.cos(ba) * 0.55, 0, Math.sin(ba) * 0.55);
-          propsGroup.add(blade);
-        }
-      } else if (r < 0.12) {                 // grass tuft: 1-2 soft cones
-        const th = 0.1 + hash01(tx, ty, 183) * 0.12;
-        const tuft = new THREE.Mesh(new THREE.ConeGeometry(0.05, th, 5), meadowMat);
-        tuft.position.set(wx, gy + th / 2, wz);
-        tuft.rotation.z = (hash01(tx, ty, 184) - 0.5) * 0.3;
-        propsGroup.add(tuft);
-      } else {                               // a lone pebble
-        const pr = 0.03 + hash01(tx, ty, 187) * 0.035;
-        const peb = new THREE.Mesh(new THREE.DodecahedronGeometry(pr, 0), pebbleMat);
-        peb.position.set(wx, gy + pr * 0.5, wz);
-        peb.rotation.set(hash01(tx, ty, 188) * 6, hash01(tx, ty, 189) * 6, 0);
-        propsGroup.add(peb);
-      }
-    }
-  }
+  // (undergrowth moved to buildFlora — it MERGES into ~1 draw call, and is built
+  // once per map instead of rebuilt every tick like propsGroup was.)
   scene.add(propsGroup);
 }
 
@@ -3553,7 +3555,10 @@ function makeStructure(s: StructureState): THREE.Group {
   return g;
 }
 
-function buildStructs(st: WorldState): void {
+function buildStructs(st: WorldState, force = false): void {
+  const sig = structsSignature(st);
+  if (!force && sig === structsSig && structsGroup) return;
+  structsSig = sig;
   structsGroup?.removeFromParent();
   lifeGroup?.removeFromParent();
   for (const l of fireLights) l.removeFromParent();
