@@ -588,6 +588,45 @@ class World:
         agent.exiled = False
         self.expel_votes.pop(agent.id, None)
 
+    # ── fear signs: ambiguous night terror, never a named creature ──────────────
+    # Hunger + darkness + loneliness produce SIGNS. The engine never says what
+    # (if anything) made them — whether the survivors blame a beast, the hum, or
+    # their own nerves is culture being born, and the culture tracker will see it.
+    _FEAR_SIGNS = [
+        "в темноте за деревьями что-то протяжно завыло — и это был не ветер",
+        "на земле цепочка следов: похожи на человечьи, но длиннее, и пальцы врозь",
+        "совсем рядом хрустнула ветка; ты обернулся — никого",
+        "накатил запах — сладковатый, гнилой — и тут же пропал",
+        "краем глаза: высокий тонкий силуэт между стволов. моргнул — пусто",
+        "кто-то долго смотрел тебе в спину из темноты — ты чувствовал это кожей",
+        "тишина упала разом, будто весь лес затаил дыхание",
+        "у кромки зарослей — ободранная кора и глубокие борозды, свежие",
+    ]
+
+    def _fear_signs(self) -> None:
+        cfg = self.scenario.get("fear", {})
+        if not cfg.get("night_signs") or not self.is_night:
+            return
+        night_no = self.tick // self.day_length_ticks
+        for a in self.living_agents():
+            if getattr(a, "_last_sign_night", -1) == night_no:
+                continue                                   # at most one sign a night
+            hunger = a.physiology.get("hunger", 100.0)
+            if hunger > 60:
+                continue                                   # fear feeds on an empty belly
+            alone = all(o is a or o.status == "dead"
+                        or chebyshev(a.x, a.y, o.x, o.y) > 4 for o in self.agents)
+            if not alone or self.near_fire(a):
+                continue                                   # company and fire keep it away
+            p = 0.10 + (60.0 - hunger) / 200.0 + getattr(a, "dread", 0.0) / 400.0
+            if self.rng.random() > p:
+                continue
+            sign = self.rng.choice(self._FEAR_SIGNS)
+            a._last_sign_night = night_no
+            a.memory.add(self.tick, self.day, "observation", sign, 2.3)
+            a.dread = min(100.0, getattr(a, "dread", 0.0) + self.rng.uniform(6.0, 12.0))
+            self.emit("fear_sign", actor=a.id, payload={"name": a.name, "sign": sign})
+
     def _legacy_anchor_usable_shelter(self, agent):
         """A finished adjacent shelter with room: of the agents crowding it, the
         first `capacity` (stable order) get the slot — extras must find another."""
@@ -790,6 +829,9 @@ class World:
                     a.inventory[item] = max(0.0, a.inventory[item] - 0.3)
                     if a.inventory[item] <= 0:
                         del a.inventory[item]
+
+        # Fear signs: the island's dark folklore engine (see scenarios/*.yaml `fear`).
+        self._fear_signs()
 
         # Mystery objects: dread, manifestations, the hatch ritual.
         anomaly_tick(self)

@@ -24,9 +24,10 @@ def _restore_amount(world, stat: str, default: float = 40.0) -> float:
 def _consume_one(agent, items: set) -> str | None:
     # Eat the perishable stuff FIRST — raw food rots in the pack while smoked
     # keeps, so burning the preserves while fresh fruit spoils is pure waste.
+    # human_flesh comes LAST of all: it's what remains when everything else is gone.
     from engine.models import PRESERVED_FOOD
     order = sorted((it for it in agent.inventory if it in items and agent.inventory[it] > 0),
-                   key=lambda it: it in PRESERVED_FOOD)   # perishable (False) first
+                   key=lambda it: (it == "human_flesh", it in PRESERVED_FOOD))
     for item in order:
         agent.inventory[item] -= 1
         if agent.inventory[item] <= 0:
@@ -97,6 +98,13 @@ def _exec_eat(world, agent, args) -> str:
         return "no food to eat"
     mult = 1.6 if item == "dried_food" else 1.0     # smoked food fills you more
     gained = _bump(agent, "hunger", _restore_amount(world, "hunger") * mult)
+    if item == "human_flesh":
+        # It feeds — richly. And it takes something that doesn't come back.
+        agent.physiology["morale"] = max(0.0, agent.physiology.get("morale", 50) - 10)
+        agent.dread = min(100.0, getattr(agent, "dread", 0.0) + 10)
+        agent.memory.add(world.tick, world.day, "observation",
+                         "я ел человечину. голод ушёл — а это осталось", 2.8)
+        return f"ate... it (+{gained:.0f} hunger). что-то в тебе изменилось"
     return f"ate {item} (+{gained:.0f} hunger)"
 
 
@@ -212,6 +220,66 @@ def _exec_build(world, agent, args) -> str:
     return f"worked on {esc['action']} ({struct.state['progress']:.0f}/{req:.0f})"
 
 
+# ── the taboo: butchering the dead ────────────────────────────────────────────
+# Offered ONLY under true starvation, next to a body. The engine never moralises
+# and never names a monster — it just makes the deed possible, costly and
+# witnessable. What the group calls those who did it is their myth to invent.
+def _adjacent_corpse(world, agent):
+    for o in world.agents:
+        if (o.status == "dead" and not getattr(o, "buried", False)
+                and getattr(o, "flesh_taken", 0) < 2
+                and chebyshev(agent.x, agent.y, o.x, o.y) <= 1):
+            return o
+    return None
+
+
+def _avail_butcher(world, agent) -> bool:
+    if not world.scenario.get("fear", {}).get("taboo_flesh"):
+        return False
+    if agent.physiology.get("hunger", 100.0) >= 30.0:   # only real starvation opens this door
+        return False
+    return _adjacent_corpse(world, agent) is not None
+
+
+def _exec_butcher(world, agent, args) -> str:
+    if not world.scenario.get("fear", {}).get("taboo_flesh"):
+        return "нет"
+    if agent.physiology.get("hunger", 100.0) >= 30.0:
+        return "ты ещё не настолько голоден, чтобы решиться на это"
+    corpse = _adjacent_corpse(world, agent)
+    if corpse is None:
+        return "рядом нет тела"
+    corpse.flesh_taken = getattr(corpse, "flesh_taken", 0) + 1
+    agent.inventory["human_flesh"] = agent.inventory.get("human_flesh", 0) + 3
+    # the deed marks the doer — spirit, fear, and a memory that won't fade
+    agent.physiology["morale"] = max(0.0, agent.physiology.get("morale", 50) - 25)
+    agent.dread = min(100.0, getattr(agent, "dread", 0.0) + 25)
+    if getattr(agent, "psyche", None) and agent.psyche.get("purpose") is not None:
+        agent.psyche["purpose"] = max(0.0, agent.psyche["purpose"] - 15)
+    agent.memory.add(world.tick, world.day, "observation",
+                     f"голод победил. я разделал тело {corpse.name}. этого не вернуть", 3.0)
+    # witnesses: anyone close enough sees, remembers, and will never look at
+    # the doer the same way — gossip and whatever name they coin do the rest
+    seen_by = []
+    for o in world.living_agents():
+        if o is agent or chebyshev(agent.x, agent.y, o.x, o.y) > 6:
+            continue
+        o.memory.add(world.tick, world.day, "social",
+                     f"я видел, как {agent.name} разделывал тело {corpse.name}. "
+                     f"меня до сих пор трясёт", 2.9)
+        o.relationships.record(agent.id, -0.4)
+        o.dread = min(100.0, getattr(o, "dread", 0.0) + 15)
+        seen_by.append(o.name)
+    world.emit("taboo", actor=agent.id,
+               payload={"name": agent.name, "corpse": corpse.name, "seen_by": seen_by})
+    world.log_event("taboo",
+                    f"🩸 {agent.name} нарушил табу над телом {corpse.name}"
+                    + (f" — это видели {', '.join(seen_by)}" if seen_by else " — никто не видел"),
+                    3.0, [agent.name])
+    tail = " Кто-то видел." if seen_by else " Никто не видел. Пока."
+    return f"ты сделал это. в руках — мясо, в голове — тишина.{tail}"
+
+
 def build_survival_tools() -> list[Tool]:
     return [
         Tool("gather", "Harvest from an adjacent resource node.", "survival",
@@ -224,4 +292,7 @@ def build_survival_tools() -> list[Tool]:
              available=_avail_refill, execute=_exec_refill),
         Tool("build", "Work on the escape structure.", "survival",
              available=_avail_build, execute=_exec_build),
+        Tool("butcher_corpse",
+             "Разделать тело погибшего ради мяса. Это накормит. Этого не вернуть.",
+             "survival", available=_avail_butcher, execute=_exec_butcher),
     ]

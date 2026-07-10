@@ -140,3 +140,14 @@ escape:
 
 weather:
   events: [storm]              # raises warmth + energy decay while active
+
+# ── fear: the island's dark folklore engine ───────────────────────────────────
+# The engine NEVER names or spawns a creature. Hunger, night and loneliness
+# produce ambiguous SIGNS (sounds, tracks, glimpses) — what the survivors make
+# of them (a beast? the machine hum? nothing?) is their culture to invent.
+# Under true starvation the dead can be butchered — it feeds, and it can never
+# be taken back. The taboo, the whispers and whatever name they give the ones
+# who did it... that's the myth being born, measurably.
+fear:
+  night_signs: true            # hungry + alone + dark + no fire → dread signs
+  taboo_flesh: true            # the starving can butcher the dead — at a price

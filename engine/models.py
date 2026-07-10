@@ -3,7 +3,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 # ── Item categories (used by survival tools + the decision heuristics) ─────────
-FOOD_ITEMS  = {"food", "food_ration", "food_plant", "fish", "coconut", "berries", "fruit", "dried_food"}
+# human_flesh is food that FEEDS and DAMNS — produced only by butchering the dead
+# under true starvation (tools/survival.butcher_corpse); eating it costs the soul.
+FOOD_ITEMS  = {"food", "food_ration", "food_plant", "fish", "coconut", "berries", "fruit", "dried_food", "human_flesh"}
 WATER_ITEMS = {"water"}
 WOOD_ITEMS  = {"wood"}
 # Raw food spoils in a pack over days; preserved food (from a smokehouse) keeps —
