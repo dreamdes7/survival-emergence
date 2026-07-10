@@ -834,11 +834,43 @@ const MODEL_DEFS: Record<string, { url: string; size: number; axis: "y" | "xz"; 
 };
 const models = new Map<string, THREE.Group>();
 
+// The authored GLBs are UN-optimised: each is a pile of separate sub-meshes
+// (silver_saltbush is 77, amber_ore 65, garden_bed 177…). Cloned onto dozens of
+// nodes, that was 5-10k draw calls — the whole-island lag. Merging sub-meshes by
+// MATERIAL on load is lossless (same geometry, same materials) and collapses each
+// model to one draw per material (saltbush 77 -> 5). Bakes each sub-mesh's local
+// transform into its geometry first so the flattened result is identical.
+function mergeGlbByMaterial(root: THREE.Object3D): THREE.Group {
+  root.updateWorldMatrix(true, true);
+  const groups = new Map<THREE.Material, THREE.BufferGeometry[]>();
+  root.traverse((o) => {
+    const m = o as THREE.Mesh;
+    if (!m.isMesh || Array.isArray(m.material) || !m.material) return;
+    let g: THREE.BufferGeometry = m.geometry.index ? m.geometry.toNonIndexed() : m.geometry.clone();
+    for (const name of Object.keys(g.attributes))
+      if (name !== "position" && name !== "normal" && name !== "uv") g.deleteAttribute(name);
+    if (!g.getAttribute("normal")) g.computeVertexNormals();
+    if (!g.getAttribute("uv")) {
+      const cnt = g.getAttribute("position").count;
+      g.setAttribute("uv", new THREE.BufferAttribute(new Float32Array(cnt * 2), 2));
+    }
+    g.applyMatrix4(m.matrixWorld);
+    (groups.get(m.material) ?? groups.set(m.material, []).get(m.material)!).push(g);
+  });
+  const out = new THREE.Group();
+  for (const [mat, geos] of groups) {
+    const merged = geos.length === 1 ? geos[0] : mergeGeometries(geos, false);
+    if (merged) out.add(new THREE.Mesh(merged, mat));
+    else for (const g of geos) out.add(new THREE.Mesh(g, mat));   // fallback: unmerged
+  }
+  return out;
+}
+
 function loadModels(): void {
   const loader = new GLTFLoader();
   for (const [key, def] of Object.entries(MODEL_DEFS)) {
     loader.load(def.url, (gltf) => {
-      const root = gltf.scene;
+      const root = mergeGlbByMaterial(gltf.scene);
       root.traverse((o) => {
         const mesh = o as THREE.Mesh;
         if (mesh.isMesh) {
@@ -4122,8 +4154,12 @@ export function setActive3d(on: boolean): void {
       perfHud.style.cssText = "position:fixed;top:8px;left:8px;z-index:99999;font:12px monospace;"
         + "background:rgba(0,0,0,.6);color:#7fffa0;padding:4px 7px;border-radius:5px;white-space:pre;pointer-events:none";
       document.body.appendChild(perfHud);
+      // The composer runs many renderer.render() passes; autoReset would leave
+      // info reflecting only the LAST (a fullscreen quad → "draws 1"). Turn it
+      // off and reset once per frame so the count is the WHOLE frame's draws.
+      if (renderer) renderer.info.autoReset = false;
     }
-    let acc = 0, frames = 0, lastHud = performance.now();
+    let acc = 0, frames = 0, lastHud = performance.now(), maxDraws = 0, maxTris = 0;
     const loop = () => {
       if (!active || !renderer) return;
       rafId = requestAnimationFrame(loop);
@@ -4131,16 +4167,19 @@ export function setActive3d(on: boolean): void {
       if (t - lastFrameT < FRAME_MS - 1.5) return;   // too soon — skip this vsync
       const frameDt = t - lastFrameT;
       lastFrameT = t;
+      if (perfHud) renderer.info.reset();
       tick();
       if (perfHud) {
         acc += frameDt; frames += 1;
+        maxDraws = Math.max(maxDraws, renderer.info.render.calls);
+        maxTris = Math.max(maxTris, renderer.info.render.triangles);
         if (t - lastHud > 400) {
           const fps = frames / (acc / 1000);
-          const info = renderer.info.render;
           perfHud.textContent =
-            `FPS ${fps.toFixed(0)}\ndraws ${info.calls}\ntris ${(info.triangles / 1000).toFixed(0)}k`
-            + `\nframe ${(acc / frames).toFixed(1)}ms`;
-          acc = 0; frames = 0; lastHud = t;
+            `FPS ${fps.toFixed(0)}   ${(acc / frames).toFixed(0)}ms\n`
+            + `draws ${maxDraws}\ntris ${(maxTris / 1000).toFixed(0)}k\n`
+            + `scale ${(gfx.renderScale || 1).toFixed(2)}  kuwa ${gfx.comic ? "?" : ""}`;
+          acc = 0; frames = 0; lastHud = t; maxDraws = 0; maxTris = 0;
         }
       }
     };
