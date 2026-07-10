@@ -468,6 +468,19 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
                 "completion_tokens": b.completion_tokens, "cost_usd": round(b.cost, 4),
             })
 
+    # Auto-documentary: every recorded run folds itself into a shareable HTML page
+    # from the artifacts just written (one-click post → zero-click). Never fatal.
+    if recorder is not None:
+        try:
+            from analysis import documentary
+            from analysis.runlog import load_meta
+            html = documentary.build_html(recorder.dir, load_meta(recorder.dir))
+            (recorder.dir / "documentary.html").write_text(html, encoding="utf-8")
+            if not quiet:
+                print(f"  🎬 documentary → {recorder.dir / 'documentary.html'}")
+        except Exception:
+            pass
+
     # Palimpsest: this run leaves a stratum for the next one — but ONLY if it made
     # enough that's worth remembering (the quality floor keeps junk out of the canon).
     laid = palimpsest.deposit(world, cfg, scenario, run_id)
