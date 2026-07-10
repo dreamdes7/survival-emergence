@@ -905,6 +905,18 @@ function buildHeights(st: WorldState): void {
         out[y][x] = (g[y][x] * 2 + g[y - 1][x] + g[y + 1][x] + g[y][x - 1] + g[y][x + 1]) / 6;
     g = out;
   }
+  // LOGICAL LAND MUST NEVER RENDER AS SEA. Corner-averaging with SEA_FLOOR and
+  // the smoothing passes sink narrow (1-2 tile) coastal strips below the
+  // coastline threshold — the backend then places palms, nodes, the plane and
+  // even agent spawns on tiles the sculpture shows as open water (measured: 113
+  // such tiles on one seed). Clamp every corner touching a land tile above the
+  // level-0 cut: the silhouette stays smooth, but the world's truth wins.
+  for (let y = 0; y < n; y += 1)
+    for (let x = 0; x < n; x += 1) {
+      if (isWater(x, y)) continue;
+      for (const [cx, cy] of [[x, y], [x + 1, y], [x, y + 1], [x + 1, y + 1]] as const)
+        g[cy][cx] = Math.max(g[cy][cx], PLATE_THRESH[0] + 0.06);
+    }
   heightGrid = g;    // SMOOTH field — the plates quantise it, not the grid
 }
 
