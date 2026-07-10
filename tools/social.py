@@ -52,6 +52,13 @@ def _exec_give(world, agent, args) -> str:
     other.relationships.record(agent.id, +0.15)
     agent.memory.add(world.tick, world.day, "social", f"I gave {qty:.0f} {item} to {target_name}", 1.8)
     other.memory.add(world.tick, world.day, "social", f"{agent.name} gave me {qty:.0f} {item}", 2.0)
+    # Mercy readmits the outcast: to give to an exile is to welcome them back in.
+    if world.is_exiled(other):
+        world.readmit(other)
+        other.memory.add(world.tick, world.day, "social",
+                         f"{agent.name} протянул мне руку — меня снова приняли в группу", 2.6)
+        world.emit("readmit", actor=agent.id, target=other.id,
+                   payload={"by": agent.name, "target": other.name})
     _maybe_keep_promise(world, agent, other)
     # Typed record of every hand-to-hand transfer (economy is data, not prose);
     # the culture tracker watches the scenario's currency item specifically.
@@ -321,6 +328,127 @@ def _exec_promise(world, agent, args) -> str:
     return f"ты дал слово {other.name}: {what} (сдержи до конца дня)"
 
 
+# ── barter: a two-sided exchange (offer → accept). Unlike `give`, both sides
+#    move goods, so a real market — and a use for the useless beads — can emerge.
+def _avail_offer_trade(world, agent) -> bool:
+    return _near_agent(world, agent) and bool(agent.inventory)
+
+
+def _exec_offer_trade(world, agent, args) -> str:
+    other = world.agent_by_name(args.get("target", ""))
+    if other is None or other.status != "active":
+        return f"no one named '{args.get('target','')}' to trade with"
+    if chebyshev(agent.x, agent.y, other.x, other.y) > 1:
+        return f"{other.name} is too far to trade with"
+    give_item = str(args.get("give_item") or args.get("give") or "").strip()
+    want_item = str(args.get("want_item") or args.get("want") or "").strip()
+    give_qty = max(1.0, float(args.get("give_qty", 1) or 1))
+    want_qty = max(1.0, float(args.get("want_qty", 1) or 1))
+    if not give_item or not want_item:
+        return "an offer needs both what you GIVE and what you WANT (give_item/want_item)"
+    if agent.inventory.get(give_item, 0) < give_qty:
+        return f"you don't have {give_qty:.0f} {give_item} to offer"
+    other.pending_trade = {
+        "from_id": agent.id, "from": agent.name,
+        "give_item": give_item, "give_qty": give_qty,     # what the PROPOSER gives
+        "want_item": want_item, "want_qty": want_qty,     # what the proposer wants back
+        "tick": world.tick,
+    }
+    other.deliver({
+        "type": "trade_offer", "from": agent.name, "from_id": agent.id,
+        "text": (f"{agent.name} предлагает обмен: {give_qty:.0f} {give_item} "
+                 f"за твои {want_qty:.0f} {want_item}"),
+        "payload": dict(other.pending_trade),
+    })
+    agent.memory.add(world.tick, world.day, "social",
+                     f"я предложил {other.name} обмен: {give_qty:.0f} {give_item} за "
+                     f"{want_qty:.0f} {want_item}", 1.6)
+    return (f"offered {other.name}: {give_qty:.0f} {give_item} for {want_qty:.0f} {want_item} "
+            f"— they must accept")
+
+
+def _avail_accept_trade(world, agent) -> bool:
+    tr = getattr(agent, "pending_trade", None)
+    if not tr:
+        return False
+    return agent.inventory.get(tr["want_item"], 0) >= tr["want_qty"]
+
+
+def _exec_accept_trade(world, agent, args) -> str:
+    tr = getattr(agent, "pending_trade", None)
+    if not tr:
+        return "no offer on the table to accept"
+    proposer = world.agent_by_id(tr["from_id"])
+    if proposer is None or proposer.status != "active":
+        agent.pending_trade = None
+        return "the one who offered is gone"
+    if chebyshev(agent.x, agent.y, proposer.x, proposer.y) > 1:
+        return f"{proposer.name} moved off — step next to them to trade"
+    gi, gq = tr["give_item"], tr["give_qty"]     # proposer→accepter
+    wi, wq = tr["want_item"], tr["want_qty"]      # accepter→proposer
+    if proposer.inventory.get(gi, 0) < gq:
+        agent.pending_trade = None
+        return f"{proposer.name} no longer has {gq:.0f} {gi} — deal's off"
+    if agent.inventory.get(wi, 0) < wq:
+        return f"you don't have {wq:.0f} {wi} to complete the trade"
+
+    def move(src, dst, item, qty):
+        src.inventory[item] = src.inventory.get(item, 0) - qty
+        if src.inventory[item] <= 0:
+            del src.inventory[item]
+        dst.inventory[item] = dst.inventory.get(item, 0) + qty
+    move(proposer, agent, gi, gq)
+    move(agent, proposer, wi, wq)
+    agent.pending_trade = None
+    world.barter_count += 1
+    proposer.relationships.record(agent.id, +0.08)
+    agent.relationships.record(proposer.id, +0.08)
+    for it, q, s, d in ((gi, gq, proposer, agent), (wi, wq, agent, proposer)):
+        world.culture.note_transfer(world, it, s, d, q)
+    world.emit("barter", actor=proposer.id, target=agent.id,
+               payload={"gave": f"{gq:.0f} {gi}", "got": f"{wq:.0f} {wi}",
+                        "from": proposer.name, "to": agent.name})
+    agent.memory.add(world.tick, world.day, "social",
+                     f"обмен с {proposer.name}: отдал {wq:.0f} {wi}, получил {gq:.0f} {gi}", 1.9)
+    proposer.memory.add(world.tick, world.day, "social",
+                        f"обмен с {agent.name}: отдал {gq:.0f} {gi}, получил {wq:.0f} {wi}", 1.9)
+    return f"traded: gave {wq:.0f} {wi}, received {gq:.0f} {gi} from {proposer.name}"
+
+
+# ── formal territory: stake out an AREA (not just one node). Trespass by others
+#    sours relations — turning land into a thing worth agreeing rules over.
+def _territory_owner_at(world, x, y, exclude_id=None):
+    for terr in getattr(world, "territories", []):
+        if terr["owner_id"] == exclude_id:
+            continue
+        if chebyshev(x, y, terr["x"], terr["y"]) <= terr["r"]:
+            return terr
+    return None
+
+
+def _avail_claim_land(world, agent) -> bool:
+    # can't stake ground already inside someone's territory (including your own)
+    return _territory_owner_at(world, agent.x, agent.y) is None and \
+        not any(t["owner_id"] == agent.id for t in getattr(world, "territories", []))
+
+
+def _exec_claim_land(world, agent, args) -> str:
+    if _territory_owner_at(world, agent.x, agent.y) is not None:
+        return "this ground is already inside someone's territory"
+    name = str(args.get("name") or args.get("text") or "").strip()
+    group = bool(args.get("group") or args.get("communal"))
+    terr = {"owner_id": agent.id, "owner": agent.name, "x": agent.x, "y": agent.y,
+            "r": 3, "tick": world.tick, "name": name, "group": group}
+    world.territories.append(terr)
+    label = f" и назвал её «{name}»" if name else ""
+    agent.memory.add(world.tick, world.day, "social",
+                     f"я застолбил участок вокруг ({agent.x},{agent.y}){label}", 1.9)
+    world.emit("claim_land", actor=agent.id,
+               payload={"x": agent.x, "y": agent.y, "r": 3, "name": name, "group": group})
+    scope = "общей" if group else "своей"
+    return f"staked out the land around ({agent.x},{agent.y}) as {scope} territory{label}"
+
+
 def build_social_tools() -> list[Tool]:
     gestures = [
         ("hug", "Hug an adjacent agent — a warm gesture.", "hugged", "hugged", +0.25),
@@ -353,6 +481,17 @@ def build_social_tools() -> list[Tool]:
                         "(by helping them) to earn deep trust; break it and lose it.", "social",
              {"to": "agent name", "what": "what you promise to do"},
              available=_near_agent, execute=_exec_promise),
+        Tool("offer_trade", "Propose a barter to an adjacent agent: what you GIVE for what "
+                            "you WANT back. They must accept for the swap to happen.", "social",
+             {"target": "agent name", "give_item": "what you give", "give_qty": "amount",
+              "want_item": "what you want", "want_qty": "amount"},
+             available=_avail_offer_trade, execute=_exec_offer_trade),
+        Tool("accept_trade", "Accept the barter offer standing before you (both sides swap).",
+             "social", {}, available=_avail_accept_trade, execute=_exec_accept_trade),
+        Tool("claim_land", "Stake out the ground around you as territory (yours, or the "
+                           "group's) — others who take from it are trespassing.", "social",
+             {"name": "optional name for the place", "group": "true for communal land"},
+             available=_avail_claim_land, execute=_exec_claim_land),
     ]
     for name, desc, vs, vo, delta in gestures:
         tools.append(Tool(

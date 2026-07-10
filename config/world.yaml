@@ -14,9 +14,10 @@ sim:
   move_speed: 3           # tiles an agent crosses per go_to (faster traversal)
   # Emergency gate: if a lethal stat < critical*emergency_multiplier, the heuristic
   # overrides the brain to avert death. Wider band = more heuristic contamination.
-  # Default 2.0 preserves the tuned survival balance; RESEARCH RUNS should lower
-  # this to ~1.2 (or 0 to disable) so emergent behaviour is attributable to the model.
-  emergency_multiplier: 2.0
+  # 2.0 proved far too paternalistic under the V9.19 scarcity (41% of a healthy
+  # run's decisions came from the gate, not the model) — 1.3 keeps it a last-resort
+  # deathguard while the model owns its own survival. 0 disables entirely.
+  emergency_multiplier: 1.3
   # Conversation scenes: a say_to that lands on an adjacent agent plays out up to
   # N extra replies in the same tick (real dialogue instead of one line per tick).
   # 0 = off. Real-LLM replies use a compact cheap prompt, stubs use a phrase pool.

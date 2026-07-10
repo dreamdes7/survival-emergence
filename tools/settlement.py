@@ -103,8 +103,8 @@ def _exec_harvest(world, agent, args) -> str:
         return "the crop is still growing"
     g.state["planted"] = False
     g.state.pop("mature_at", None)
-    agent.inventory["food"] = agent.inventory.get("food", 0) + 3
-    return "harvested 3 food from the garden"
+    agent.inventory["food"] = agent.inventory.get("food", 0) + 5
+    return "harvested 5 food from the garden"
 
 
 # ── signpost: leave / read written messages ───────────────────────────────────

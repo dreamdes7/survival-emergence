@@ -104,6 +104,7 @@ class Agent:
         # Emergent specialisation: XP per craft, and the role it crystallises into.
         self.skills: dict[str, float] = {}
         self.role: str | None = None
+        self.exiled: bool = False               # cast out by a group vote (no commons)
         # Theory of mind: a synthesised model of each other agent (trust + traits).
         self.beliefs: dict[str, dict] = {}
 
@@ -112,6 +113,7 @@ class Agent:
         self.following: str | None = None
         self.known_hazards: dict[tuple[int, int], str] = {}
         self.pending_bond: dict | None = None   # incoming friendship/romantic proposal
+        self.pending_trade: dict | None = None   # incoming barter offer (offer_trade)
 
         # Latest cognition, exposed to the observer UI.
         self.last_thought: str = ""

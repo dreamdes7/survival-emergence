@@ -5,7 +5,7 @@ generator, build needs the escape structure, etc.
 """
 from __future__ import annotations
 from .base import Tool
-from engine.models import FOOD_ITEMS, WATER_ITEMS
+from engine.models import FOOD_ITEMS, WATER_ITEMS, chebyshev
 from engine.skills import skill_bonus
 
 
@@ -22,12 +22,16 @@ def _restore_amount(world, stat: str, default: float = 40.0) -> float:
 
 
 def _consume_one(agent, items: set) -> str | None:
-    for item in list(agent.inventory):
-        if item in items and agent.inventory[item] > 0:
-            agent.inventory[item] -= 1
-            if agent.inventory[item] <= 0:
-                del agent.inventory[item]
-            return item
+    # Eat the perishable stuff FIRST — raw food rots in the pack while smoked
+    # keeps, so burning the preserves while fresh fruit spoils is pure waste.
+    from engine.models import PRESERVED_FOOD
+    order = sorted((it for it in agent.inventory if it in items and agent.inventory[it] > 0),
+                   key=lambda it: it in PRESERVED_FOOD)   # perishable (False) first
+    for item in order:
+        agent.inventory[item] -= 1
+        if agent.inventory[item] <= 0:
+            del agent.inventory[item]
+        return item
     return None
 
 
@@ -42,8 +46,11 @@ def _exec_gather(world, agent, args) -> str:
     if not nodes:
         return "nothing to gather here"
     node = next((n for n in nodes if want in (n.kind, n.yield_item)), nodes[0])
-    # A practised forager pulls more from the same node (emergent specialisation).
-    base = 5.0 * (1.0 + skill_bonus(getattr(agent, "skills", {}).get("forager", 0.0)))
+    # A practised forager pulls more from the same node (emergent specialisation),
+    # and an assigned forager/fisher role adds an office-holder's edge on top.
+    role_dom = "fisher" if node.kind == "fishing" else "forager"
+    base = 5.0 * (1.0 + skill_bonus(getattr(agent, "skills", {}).get("forager", 0.0))
+                  + world.role_bonus(agent, role_dom))
     # Crafted tools are force-multipliers: an axe fells wood, a net hauls fish.
     if node.yield_item == "wood" and agent.inventory.get("axe", 0) > 0:
         base *= 2.0
@@ -62,6 +69,19 @@ def _exec_gather(world, agent, args) -> str:
             owner.relationships.record(agent.id, -0.15)
             owner.memory.add(world.tick, world.day, "social",
                              f"{agent.name} trespassed on my {node.kind}", 1.8)
+    # Harvesting inside someone else's staked territory is trespass — it sours
+    # relations with the owner (property becomes a thing worth setting rules over).
+    for terr in getattr(world, "territories", []):
+        if terr.get("group") or terr["owner_id"] == agent.id:
+            continue
+        if chebyshev(agent.x, agent.y, terr["x"], terr["y"]) <= terr["r"]:
+            owner = world.agent_by_id(terr["owner_id"])
+            if owner and owner.status != "dead":
+                agent.relationships.record(owner.id, -0.08)
+                owner.relationships.record(agent.id, -0.14)
+                owner.memory.add(world.tick, world.day, "social",
+                                 f"{agent.name} брал ресурсы на моей земле без спроса", 1.7)
+            break
     # A chopped tree / mined rock is gone once emptied — frees its tile.
     spent = ""
     if node.consumable and node.quantity <= 0:
@@ -84,13 +104,31 @@ def _exec_drink(world, agent, args) -> str:
     item = _consume_one(agent, WATER_ITEMS)
     src = ""
     if item is None:
-        # free water at a built water still
-        if any(s.state.get("complete") for s in world.adjacent_structures(agent, role="water")):
-            src = " from the still"
+        # Free water at a built water structure. A STILL only drips — one drink
+        # per tick, first come first served; a dug WELL waters the whole village
+        # without a queue. (Without this split the cheap still strictly dominated
+        # the well and nobody would ever dig one.)
+        served = None
+        waters = [s for s in world.adjacent_structures(agent, role="water")
+                  if s.state.get("complete")]
+        for s in waters:
+            if s.state.get("buildable_kind") == "water_still":
+                if s.state.get("serve_tick") == world.tick:
+                    continue                     # already dripped its drink this tick
+                s.state["serve_tick"] = world.tick
+                served = " from the still"
+                break
+            served = " from the well"            # well / other water source: no limit
+            break
+        if served is not None:
+            src = served
         else:
             node = next((n for n in world.adjacent_nodes(agent)
                          if n.yield_item in WATER_ITEMS and n.quantity > 0), None)
             if node is None:
+                if waters:
+                    return ("the still has already dripped its drink this hour — "
+                            "wait, or dig a well for the whole camp")
                 return "no water to drink"
             node.harvest(1.0)
             src = f" from {node.kind}"
@@ -100,19 +138,30 @@ def _exec_drink(world, agent, args) -> str:
 
 # ── rest ──────────────────────────────────────────────────────────────────────
 def _exec_rest(world, agent, args) -> str:
-    sheltered = world.usable_shelter(agent) is not None
+    shelter = world.usable_shelter(agent)
+    sheltered = shelter is not None
     warm = world.warm_spot(agent)               # by a lit fire OR in a roomy shelter
-    bonus = 1.5 if sheltered else 1.0
+    # comfort (state, default 1.0) is what separates a HOME from a hole in the
+    # rock: a damp cave (0.4) shields you but rests you poorly and lifts no
+    # spirits — so squatting caves works in a pinch, but building is how you live.
+    comfort = float(shelter.state.get("comfort", 1.0)) if sheltered else 0.0
+    bonus = 1.0 + 0.5 * comfort if sheltered else 1.0
     e = _bump(agent, "energy", _restore_amount(world, "energy") * bonus)
     # You can only warm up by a fire or under shelter — not in the open cold.
     w = _bump(agent, "warmth", _restore_amount(world, "warmth") * bonus) if (
         "warmth" in agent.physiology and warm) else 0
-    m = _bump(agent, "morale", 12 if sheltered else 4)
-    where = " in shelter" if sheltered else (" by the fire" if warm else "")
+    m = _bump(agent, "morale", 4 + 8 * comfort if sheltered else 4)
+    if sheltered and comfort < 0.7:
+        where = " in the damp cave"
+    elif sheltered:
+        where = " in shelter"
+    else:
+        where = " by the fire" if warm else ""
     extra = f", +{w:.0f} warmth" if w else ""
     extra += f", +{m:.0f} morale" if m else ""
     cold = "" if warm else " — too cold here to warm up"
-    return f"rested{where} (+{e:.0f} energy{extra}){cold}"
+    damp = " (сыро и зябко — не дом)" if sheltered and comfort < 0.7 else ""
+    return f"rested{where} (+{e:.0f} energy{extra}){cold}{damp}"
 
 
 # ── refill oxygen (Mars) ──────────────────────────────────────────────────────

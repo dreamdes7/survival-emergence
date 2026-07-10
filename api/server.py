@@ -48,6 +48,7 @@ class SimulationRunner:
         self.logger: SessionLogger | None = None
         self.recorder = None
         self.narrator = None
+        self.run_id: str | None = None
 
     def reset(self) -> None:
         if self.logger is not None:
@@ -69,8 +70,12 @@ class SimulationRunner:
         self.llm = build_llm(self.world, self.cfg)
         resolve_names(self.world, self.llm, scenario)
         place_anomaly(self.world, self.overrides.get("anomaly"))
-        self.logger = SessionLogger(self.world, self.cfg)
-        self.recorder = build_recorder(self.world, self.cfg, scenario)
+        # One canonical run_id shared by the session log and the run recorder, so a
+        # single copyable string points at everything from this run.
+        from engine.session_log import new_run_id
+        self.run_id = new_run_id(scenario, self.cfg)
+        self.logger = SessionLogger(self.world, self.cfg, run_id=self.run_id)
+        self.recorder = build_recorder(self.world, self.cfg, scenario, run_id=self.run_id)
         self.narrator = build_narrator(self.world, self.cfg, self.llm)
         self.reflect_with_llm = bool(self.cfg.get("llm", {}).get("reflect_with_llm", True))
         self.replay = [self.snapshot()]
@@ -80,15 +85,17 @@ class SimulationRunner:
         assert self.world is not None
         s = world_snapshot(self.world)
         s["sim_id"] = self.sim_id
+        s["run_id"] = self.run_id
         return s
 
     def meta(self) -> dict:
         """Lightweight summary for the sim list (no full world state)."""
         if self.world is None:
-            return {"sim_id": self.sim_id, "status": "idle"}
+            return {"sim_id": self.sim_id, "run_id": self.run_id, "status": "idle"}
         alive = len(self.world.living_agents())
         return {
             "sim_id": self.sim_id,
+            "run_id": self.run_id,
             "scenario": self.world.scenario.get("name", "?"),
             "day": self.world.day,
             "tick": self.world.tick,
@@ -164,6 +171,25 @@ class SimulationRunner:
                     print(f"[sim:{self.sim_id}] {agent.name} step failed: {exc!r}")
 
             self.world.end_tick()
+
+            # LLM outage fail-safe: if EVERY recent decide() died on an API error
+            # (dead key / no balance / 403), pause the sim loudly instead of
+            # letting silent wait/heuristic fallbacks walk the agents into their
+            # graves and poison the run's data.
+            client = getattr(self.llm, "openrouter", None)
+            if client is not None:
+                threshold = max(4, 2 * len(self.world.living_agents()))
+                if getattr(client, "consecutive_failures", 0) >= threshold:
+                    self.paused = True
+                    err = getattr(client, "last_api_error", "") or "unknown error"
+                    notice = (f"⛔ LLM API недоступен ({err[:120]}) — симуляция "
+                              f"ПРИОСТАНОВЛЕНА на тике {t}, чтобы агенты не деградировали "
+                              f"в молчаливые фоллбеки. Почини ключ/баланс и сними паузу.")
+                    print(f"[sim:{self.sim_id}] {notice}")
+                    self.world.log_event("outage", notice, 3.0, [])
+                    client.consecutive_failures = 0   # re-arm for after resume
+                    await self._broadcast()
+
             if getattr(self, "narrator", None) is not None and t > 0:
                 # Narration is a blocking LLM call — keep it off the event loop.
                 await asyncio.to_thread(self.narrator.maybe_tick, self.world)
@@ -275,6 +301,38 @@ async def provider_models(provider: str) -> dict:
     from llm.openrouter import list_models
     models = await asyncio.to_thread(list_models, provider)
     return {"provider": provider, "models": models}
+
+
+# ── Past runs on disk (browsable, copyable ids) ──────────────────────────────
+@app.get("/runs")
+async def list_runs(limit: int = 100) -> dict:
+    """Every recorded run under logs/runs/, newest first — so any past session's
+    copyable run_id (and a one-line summary) is discoverable from the UI."""
+    import json as _json
+    from pathlib import Path as _Path
+    runs_dir = _Path(__file__).resolve().parent.parent / "logs" / "runs"
+    out: list[dict] = []
+    if runs_dir.is_dir():
+        dirs = sorted((d for d in runs_dir.iterdir() if d.is_dir()),
+                      key=lambda d: d.name, reverse=True)
+        for d in dirs[:limit]:
+            entry = {"run_id": d.name}
+            meta_f = d / "meta.json"
+            if meta_f.is_file():
+                try:
+                    m = _json.loads(meta_f.read_text(encoding="utf-8"))
+                    entry.update({
+                        "started": m.get("started"), "seed": m.get("seed"),
+                        "scenario": m.get("scenario"), "models": m.get("models"),
+                        "agents": len(m.get("agents", [])),
+                        "days": (m.get("config", {}).get("sim", {}) or {}).get("max_days"),
+                        "ended": m.get("ended"), "last_tick": m.get("last_tick"),
+                        "survivors": m.get("survivors"),
+                    })
+                except Exception:
+                    pass
+            out.append(entry)
+    return {"runs": out}
 
 
 # ── Multi-sim management ──────────────────────────────────────────────────────

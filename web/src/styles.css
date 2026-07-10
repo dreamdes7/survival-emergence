@@ -263,6 +263,19 @@ body {
   color: var(--terra);
 }
 
+/* Click-to-copy run-id pill */
+.copy-pill { cursor: pointer; transition: color 0.15s; }
+.copy-pill:hover { color: var(--terra); }
+.copy-pill strong {
+  font-size: 11px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  letter-spacing: 0.02em;
+}
+.copy-pill .copy-ic { font-size: 11px; opacity: 0.5; margin-left: 2px; }
+.copy-pill:hover .copy-ic { opacity: 0.9; }
+.copy-pill.copied strong { color: #6fbf73; }
+.copy-pill.copied .copy-ic::after { content: " ✓ скопировано"; color: #6fbf73; opacity: 1; }
+
 /* ── Sim tabs (inside the left dock head) ───────────────────────────────────── */
 .simbar {
   display: flex;

@@ -11,51 +11,59 @@
 
 import { Container, Graphics, Texture, TilingSprite } from "pixi.js";
 import { TILE_SIZE } from "./constants";
-import { agentHue, hslToRgbInt } from "./utils";
 import type { ResourceState, StructureState, WorldState } from "./types";
 
 // ── palette ───────────────────────────────────────────────────────────────────
+// The Lighthouse / woodcut noir: a six-step monochrome ramp (ink -> charcoal ->
+// two greys -> bone -> white). White is reserved for MEANING — flame, the
+// lighthouse lamp, foam. One accent (blood red) exists only for the uncanny.
 export const V = {
-  seaDeep: 0x2e6d84,
-  seaShallow: 0x5fb7c2,
-  seaFoam: 0xe2f5f0,
-  slabTop: 0xa8845a,        // island plate (diorama side)
-  slabDark: 0x7c5f3e,
-  sand: 0xf2e3b0,
-  grass: 0xa2d573,
-  grassLight: 0xb8e488,
-  grassDark: 0x8cc161,
-  jungle: 0x71b25c,
-  rock: 0xb5ada0,
-  trunk: 0x8a6239,
-  trunkDark: 0x6d4c2c,
-  palmLeaf: 0x55984f,
-  palmLeafDark: 0x417c40,
-  bush: 0x6ca055,
-  bushDark: 0x558843,
-  stone: 0xb0aba1,
-  stoneDark: 0x8b867c,
-  flint: 0xd9a441,
-  shell: 0xf2e8d8,
-  poolWater: 0x53aabb,
-  poolRim: 0x8a7a55,
-  shadow: 0x1c2e1a,
-  wood: 0xa07848,
-  woodDark: 0x7c5a34,
-  canvasCloth: 0xd9c69a,
-  canvasDark: 0xbfa878,
-  flame: 0xf2913d,
-  flameCore: 0xffd166,
-  metal: 0x9aa2ab,
-  metalDark: 0x6e767f,
-  stoneWall: 0xb7b0a4,
+  seaDeep: 0x0c1011,
+  seaShallow: 0x232a2b,
+  seaFoam: 0xe9e4d5,
+  slabTop: 0x4a4e4a,        // cliff wall, lit upper band
+  slabDark: 0x1c1f1e,       // cliff wall, waterline dark
+  sand: 0xc4bdac,
+  grass: 0x696d63,
+  grassLight: 0x7a7e73,
+  grassDark: 0x51554d,
+  jungle: 0x3a3f39,
+  rock: 0x8d8a82,
+  trunk: 0x2b2c2b,
+  trunkDark: 0x181919,
+  palmLeaf: 0x20241f,
+  palmLeafDark: 0x131614,
+  bush: 0x353a35,
+  bushDark: 0x1f2220,
+  stone: 0x99968d,
+  stoneDark: 0x5f5d58,
+  flint: 0xc5c0b5,
+  shell: 0xd6d0c3,
+  poolWater: 0x272e2f,
+  poolRim: 0x615d55,
+  shadow: 0x050606,
+  wood: 0x565450,
+  woodDark: 0x2b2b29,
+  canvasCloth: 0xc2bcae,
+  canvasDark: 0x8a857a,
+  flame: 0xe6dfcd,
+  flameCore: 0xfaf6ea,
+  metal: 0x8a8d8b,
+  metalDark: 0x393d3d,
+  stoneWall: 0xa5a298,
+  blood: 0x9d221c,          // the ONLY colour in the world — omen red
+  ink: 0x121414,
 } as const;
 
 // Sun from the NW: light rims up-left, shadows fall down-right.
 const RIM_L: [number, number] = [-1.6, -2.2];
 const RIM_D: [number, number] = [2.2, 3.0];
 const SHADOW_DX = 3.5;
-const SLAB_DEPTH = TILE_SIZE * 0.55;
+const SLAB_DEPTH = TILE_SIZE * 0.85;   // tall cliff — the island is a SOLID on the sea
+const JUNGLE_LIFT = TILE_SIZE * 0.30;  // inner terraces get real extrusion too
+const ROCK_LIFT = TILE_SIZE * 0.52;
+// Engraving stroke direction (one global hatch angle, like a woodcut).
+const HATCH_DX = 0.78, HATCH_DY = 0.63;
 
 function shade(color: number, f: number): number {
   // f > 0 lighten toward white, f < 0 darken toward black
@@ -153,6 +161,24 @@ export function chaikin(loop: Pt[], iterations = 3): Pt[] {
     pts = out;
   }
   return pts;
+}
+
+/** Woodcut contour: decimate a smooth loop into long straight chords with hard
+ * corners. Chord length varies deterministically so the coastline reads as
+ * hand-cut facets (the asset pack's rocks), not as a rounded blob. */
+export function facetLoop(loop: Pt[], step = 1.0, salt = 0): Pt[] {
+  if (loop.length < 8) return loop;
+  const out: Pt[] = [loop[0]];
+  let acc = 0;
+  let prev = loop[0];
+  for (let i = 1; i < loop.length; i += 1) {
+    const p = loop[i];
+    acc += Math.hypot(p[0] - prev[0], p[1] - prev[1]);
+    prev = p;
+    const need = step * (0.7 + hash01(i, salt, 41) * 0.75);
+    if (acc >= need) { out.push(p); acc = 0; }
+  }
+  return out.length >= 5 ? out : loop;
 }
 
 function drawLoops(g: Graphics, loops: Pt[][], scale: number, dx = 0, dy = 0): Graphics {
@@ -282,74 +308,180 @@ function noiseTexture(): Texture {
 let cachedKey = "";
 let cachedTerrain: Container | null = null;
 
+/** Vertical facet ticks along the south-facing (screen-visible) run of a wall:
+ * short strokes from the top contour down the extrusion — cut-stone cracks. */
+function wallTicks(g: Graphics, loops: Pt[][], T: number, depth: number,
+                   inside: (x: number, y: number) => boolean,
+                   color: number, alpha: number, spacing = 8): Graphics {
+  for (const loop of loops) {
+    for (let i = 0; i < loop.length; i += 1) {
+      const a = loop[i], b = loop[(i + 1) % loop.length];
+      const dx = b[0] - a[0], dy = b[1] - a[1];
+      const len = Math.hypot(dx, dy) * T;
+      if (len < 3) continue;
+      // south edge = water/lower layer sits just below the segment midpoint
+      const mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      if (inside(Math.floor(mx), Math.floor(my + 0.45))) continue;
+      if (!inside(Math.floor(mx), Math.floor(my - 0.45))) continue;
+      const ticks = Math.max(1, Math.floor(len / spacing));
+      for (let k = 1; k <= ticks; k += 1) {
+        const t = (k - 0.5) / ticks;
+        const px = (a[0] + dx * t) * T, py = (a[1] + dy * t) * T;
+        const d = depth * (0.55 + hash01(Math.round(px), Math.round(py), 77) * 0.45);
+        g.moveTo(px, py + 1).lineTo(px + (hash01(Math.round(px), k, 78) - 0.5) * 2, py + d);
+      }
+    }
+  }
+  return g.stroke({ width: 1.1, color, alpha });
+}
+
+/** One engraved hatch stroke (global direction — the whole print shares it). */
+function hatchStroke(g: Graphics, px: number, py: number, len: number): Graphics {
+  return g.moveTo(px, py).lineTo(px + HATCH_DX * len, py + HATCH_DY * len);
+}
+
 export function buildVectorTerrain(state: WorldState): Container {
   const mapKey = `${state.scenario}:${state.map.size}`;
   if (cachedTerrain && cachedKey === mapKey) return cachedTerrain;
   cachedTerrain?.destroy({ children: true });
 
-  const { n, grid, land, grassy, jungle, rock, patch, dilated } = gridMasks(state);
+  const { n, land, grassy, jungle, rock, dilated } = gridMasks(state);
   const T = TILE_SIZE;
   const c = new Container();
 
-  const landLoops = maskLoops(n, land).map((l) => chaikin(l, 3));
-  const grassLoops = maskLoops(n, grassy).map((l) => chaikin(l, 3));
-  const jungleLoops = maskLoops(n, jungle).map((l) => chaikin(l, 3));
-  const rockLoops = maskLoops(n, rock).map((l) => chaikin(l, 3));
-  const lightPatch = maskLoops(n, patch(11, 0.30)).map((l) => chaikin(l, 2));
-  const darkPatch = maskLoops(n, patch(23, 0.24)).map((l) => chaikin(l, 2));
+  // Woodcut contours: smooth once to kill the marching-squares staircase, then
+  // decimate into hard-cornered chords. The island is CUT, not melted.
+  const landLoops = maskLoops(n, land).map((l) => facetLoop(chaikin(l, 1), 0.95, 3));
+  const grassLoops = maskLoops(n, grassy).map((l) => facetLoop(chaikin(l, 1), 0.85, 5));
+  const jungleLoops = maskLoops(n, jungle).map((l) => facetLoop(chaikin(l, 1), 0.8, 7));
+  const rockLoops = maskLoops(n, rock).map((l) => facetLoop(chaikin(l, 1), 1.15, 9));
 
-  // Shallow-water halo: four rings for a soft depth falloff (outermost is a
-  // faint glow that lifts the island off the dark sea).
-  for (const [r, a] of [[7, 0.08], [4, 0.18], [2, 0.36], [1, 0.52]] as const) {
+  // ── the sea: engraved wave contours ringing the waterline (old maps) ────────
+  const waves = new Graphics();
+  for (const [r, a] of [[2, 0.22], [4, 0.15], [6, 0.10], [8, 0.065]] as const) {
     const loops = maskLoops(n, dilated(r)).map((l) => chaikin(l, 2));
-    c.addChild(drawLoops(new Graphics(), loops, T).fill({ color: V.seaShallow, alpha: a }));
+    drawLoops(waves, loops, T, 0, SLAB_DEPTH);
+    waves.stroke({ width: 1.1, color: V.seaFoam, alpha: a });
   }
+  // faint shelf glow so the mass doesn't float in void
+  c.addChild(drawLoops(new Graphics(), maskLoops(n, dilated(3)).map((l) => chaikin(l, 2)),
+    T, 0, SLAB_DEPTH).fill({ color: V.seaShallow, alpha: 0.35 }));
+  c.addChild(waves);
+  // scattered short wave dashes further out — the etched sea texture
+  const seaDash = new Graphics();
+  for (let y = -6; y < n + 6; y += 1) {
+    for (let x = -6; x < n + 6; x += 1) {
+      if (land(x, y)) continue;
+      const r = hash01(x + 64, y + 64, 51);
+      if (r > 0.06) continue;
+      const px = (x + hash01(x, y, 52)) * T, py = (y + hash01(x, y, 53)) * T + SLAB_DEPTH;
+      seaDash.moveTo(px, py).lineTo(px + 5 + r * 60, py);
+    }
+  }
+  c.addChild(seaDash.stroke({ width: 1, color: V.seaFoam, alpha: 0.16 }));
 
-  // Diorama: drop shadow on the water, then the slab, then the lit land layers.
-  c.addChild(drawLoops(new Graphics(), landLoops, T, 4, SLAB_DEPTH + 6)
-    .fill({ color: 0x0e222b, alpha: 0.35 }));
-  const slab = drawLoops(new Graphics(), landLoops, T, 0, SLAB_DEPTH).fill(V.slabTop);
-  drawLoops(slab, landLoops, T, 0, SLAB_DEPTH * 0.6).fill(V.slabDark);
+  // ── the island as a solid: dark hull, lit upper wall, facet cracks ──────────
+  c.addChild(drawLoops(new Graphics(), landLoops, T, 5, SLAB_DEPTH + 8)
+    .fill({ color: 0x000203, alpha: 0.45 }));
+  const slab = drawLoops(new Graphics(), landLoops, T, 0, SLAB_DEPTH).fill(V.slabDark);
+  drawLoops(slab, landLoops, T, 0, SLAB_DEPTH * 0.58).fill(V.slabTop);
   c.addChild(slab);
+  c.addChild(wallTicks(new Graphics(), landLoops, T, SLAB_DEPTH, land, V.ink, 0.55));
 
-  c.addChild(shadedLayer(landLoops, V.sand, T, 0.10));
-  c.addChild(shadedLayer(grassLoops, V.grass, T));
-  // Tonal variation on the meadow (no rims — just gentle colour drift).
-  c.addChild(drawLoops(new Graphics(), lightPatch, T).fill({ color: V.grassLight, alpha: 0.6 }));
-  c.addChild(drawLoops(new Graphics(), darkPatch, T).fill({ color: V.grassDark, alpha: 0.55 }));
+  // plate top: bone beach ring, meadow, then the raised terraces
+  c.addChild(shadedLayer(landLoops, V.sand, T, 0.08));
+  // thin ink line where the plate top breaks into the cliff — the cut edge
+  c.addChild(drawLoops(new Graphics(), landLoops, T)
+    .stroke({ width: 1.2, color: V.ink, alpha: 0.5 }));
+  c.addChild(shadedLayer(grassLoops, V.grass, T, 0.10));
+
+  // jungle terrace: real extrusion (wall + cracks), not a colour patch
+  c.addChild(drawLoops(new Graphics(), jungleLoops, T, 0, JUNGLE_LIFT)
+    .fill(shade(V.jungle, -0.45)));
+  c.addChild(wallTicks(new Graphics(), jungleLoops, T, JUNGLE_LIFT, jungle, V.ink, 0.5));
   c.addChild(shadedLayer(jungleLoops, V.jungle, T, 0.10));
 
-  // Rock plateau as a raised terrace: its own shade under the south edge.
-  c.addChild(drawLoops(new Graphics(), rockLoops, T, 0, 4)
-    .fill({ color: 0x5f594e, alpha: 0.5 }));
-  c.addChild(shadedLayer(rockLoops, V.rock, T, 0.16));
+  // rock plateau: the tallest terrace
+  c.addChild(drawLoops(new Graphics(), rockLoops, T, 0, ROCK_LIFT)
+    .fill(shade(V.rock, -0.62)));
+  c.addChild(wallTicks(new Graphics(), rockLoops, T, ROCK_LIFT, rock, V.ink, 0.55));
+  c.addChild(shadedLayer(rockLoops, V.rock, T, 0.14));
 
-  // Waterline foam.
-  c.addChild(drawLoops(new Graphics(), landLoops, T)
-    .stroke({ width: 2, color: V.seaFoam, alpha: 0.85 }));
+  // ── engraved shading: hatch bands under terrace walls + sparse grain ────────
+  const hatch = new Graphics();
+  const hatchDark = new Graphics();
+  for (let y = 0; y < n; y += 1) {
+    for (let x = 0; x < n; x += 1) {
+      if (!land(x, y)) continue;
+      const upperN = jungle(x, y - 1) || rock(x, y - 1);
+      if (grassy(x, y) && !jungle(x, y) && !rock(x, y)) {
+        if (upperN) {
+          // in the cast shade of the terrace above: dense hatch band
+          for (let k = 0; k < 5; k += 1) {
+            const px = (x + 0.05 + k * 0.2) * T, py = (y + 0.06 + hash01(x + k, y, 61) * 0.3) * T;
+            hatchStroke(hatchDark, px, py, 8);
+          }
+        } else if (hash01(x, y, 62) < 0.17) {
+          // open meadow: sparse tooth so flats aren't dead plastic
+          const px = (x + hash01(x, y, 63) * 0.7) * T, py = (y + hash01(x, y, 64) * 0.7) * T;
+          hatchStroke(hatch, px, py, 7);
+          if (hash01(x, y, 65) < 0.45) hatchStroke(hatch, px + 3.5, py + 4.5, 5.5);
+        }
+      } else if (jungle(x, y) && !rock(x, y) && hash01(x, y, 66) < 0.14) {
+        const px = (x + hash01(x, y, 67) * 0.7) * T, py = (y + hash01(x, y, 68) * 0.7) * T;
+        hatchStroke(hatchDark, px, py, 6);
+      } else if (rock(x, y) && hash01(x, y, 69) < 0.12) {
+        const px = (x + hash01(x, y, 70) * 0.7) * T, py = (y + hash01(x, y, 71) * 0.7) * T;
+        hatchStroke(hatch, px, py, 6);
+      }
+    }
+  }
+  c.addChild(hatch.stroke({ width: 1, color: V.grassDark, alpha: 0.5 }));
+  c.addChild(hatchDark.stroke({ width: 1.1, color: V.ink, alpha: 0.5 }));
 
-  // Scatter detail: grass tufts, pebbles, flowers — hashed, sparse, cheap.
+  // ── waterline foam: bright break where the hull meets the sea ───────────────
+  c.addChild(drawLoops(new Graphics(), landLoops, T, 0, SLAB_DEPTH)
+    .stroke({ width: 2.6, color: V.seaFoam, alpha: 0.95 }));
+
+  // ── jungle canopy: clustered crowns so the terrace reads as FOREST ──────────
+  // (a dark ground patch is a stain; a mass of overlapping crowns is a wood)
+  const canopy = new Graphics();
+  for (let y = 0; y < n; y += 1) {
+    for (let x = 0; x < n; x += 1) {
+      if (!jungle(x, y)) continue;
+      const r = hash01(x, y, 81);
+      if (r > 0.55) continue;
+      const cxp = (x + 0.15 + hash01(x, y, 82) * 0.7) * T;
+      const cyp = (y + 0.15 + hash01(x, y, 83) * 0.7) * T;
+      const s = 3.6 + hash01(x, y, 84) * 3.4;
+      // two-tone crown cluster: dark base, slightly lit crown toward the NW sun
+      canopy.circle(cxp + s * 0.5, cyp + s * 0.3, s).fill(V.palmLeafDark);
+      canopy.circle(cxp - s * 0.4, cyp + s * 0.15, s * 0.85).fill(V.palmLeafDark);
+      canopy.circle(cxp, cyp - s * 0.35, s * 0.9).fill(V.bush);
+      canopy.circle(cxp - s * 0.35, cyp - s * 0.55, s * 0.4)
+        .fill({ color: V.grassLight, alpha: 0.35 });
+    }
+  }
+  c.addChild(canopy);
+
+  // Scatter detail: tufts and pebbles only — no flowers on this island.
   const scatter = new Graphics();
   for (let y = 0; y < n; y += 1) {
     for (let x = 0; x < n; x += 1) {
       if (!grassy(x, y) || rock(x, y)) continue;
       const r = hash01(x, y, 7);
-      if (r > 0.16) continue;
+      if (r > 0.13) continue;
       const px = (x + 0.2 + hash01(x, y, 8) * 0.6) * T;
       const py = (y + 0.2 + hash01(x, y, 9) * 0.6) * T;
-      if (r < 0.09) {
-        // grass tuft: three short blades
-        const col = jungle(x, y) ? shade(V.jungle, -0.18) : V.grassDark;
+      if (r < 0.08) {
+        const col = jungle(x, y) ? V.ink : V.grassDark;
         for (let b = -1; b <= 1; b += 1) {
           scatter.moveTo(px + b * 2, py)
             .lineTo(px + b * 3.2, py - 4.5 - (b === 0 ? 1.5 : 0));
         }
         scatter.stroke({ width: 1.2, color: col, alpha: 0.9 });
-      } else if (r < 0.13) {
-        scatter.circle(px, py, 1.6).fill({ color: V.stoneDark, alpha: 0.7 });
-      } else if (!jungle(x, y)) {
-        scatter.circle(px, py, 1.4).fill(hash01(x, y, 10) < 0.5 ? 0xf2ead2 : 0xe8a8b8);
-        scatter.circle(px, py, 0.6).fill(0xd9b13f);
+      } else {
+        scatter.circle(px, py, 1.5).fill({ color: V.stoneDark, alpha: 0.7 });
       }
     }
   }
@@ -408,13 +540,13 @@ function drawPalm(id: string): Graphics {
     const t = i / 4;
     g.circle(lean * 0.35 * t * 2 + (1 - t) * 0, -h * t, 1.1).fill({ color: V.trunkDark, alpha: 0.6 });
   }
-  // crown: filled fronds, back row dark, front row light
+  // crown: filled fronds, back row dark, front row light — full, not spidery
   const cx = lean, cy = -h;
-  for (let i = 0; i < 4; i += 1) {
-    frond(g, cx, cy, (i / 4) * Math.PI * 2 + 0.5 + r, TILE_SIZE * (0.72 + r * 0.12), 5.2, V.palmLeafDark);
+  for (let i = 0; i < 5; i += 1) {
+    frond(g, cx, cy, (i / 5) * Math.PI * 2 + 0.5 + r, TILE_SIZE * (0.74 + r * 0.12), 6.4, V.palmLeafDark);
   }
-  for (let i = 0; i < 4; i += 1) {
-    frond(g, cx, cy, (i / 4) * Math.PI * 2 + 1.28 + r, TILE_SIZE * (0.66 + r * 0.1), 4.6, V.palmLeaf);
+  for (let i = 0; i < 5; i += 1) {
+    frond(g, cx, cy, (i / 5) * Math.PI * 2 + 1.18 + r, TILE_SIZE * (0.66 + r * 0.1), 5.6, V.palmLeaf);
   }
   g.circle(cx, cy, 2.6).fill(V.trunkDark);
   g.circle(cx - 3.4, cy + 1.6, 1.9).fill(V.trunkDark);      // coconuts
@@ -458,7 +590,7 @@ function drawBush(id: string): Graphics {
 }
 
 function drawOreRock(id: string): Graphics {
-  const g = drawRock(id, V.stoneDark, 0x655f56);
+  const g = drawRock(id, V.stoneDark, 0x454540);
   const r = hashStr(id + "ore");
   for (let i = 0; i < 3; i += 1) {
     g.circle((r - 0.5) * 8 + i * 5 - 5, -6 - i * 3, 1.8).fill(V.flint);
@@ -486,7 +618,7 @@ function drawPool(id: string, w: number): Graphics {
   g.ellipse(0, cy, rx, ry).fill(V.poolWater);
   g.ellipse(-rx * 0.26, cy - ry * 0.28, rx * 0.42, ry * 0.28)
     .fill({ color: 0xffffff, alpha: 0.35 });
-  g.ellipse(0, cy, rx, ry).stroke({ width: 1.2, color: 0x2a5866, alpha: 0.5 });
+  g.ellipse(0, cy, rx, ry).stroke({ width: 1.2, color: 0x202526, alpha: 0.55 });
   return g;
 }
 
@@ -524,7 +656,7 @@ function drawCampfire(lit: boolean, S: number): Graphics {
   }
   logs(g, S * 0.5);
   if (lit) flame(g, 0, -5, S * 0.28);
-  else g.circle(0, -6, 2.2).fill(0x555048);
+  else g.circle(0, -6, 2.2).fill(0x373632);
   return g;
 }
 
@@ -564,7 +696,7 @@ function drawWell(S: number): Graphics {
   dropShadow(g, S * 0.4, -2);
   g.roundRect(-S * 0.3, -S * 0.26, S * 0.6, S * 0.26, 3).fill(V.stoneWall)
     .stroke({ width: 1.2, color: V.stoneDark });
-  g.ellipse(0, -S * 0.26, S * 0.3, S * 0.1).fill(0x27404a);
+  g.ellipse(0, -S * 0.26, S * 0.3, S * 0.1).fill(0x262a2a);
   g.moveTo(-S * 0.26, -S * 0.26).lineTo(-S * 0.2, -S * 0.6).lineTo(S * 0.2, -S * 0.6)
     .lineTo(S * 0.26, -S * 0.26).stroke({ width: 1.6, color: V.woodDark });
   g.poly([-S * 0.3, -S * 0.55, S * 0.3, -S * 0.55, 0, -S * 0.78]).fill(V.wood);
@@ -608,7 +740,7 @@ function drawSmokehouse(S: number): Graphics {
 
 function drawGarden(S: number): Graphics {
   const g = new Graphics();
-  g.roundRect(-S * 0.42, -S * 0.3, S * 0.84, S * 0.3, 3).fill(0x8a6a45);
+  g.roundRect(-S * 0.42, -S * 0.3, S * 0.84, S * 0.3, 3).fill(0x5d5a52);
   for (let r = 0; r < 2; r += 1)
     for (let i = 0; i < 4; i += 1) {
       const x = -S * 0.3 + i * S * 0.2, y = -S * 0.22 + r * S * 0.12;
@@ -646,7 +778,7 @@ function drawCave(S: number): Graphics {
   const pts = rockPoly("cave" + S, S * 0.5);
   g.poly(pts.map((v, i) => (i % 2 ? v * 1.1 - S * 0.1 : v * 1.15))).fill(V.stoneDark);
   g.poly(pts.map((v, i) => (i % 2 ? v * 0.9 - S * 0.16 : v * 0.95))).fill(V.stone);
-  g.moveTo(-S * 0.2, 0).quadraticCurveTo(0, -S * 0.42, S * 0.2, 0).closePath().fill(0x241d16);
+  g.moveTo(-S * 0.2, 0).quadraticCurveTo(0, -S * 0.42, S * 0.2, 0).closePath().fill(0x151515);
   return g;
 }
 
@@ -667,10 +799,10 @@ function drawLighthouse(active: boolean, S: number): Graphics {
     const t0 = 0.14 + i * 0.24, t1 = t0 + 0.12;
     const w0 = 0.22 - 0.09 * t0, w1 = 0.22 - 0.09 * t1;
     g.poly([-S * w0, -S * 0.85 * t0, S * w0, -S * 0.85 * t0,
-            S * w1, -S * 0.85 * t1, -S * w1, -S * 0.85 * t1]).fill(0xb8574e);
+            S * w1, -S * 0.85 * t1, -S * w1, -S * 0.85 * t1]).fill(0x3f4241);
   }
   g.roundRect(-S * 0.15, -S * 1.02, S * 0.3, S * 0.18, 2)
-    .fill(active ? V.flameCore : 0x3d4650);
+    .fill(active ? V.flameCore : 0x353839);
   g.poly([-S * 0.18, -S * 1.02, S * 0.18, -S * 1.02, 0, -S * 1.16]).fill(V.metalDark);
   return g;
 }
@@ -684,7 +816,7 @@ function drawRadioTower(S: number): Graphics {
     const t = i / 5, w = S * 0.26 * (1 - t);
     g.moveTo(-w, -S * 1.05 * t).lineTo(w, -S * 1.05 * t).stroke({ width: 1.2, color: V.metal });
   }
-  g.circle(0, -S * 1.08, 2.2).fill(0xc0574f);
+  g.circle(0, -S * 1.08, 2.2).fill(0xe7e0d0);
   return g;
 }
 
@@ -696,7 +828,7 @@ function drawWreckPlane(S: number): Graphics {
   g.poly([-S * 0.1, -S * 0.2, -S * 0.42, -S * 0.5, -S * 0.28, -S * 0.14]).fill(V.metalDark);  // bent wing
   g.poly([S * 0.28, -S * 0.2, S * 0.5, -S * 0.34, S * 0.34, -S * 0.1]).fill(V.metalDark);     // tail
   for (let i = 0; i < 4; i += 1) {
-    g.circle(-S * 0.28 + i * S * 0.13, -S * 0.18, 1.4).fill(0x37474f);   // windows
+    g.circle(-S * 0.28 + i * S * 0.13, -S * 0.18, 1.4).fill(0x242727);   // windows
   }
   g.circle(-S * 0.3, -S * 0.42, 3).fill({ color: 0x999999, alpha: 0.4 });  // smoke wisp
   return g;
@@ -705,9 +837,9 @@ function drawWreckPlane(S: number): Graphics {
 function drawMonolith(S: number): Graphics {
   const g = new Graphics();
   dropShadow(g, S * 0.32, -2);
-  g.poly([-S * 0.14, 0, S * 0.14, 0, S * 0.09, -S * 0.85, -S * 0.11, -S * 0.8]).fill(0x3a3f4a)
-    .stroke({ width: 1.2, color: 0x262a33 });
-  g.moveTo(-S * 0.04, -S * 0.2).lineTo(0, -S * 0.6).stroke({ width: 1, color: 0x7f8fb0, alpha: 0.8 });
+  g.poly([-S * 0.14, 0, S * 0.14, 0, S * 0.09, -S * 0.85, -S * 0.11, -S * 0.8]).fill(0x303231)
+    .stroke({ width: 1.2, color: 0x1d1f1f });
+  g.moveTo(-S * 0.04, -S * 0.2).lineTo(0, -S * 0.6).stroke({ width: 1, color: 0xc9c5b9, alpha: 0.8 });
   return g;
 }
 
@@ -716,18 +848,18 @@ function drawIdol(S: number): Graphics {
   dropShadow(g, S * 0.3, -2);
   g.roundRect(-S * 0.16, -S * 0.6, S * 0.32, S * 0.6, 3).fill(V.woodDark);
   g.circle(0, -S * 0.68, S * 0.16).fill(V.wood);
-  g.circle(-S * 0.06, -S * 0.7, 1.6).fill(0x241d16);
-  g.circle(S * 0.06, -S * 0.7, 1.6).fill(0x241d16);
-  g.moveTo(-S * 0.1, -S * 0.6).lineTo(S * 0.1, -S * 0.6).stroke({ width: 1.2, color: 0x241d16 });
+  g.circle(-S * 0.06, -S * 0.7, 1.6).fill(V.blood);   // the omen red
+  g.circle(S * 0.06, -S * 0.7, 1.6).fill(V.blood);
+  g.moveTo(-S * 0.1, -S * 0.6).lineTo(S * 0.1, -S * 0.6).stroke({ width: 1.2, color: 0x151515 });
   return g;
 }
 
 function drawHatch(S: number): Graphics {
   const g = new Graphics();
   g.ellipse(0, -S * 0.12, S * 0.34, S * 0.2).fill(V.metalDark)
-    .stroke({ width: 1.6, color: 0x37474f });
+    .stroke({ width: 1.6, color: 0x303333 });
   g.ellipse(0, -S * 0.14, S * 0.24, S * 0.13).fill(V.metal);
-  g.circle(S * 0.12, -S * 0.14, 2).fill(0xc0574f);                  // the button
+  g.circle(S * 0.12, -S * 0.14, 2).fill(0xd8d2c4);                  // the button
   return g;
 }
 
@@ -735,17 +867,17 @@ function drawWhisperzone(S: number): Graphics {
   const g = new Graphics();
   for (let i = 3; i >= 1; i -= 1) {
     g.ellipse(0, -S * 0.14, S * 0.16 * i, S * 0.09 * i)
-      .stroke({ width: 1.4, color: 0x9a7fb8, alpha: 0.5 - i * 0.1 });
+      .stroke({ width: 1.4, color: V.blood, alpha: 0.65 - i * 0.12 });
   }
-  g.circle(0, -S * 0.14, 2.4).fill({ color: 0x9a7fb8, alpha: 0.8 });
+  g.circle(0, -S * 0.14, 2.4).fill({ color: V.blood, alpha: 0.9 });
   return g;
 }
 
 function drawRelic(S: number): Graphics {
   const g = new Graphics();
   dropShadow(g, S * 0.24, -1);
-  g.poly([0, -S * 0.5, S * 0.14, -S * 0.3, 0, -S * 0.06, -S * 0.14, -S * 0.3]).fill(0x67e0c4)
-    .stroke({ width: 1.2, color: 0x2f8f7a });
+  g.poly([0, -S * 0.5, S * 0.14, -S * 0.3, 0, -S * 0.06, -S * 0.14, -S * 0.3]).fill(0xd8d2c4)
+    .stroke({ width: 1.2, color: 0x77736a });
   g.poly([0, -S * 0.42, S * 0.07, -S * 0.3, 0, -S * 0.16, -S * 0.07, -S * 0.3])
     .fill({ color: 0xffffff, alpha: 0.4 });
   return g;
@@ -804,10 +936,10 @@ export function buildVectorStructure(s: StructureState, pw: number, ph: number):
 export type Meeple = Graphics;
 
 export function buildMeeple(agentId: string, gender?: string): Meeple {
-  const hue = agentHue(agentId);
-  const body = hslToRgbInt(hue, 58, 55);
-  const bodyDark = hslToRgbInt(hue, 58, 40);
-  const head = hslToRgbInt(hue, 32, 80);
+  const r = hashStr(agentId);
+  const body = r < 0.33 ? 0xd0cabc : r < 0.66 ? 0x8f8b82 : 0x4d4e4b;
+  const bodyDark = r < 0.5 ? 0x343533 : 0x1e2020;
+  const head = 0xc7c0b2;
   const g = new Graphics();
   const W = 10.5, H = 14.5;
   g.ellipse(SHADOW_DX * 0.6, 0.6, 6.2, 2.4).fill({ color: V.shadow, alpha: 0.28 });
@@ -828,11 +960,71 @@ export function makeCloudShadowCanvas(): HTMLCanvasElement {
   const ctx = cv.getContext("2d")!;
   const blob = (x: number, y: number, r: number) => {
     const grad = ctx.createRadialGradient(x, y, 0, x, y, r);
-    grad.addColorStop(0, "rgba(14,30,24,0.42)");
-    grad.addColorStop(1, "rgba(14,30,24,0)");
+    grad.addColorStop(0, "rgba(8,9,9,0.42)");
+    grad.addColorStop(1, "rgba(8,9,9,0)");
     ctx.fillStyle = grad;
     ctx.fillRect(x - r, y - r, r * 2, r * 2);
   };
   blob(62, 52, 48); blob(104, 42, 56); blob(148, 54, 42);
+  return cv;
+}
+
+// ── The Lighthouse atmosphere: fog banks, film grain, vignette ────────────────
+
+/** A long soft fog bank (screen-blended sprite drifting over the island). */
+export function makeFogCanvas(): HTMLCanvasElement {
+  const w = 360, h = 130;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d")!;
+  const blob = (x: number, y: number, rx: number, ry: number, a: number) => {
+    const grad = ctx.createRadialGradient(x, y, 0, x, y, rx);
+    grad.addColorStop(0, `rgba(226,224,214,${a})`);
+    grad.addColorStop(1, "rgba(226,224,214,0)");
+    ctx.save();
+    ctx.translate(x, y); ctx.scale(1, ry / rx); ctx.translate(-x, -y);
+    ctx.fillStyle = grad;
+    ctx.fillRect(x - rx, y - rx, rx * 2, rx * 2);
+    ctx.restore();
+  };
+  blob(90, 70, 85, 34, 0.5); blob(170, 55, 110, 40, 0.45);
+  blob(255, 72, 90, 32, 0.5); blob(310, 60, 60, 26, 0.35);
+  return cv;
+}
+
+/** Proper 35mm-ish grain — noticeably alive, unlike the terrain tooth. */
+export function makeGrainCanvas(): HTMLCanvasElement {
+  const size = 192;
+  const cv = document.createElement("canvas");
+  cv.width = cv.height = size;
+  const ctx = cv.getContext("2d")!;
+  const img = ctx.createImageData(size, size);
+  for (let y = 0; y < size; y += 1) {
+    for (let x = 0; x < size; x += 1) {
+      let h = (x * 374761393 + y * 668265263 + 9176) >>> 0;
+      h = ((h ^ (h >>> 13)) * 1274126177) >>> 0;
+      const v = 228 + (h >>> 24) % 28;
+      const i = (y * size + x) * 4;
+      img.data[i] = v; img.data[i + 1] = v; img.data[i + 2] = v;
+      img.data[i + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+  return cv;
+}
+
+/** Radial vignette — dark corners closing in on the frame. */
+export function makeVignetteCanvas(): HTMLCanvasElement {
+  const w = 640, h = 420;
+  const cv = document.createElement("canvas");
+  cv.width = w; cv.height = h;
+  const ctx = cv.getContext("2d")!;
+  const grad = ctx.createRadialGradient(w / 2, h / 2, Math.min(w, h) * 0.34,
+                                        w / 2, h / 2, Math.hypot(w, h) * 0.56);
+  grad.addColorStop(0, "rgba(255,255,255,1)");
+  grad.addColorStop(0.72, "rgba(196,197,192,1)");
+  grad.addColorStop(1, "rgba(108,110,106,1)");
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, w, h);
   return cv;
 }

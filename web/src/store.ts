@@ -25,6 +25,9 @@ export const store = {
   // Render style: "3d" = low-poly three.js diorama, "vector" = procedural 2D
   // (both asset-free, island only), "tiles" = the original tileset renderer.
   renderStyle: ((): "tiles" | "vector" | "3d" => {
+    // ?render=vector|3d|tiles overrides the saved choice (shareable/testable links)
+    const fromUrl = new URLSearchParams(window.location.search).get("render");
+    if (fromUrl === "tiles" || fromUrl === "vector" || fromUrl === "3d") return fromUrl;
     const saved = localStorage.getItem("renderStyle");
     return saved === "tiles" || saved === "vector" || saved === "3d" ? saved : "3d";
   })(),

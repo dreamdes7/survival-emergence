@@ -129,6 +129,13 @@ def _exec_accept_bond(world, agent, args) -> str:
         agent.physiology["morale"] = min(100.0, agent.physiology["morale"] + 20)
     if "morale" in other.physiology:
         other.physiology["morale"] = min(100.0, other.physiology["morale"] + 20)
+    # A bond with an outcast welcomes them back into the fold.
+    for pair in ((agent, other), (other, agent)):
+        if world.is_exiled(pair[0]):
+            world.readmit(pair[0])
+            pair[0].memory.add(world.tick, world.day, "social",
+                               f"{pair[1].name} связал со мной судьбу — изгнание кончилось, "
+                               f"меня снова приняли", 2.7)
     verb = "стали вместе" if kind == "romantic" else "стали друзьями"
     agent.memory.add(world.tick, world.day, "social",
                      f"мы с {other.name} {verb}", 2.5)

@@ -83,6 +83,80 @@ def _exec_tell_story(world, agent, args) -> str:
             + (f" (она уже ходит по рукам — пересказ №{n})" if n > 1 else ""))
 
 
+# ── feast: share a store of food at the fire — a costly gift that binds the group ──
+def _lit_fire_near(world, agent):
+    for s in world.structures:
+        if (s.role == "campfire" and s.state.get("complete")
+                and s.state.get("fuel", 0) > 0
+                and chebyshev(agent.x, agent.y, s.x, s.y) <= 2):
+            return s
+    return None
+
+
+def _feast_guests(world, agent):
+    return [o for o in world.living_agents()
+            if o is not agent and chebyshev(agent.x, agent.y, o.x, o.y) <= 2]
+
+
+def _avail_host_feast(world, agent) -> bool:
+    have = agent.inventory.get("food", 0) + agent.inventory.get("dried_food", 0)
+    return (have >= 3 and _lit_fire_near(world, agent) is not None
+            and len(_feast_guests(world, agent)) >= 2)
+
+
+def _exec_host_feast(world, agent, args) -> str:
+    if _lit_fire_near(world, agent) is None:
+        return "нужен зажжённый костёр, чтобы собрать всех на пир"
+    guests = _feast_guests(world, agent)
+    if len(guests) < 2:
+        return "не с кем пировать — нужны хотя бы двое рядом"
+    # Spend up to 5 food from the host — dried first (it's the storable surplus),
+    # then raw. Sharing PRECIOUS food (scarcity!) is a costly signal that bonds.
+    spend, pool = 0, 5
+    for item in ("dried_food", "food"):
+        take = min(pool - spend, int(agent.inventory.get(item, 0)))
+        if take > 0:
+            agent.inventory[item] = agent.inventory.get(item, 0) - take
+            if agent.inventory[item] <= 0:
+                del agent.inventory[item]
+            spend += take
+    if spend < 3:
+        return "не хватает еды на пир (нужно хотя бы 3)"
+    world.feasts += 1
+    if not world.feast_tradition and world.feasts >= 3:
+        world.feast_tradition = True
+    trad = world.feast_tradition
+    # feed the guests and lift everyone's spirits; a tradition deepens the effect
+    per = spend / max(1, len(guests))
+    fill = (world.scenario.get("physiology", {}).get("hunger", {}).get("restore", 40)) * 0.5
+    partakers = guests + [agent]
+    for o in partakers:
+        if "hunger" in o.physiology and o is not agent:
+            o.physiology["hunger"] = min(100.0, o.physiology["hunger"] + fill * min(1.0, per))
+        if "morale" in o.physiology:
+            o.physiology["morale"] = min(100.0, o.physiology["morale"] + (16 if trad else 12))
+        if o.psyche.get("belonging") is not None:
+            o.psyche["belonging"] = min(100.0, o.psyche["belonging"] + (18 if trad else 14))
+        o.relationships.record(agent.id, +0.06)
+        o.memory.add(world.tick, world.day, "social",
+                     f"{agent.name} устроил пир у костра — мы ели вместе", 2.2)
+    # the host leaves a mark: generosity is esteem + meaning
+    if agent.psyche.get("esteem") is not None:
+        agent.psyche["esteem"] = min(100.0, agent.psyche["esteem"] + 14)
+    if agent.psyche.get("purpose") is not None:
+        agent.psyche["purpose"] = min(100.0, agent.psyche["purpose"] + 12)
+    agent.memory.add(world.tick, world.day, "social",
+                     f"я устроил пир и накормил {len(guests)} человек", 2.4)
+    world.log_event("feast",
+                    f"🔥 {agent.name} устроил пир у костра — {len(guests)} сотрапезников"
+                    + (" (уже традиция)" if trad else ""), 2.6,
+                    [agent.name] + [g.name for g in guests])
+    world.emit("feast", actor=agent.id,
+               payload={"guests": len(guests), "spent": spend, "tradition": trad})
+    tail = " Это уже стало традицией." if trad else ""
+    return f"устроил пир на {len(guests)} человек, отдал {spend} еды.{tail}"
+
+
 def build_culture_tools() -> list[Tool]:
     return [
         Tool("name_place",
@@ -94,4 +168,9 @@ def build_culture_tools() -> list[Tool]:
              "in your own words — stories travel and change from teller to teller.",
              "culture", {"target": "agent name", "story": "the story, in your own words"},
              available=_near_listener, execute=_exec_tell_story),
+        Tool("host_feast",
+             "Share your food with everyone at the fire — a costly gift that lifts the "
+             "whole group's spirits; repeated, it becomes a ritual.",
+             "culture", {},
+             available=_avail_host_feast, execute=_exec_host_feast),
     ]

@@ -72,6 +72,7 @@ export type StructureState = {
 };
 
 export type WorldState = {
+  run_id?: string | null;      // canonical copyable id of this run
   tick: number;
   day: number;
   day_length_ticks?: number;   // for continuous time-of-day lighting

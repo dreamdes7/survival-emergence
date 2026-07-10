@@ -286,7 +286,7 @@ def apply_runtime_policy(world: World, cfg: dict) -> None:
     runtime (emergency gate, fallback policy, scenes, dreams) reads them per tick."""
     sim = cfg.get("sim", {})
     llm_cfg = cfg.get("llm", {})
-    world.emergency_multiplier = float(sim.get("emergency_multiplier", 2.0))
+    world.emergency_multiplier = float(sim.get("emergency_multiplier", 1.3))
     world.fallback_policy = str(llm_cfg.get("fallback_policy", "stub"))
     world.dialogue_scene_lines = int(sim.get("dialogue_scene_lines", 4))
     world.dreams_enabled = bool(llm_cfg.get("dreams", True))
@@ -315,15 +315,16 @@ def build_narrator(world: World, cfg: dict, llm):
     return Narrator(client, model, int(ncfg.get("every_ticks", 12)))
 
 
-def build_recorder(world: World, cfg: dict, scenario: dict):
+def build_recorder(world: World, cfg: dict, scenario: dict, run_id: str | None = None):
     """Create a RunRecorder when research.record is on, else None. Attaches it to
-    the world so tools/agents/LLM emit into it automatically."""
+    the world so tools/agents/LLM emit into it automatically. Pass `run_id` to
+    share the canonical id with the session log."""
     from engine.event_log import RunRecorder
     research = cfg.get("research", {})
     if not research.get("record", True):
         return None
     rec = RunRecorder(
-        world, cfg, scenario,
+        world, cfg, scenario, run_id=run_id,
         log_llm=bool(research.get("log_llm", True)),
         taint_threshold=float(research.get("taint_threshold", 0.20)),
     )
@@ -380,7 +381,9 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
     events = EventScheduler(world)
     llm = build_llm(world, cfg)
     resolve_names(world, llm, scenario)
-    recorder = build_recorder(world, cfg, scenario)
+    from engine.session_log import new_run_id
+    run_id = new_run_id(scenario, cfg)
+    recorder = build_recorder(world, cfg, scenario, run_id=run_id)
     narrator = build_narrator(world, cfg, llm)
     reflect_with_llm = bool(cfg.get("llm", {}).get("reflect_with_llm", True))
 
@@ -390,6 +393,7 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
 
     say("=" * 78)
     say(f"  SURVIVAL EMERGENCE -- scenario: {scenario['name']}  | seed: {cfg['seed']}")
+    say(f"  RUN ID: {run_id}   (pass this to review the run: logs/runs/{run_id}/)")
     say(f"  agents: {len(world.agents)}  | map: {world.size}x{world.size}  | "
         f"{sim['max_days']} days x {day_len} ticks")
     say("  roster: " + ", ".join(
@@ -434,6 +438,15 @@ def run_config(cfg: dict, scenario: dict, *, quiet: bool = False):
             break
         if not world.active_agents() and not world.living_agents():
             say("\n>>> Everyone has perished.")
+            break
+        # LLM outage fail-safe (headless): if every recent decide() died on an API
+        # error, ABORT loudly — a run of silent fallbacks is worthless data.
+        client = getattr(llm, "openrouter", None)
+        if client is not None and getattr(client, "consecutive_failures", 0) >= \
+                max(4, 2 * len(world.living_agents())):
+            print(f"\n>>> ⛔ LLM API DOWN ({getattr(client, 'last_api_error', '?')}) — "
+                  f"aborting the run at tick {t}: agents were degrading into "
+                  f"silent fallbacks. Fix the key/balance and rerun.")
             break
         if tick_seconds:
             time.sleep(tick_seconds)
@@ -480,7 +493,8 @@ def _summary(world: World, llm=None, recorder=None) -> None:
         print(f"\n  llm usage        : {llm.openrouter.budget.summary()}")
     if recorder is not None:
         contam = recorder.contamination()
-        print(f"\n  run dir          : {recorder.dir}")
+        print(f"\n  RUN ID           : {recorder.run_id}   ← copy this to review the run")
+        print(f"  run dir          : {recorder.dir}")
         print(f"  decisions        : {contam['total']} "
               f"(heuristic share {contam['heuristic_share']*100:.1f}%) "
               f"{'⚠ TAINTED' if recorder.meta.get('tainted') else ''}")

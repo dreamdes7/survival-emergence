@@ -54,8 +54,25 @@ def _adjacent_unfinished(world, agent, kind: str):
     return None
 
 
+# Russian-thinking models write kind="шалаш" — meet them halfway instead of failing.
+_RU_KIND = {
+    "костёр": "campfire", "костер": "campfire", "огонь": "campfire",
+    "шалаш": "tent", "палатка": "tent", "палатку": "tent", "навес": "tent",
+    "укрытие": "tent", "дом": "tent", "хижина": "tent", "хижину": "tent",
+    "дистиллятор": "water_still", "опреснитель": "water_still",
+    "склад": "store", "хранилище": "store",
+    "верстак": "workbench", "мастерская": "workbench",
+    "коптильня": "smokehouse", "коптильню": "smokehouse",
+    "грядка": "garden", "грядку": "garden", "огород": "garden", "сад": "garden",
+    "колодец": "well",
+    "указатель": "signpost", "табличка": "signpost", "знак": "signpost",
+    "вышка": "watchtower", "вышку": "watchtower", "дозорная вышка": "watchtower",
+}
+
+
 def _exec_build_structure(world, agent, args) -> str:
-    kind = args.get("kind", "")
+    kind = str(args.get("kind", "")).strip().lower()
+    kind = _RU_KIND.get(kind, kind)
     spec = _buildables(world).get(kind)
     if spec is None:
         opts = ", ".join(_buildables(world).keys()) or "none"
@@ -86,9 +103,11 @@ def _exec_build_structure(world, agent, args) -> str:
         world.structures.append(s)
         agent.memory.add(world.tick, world.day, "action", f"started building a {kind}", 1.8)
 
-    # A practised builder lays more progress per tick…
+    # A practised builder lays more progress per tick (earned skill + an assigned
+    # builder's office edge)…
     rate = float(spec.get("work_rate", 10)) * (
-        1.0 + skill_bonus(getattr(agent, "skills", {}).get("builder", 0.0)))
+        1.0 + skill_bonus(getattr(agent, "skills", {}).get("builder", 0.0))
+        + world.role_bonus(agent, "builder"))
     # …and many hands raise a structure far faster. "Heavy" builds barely move
     # solo — they need a crew, which forces survivors to coordinate at one spot.
     crew = sum(1 for o in world.living_agents() if world.adjacent_to_structure(o, s))
@@ -165,6 +184,8 @@ def _exec_grab(world, agent, args) -> str:
     s = _adjacent_store(world, agent)
     if s is None:
         return "no store here"
+    if world.is_exiled(agent):
+        return "the store is the group's — as an outcast you're not welcome to take from it"
     item = args.get("item", "")
     qty = float(args.get("qty", 1))
     cache = s.state.get("cache", {})

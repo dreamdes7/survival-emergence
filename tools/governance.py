@@ -64,7 +64,9 @@ def _exec_vote(world, agent, args) -> str:
     yes = choice not in ("no", "against", "nay", "0", "false", "нет", "против")
     proposal["voters"].add(agent.id)
     world.gov_participants.add(agent.id)
-    proposal["yes" if yes else "no"] += 1
+    # a recognised leader's word carries the weight of two — power the office grants.
+    weight = 2 if world.is_leader(agent) else 1
+    proposal["yes" if yes else "no"] += weight
     living = max(1, len(world.living_agents()))
     if not proposal["adopted"] and proposal["yes"] > living / 2:
         proposal["adopted"] = True
@@ -97,12 +99,30 @@ def _exec_expel(world, agent, args) -> str:
     other = world.agent_by_name(target)
     if other is None or other.status == "dead":
         return f"no one named '{target}'"
+    if other is agent:
+        return "you can't call to expel yourself"
     agent.relationships.record(other.id, -0.3)
     other.relationships.record(agent.id, -0.2)
     world.gov_participants.add(agent.id)
+    # Expulsion is a COLLECTIVE act with real teeth: votes accumulate, and once a
+    # majority of the living have called for it, the target is cast out of the
+    # commons — no share of the fire, no shelter, no store. A leader's call counts
+    # double. This is what makes belonging to the group a survival asset.
+    votes = world.expel_votes.setdefault(other.id, set())
+    votes.add(agent.id)
+    weight = len(votes) + (1 if world.is_leader(agent) and agent.id in votes else 0)
+    living = max(1, len(world.living_agents()))
     other.memory.add(world.tick, world.day, "social",
                      f"{agent.name} moved to expel me from the group", 2.4)
-    return f"called to expel {target}"
+    if not world.is_exiled(other) and weight > living / 2:
+        world.exile(other)
+        other.memory.add(world.tick, world.day, "social",
+                         "меня изгнали. у общего костра и в чужих укрытиях мне больше "
+                         "не рады — теперь я сам по себе, пока не заслужу прощение", 2.8)
+        world.emit("exile", actor=agent.id, target=other.id,
+                   payload={"by": agent.name, "target": other.name})
+        return f"the group has voted to EXILE {target} — they are cast out of the camp"
+    return f"called to expel {target} ({len(votes)}/{living} — needs a majority)"
 
 
 def _exec_announce(world, agent, args) -> str:
@@ -111,11 +131,12 @@ def _exec_announce(world, agent, args) -> str:
         return "nothing to announce"
     agent.memory.add(world.tick, world.day, "social", f"I announced: {msg}", 1.8)
     world.culture.note_spoken(world, agent, msg)   # meme transmission check
+    reach = 18 if world.is_leader(agent) else 12    # a leader's voice carries further
     delivered = 0
     for o in world.agents:
         if o is agent or o.status != "active":
             continue
-        if chebyshev(agent.x, agent.y, o.x, o.y) <= 12:
+        if chebyshev(agent.x, agent.y, o.x, o.y) <= reach:
             o.deliver({
                 "type": "announce",
                 "from": agent.name,

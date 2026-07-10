@@ -54,6 +54,8 @@ class World:
         self.placenames: list[dict] = []    # agent-coined names for places
         self.gatherings = 0                 # times a fireside gathering happened
         self.fireside_tradition = False     # has nightly gathering become tradition?
+        self.feasts = 0                     # communal feasts hosted (host_feast)
+        self.feast_tradition = False        # has feasting become a recurring ritual?
         self.move_speed = 1               # tiles an agent crosses per go_to (set by config)
         self.last_death_notices: list[str] = []
         self.last_death_reasons: dict[str, list[str]] = {}
@@ -64,6 +66,8 @@ class World:
         self.roles: dict[str, str] = {}
         self.gov_participants: set[str] = set()
         self.claims: dict[str, dict] = {}   # node_id → {owner_id, owner, tick}
+        self.expel_votes: dict[str, set] = {}   # target_id → set of voter ids calling to expel
+        self.territories: list[dict] = []       # area claims: {owner_id, owner, x, y, r, tick, group}
 
         self.camp_radius = max(2, self.size // 8)
 
@@ -492,7 +496,10 @@ class World:
         """Starting state for a pre-placed structure, by role."""
         role = spec.get("role", "")
         if role == "shelter":               # natural shelter (cave) — ready to use
-            return {"complete": True, "capacity": int(spec.get("capacity", 3))}
+            # comfort < 1 = damp cold stone: it keeps you alive through a storm,
+            # but rests you poorly — a BUILT home is strictly nicer to live in.
+            return {"complete": True, "capacity": int(spec.get("capacity", 3)),
+                    "comfort": float(spec.get("comfort", 1.0))}
         if role in ("beacon", "signal"):    # abandoned tech — must be repaired first
             return {"active": False, "repair": 0.0,
                     "required": float(spec.get("repair_required", 60))}
@@ -547,14 +554,39 @@ class World:
 
     # ── warmth: fire & shelter ──────────────────────────────────────────────────
     def near_fire(self, agent) -> bool:
+        exiled = self.is_exiled(agent)
         for s in self.structures:
             if chebyshev(agent.x, agent.y, s.x, s.y) > 2:
                 continue
-            if s.role == "hotspring":                      # natural warmth, always on
+            if s.role == "hotspring":                      # natural warmth judges no one
                 return True
+            # the communal fire turns its back on the exiled — they get no heat here
             if s.role == "campfire" and s.state.get("complete") and s.state.get("fuel", 0) > 0:
-                return True
+                if not exiled:
+                    return True
         return False
+
+    # ── governance: assigned-role edges & exile from the commons ────────────────
+    def role_bonus(self, agent, domain: str) -> float:
+        """Extra yield/rate an agent gets in `domain` from an ASSIGNED matching role."""
+        from engine.skills import role_domain, ROLE_DOMAIN_BONUS
+        if role_domain(self.roles.get(agent.id)) == domain:
+            return ROLE_DOMAIN_BONUS.get(domain, 0.0)
+        return 0.0
+
+    def is_leader(self, agent) -> bool:
+        from engine.skills import role_domain
+        return role_domain(self.roles.get(agent.id)) == "leader"
+
+    def is_exiled(self, agent) -> bool:
+        return bool(getattr(agent, "exiled", False))
+
+    def exile(self, agent) -> None:
+        agent.exiled = True
+
+    def readmit(self, agent) -> None:
+        agent.exiled = False
+        self.expel_votes.pop(agent.id, None)
 
     def _legacy_anchor_usable_shelter(self, agent):
         """A finished adjacent shelter with room: of the agents crowding it, the
@@ -579,15 +611,25 @@ class World:
         return len(occupants) < int(shelter.state.get("capacity", 2))
 
     def usable_shelter(self, agent):
-        """A finished shelter only counts when the agent is inside its footprint."""
+        """A finished shelter only counts when the agent is inside its footprint.
+        The exiled are turned away from the group's tents and caves."""
+        if self.is_exiled(agent):
+            return None
         for s in self.structures:
             if self.structure_contains(s, agent.x, agent.y) and self.shelter_has_room_for(agent, s):
                 return s
         return None
 
     def warm_spot(self, agent) -> bool:
-        """Can the agent stay warm here? Only by a lit fire or in a roomy shelter."""
-        return self.near_fire(agent) or self.usable_shelter(agent) is not None
+        """Can the agent stay warm here? A lit fire OR a roomy shelter — EXCEPT in
+        a storm, when wind and rain tear the heat off a bare fire: then only walls
+        (a tent, a cave, the wreckage) truly keep you warm. This is what makes
+        shelter matter — the fire carries the calm nights, the roof carries the storm."""
+        if self.usable_shelter(agent) is not None:
+            return True
+        if self.weather == "storm":
+            return False            # a bare fire is not enough against a storm
+        return self.near_fire(agent)
 
     def active_agents(self) -> list:
         return [a for a in self.agents if a.status == "active"]
@@ -637,6 +679,15 @@ class World:
                     # exposure also robs sleep — the cold gnaws at your reserves
                     if "energy" in a.physiology:
                         a.physiology["energy"] = max(0.0, a.physiology["energy"] - 0.8)
+                    # a felt lesson (not an order): when a storm freezes you even by
+                    # the fire, the body learns that only real walls will do. Names
+                    # the NEED (shelter), never the solution — the agent chooses how.
+                    if self.weather == "storm" and self.near_fire(a) \
+                            and a.physiology["warmth"] < 55:
+                        a.memory.add(self.tick, self.day, "observation",
+                                     "огонь не держит тепло в такую бурю — ветер и "
+                                     "дождь выстуживают до костей. нужны стены, "
+                                     "настоящее укрытие, а не костёр под открытым небом", 2.2)
 
         # Hazard zones sear anyone standing in or next to them.
         hazards = [s for s in self.structures if s.role == "hazard"]
@@ -657,21 +708,31 @@ class World:
                 continue
             s.state["fuel"] = max(0.0, s.state["fuel"] - 4.0)
             for a in self.living_agents():
+                if self.is_exiled(a):        # cast out of the camp — no share of its fire
+                    continue
                 if chebyshev(a.x, a.y, s.x, s.y) <= 2:
                     # a fire gives WARMTH (physical). Happiness is no longer free
                     # here — morale now comes from connection, contribution and
                     # meaning (the psyche layer), so a warm camp is not a fulfilled
                     # one unless the survivors actually build a life together.
                     if "warmth" in a.physiology:
-                        a.physiology["warmth"] = min(100.0, a.physiology["warmth"] + 8)
+                        # a storm steals the fire's heat — it takes the edge off
+                        # but can't hold you warm the way a roof would
+                        gain = 3.0 if self.weather == "storm" else 8.0
+                        a.physiology["warmth"] = min(100.0, a.physiology["warmth"] + gain)
 
-        # Hot springs warm anyone soaking nearby (natural, no fuel).
+        # Hot springs warm anyone soaking nearby (natural, no fuel). In a STORM the
+        # wind strips that heat: +4 no longer beats the storm penalties, so a spring
+        # camp is cosy on calm nights but NOT storm-immune — without this cap the
+        # spring strictly dominated every fire and every shelter (proven by runs:
+        # the sole survivor of the glm run was the one squatting a hot spring).
+        spring_gain = 4.0 if self.weather == "storm" else 10.0
         for s in self.structures:
             if s.role != "hotspring":
                 continue
             for a in self.living_agents():
                 if chebyshev(a.x, a.y, s.x, s.y) <= 1 and "warmth" in a.physiology:
-                    a.physiology["warmth"] = min(100.0, a.physiology["warmth"] + 10)
+                    a.physiology["warmth"] = min(100.0, a.physiology["warmth"] + spring_gain)
 
         # A relit lighthouse lifts everyone's spirits at night (a beacon of hope).
         if self.is_night:
@@ -698,16 +759,26 @@ class World:
                     nearest = min((chebyshev(a.x, a.y, o.x, o.y) for o in living if o is not a),
                                   default=99)
                     if nearest <= 2:
-                        a.psyche["belonging"] = min(100.0, a.psyche["belonging"] + 1.5)
+                        # mere company only HOLDS belonging steady (== its decay);
+                        # to actually fill it you must reach out — bond, hug, give.
+                        # So a huddle that only sits together slowly goes hollow.
+                        a.psyche["belonging"] = min(100.0, a.psyche["belonging"] + 1.0)
                     elif nearest >= 6:
                         a.psyche["belonging"] = max(0.0, a.psyche["belonging"] - 1.0)
                 for stat in list(a.psyche):
                     dec = float(psy_cfg.get(stat, {}).get("decay", 1.0))
                     a.psyche[stat] = max(0.0, a.psyche[stat] - dec)
                 if "morale" in a.physiology and a.psyche:
-                    avg = sum(a.psyche.values()) / len(a.psyche)
+                    vals = list(a.psyche.values())
+                    avg = sum(vals) / len(vals)
+                    weak = min(vals)              # the hollowest drive
+                    # morale binds on the WEAKEST drive, not the average — a maxed
+                    # belonging can no longer mask starving esteem/purpose. A group
+                    # that only talks and never builds or makes meaning feels empty,
+                    # and that emptiness (not any instruction) drives them to act.
+                    score = 0.5 * avg + 0.5 * weak
                     a.physiology["morale"] = max(0.0, min(100.0,
-                        a.physiology["morale"] + (avg - 50.0) / 50.0 * 1.5))
+                        a.physiology["morale"] + (score - 50.0) / 50.0 * 1.5))
 
         # ── food spoilage: raw food rots in the pack over days, preserved keeps ──
         # Makes stockpiling raw food fail, so a smokehouse (dried food) and a

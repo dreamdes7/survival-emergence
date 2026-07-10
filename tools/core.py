@@ -193,15 +193,28 @@ def _exec_go_to(world, agent, args) -> str:
         except (TypeError, ValueError):
             return "go_to needs numeric x/y"
         label = args.get("label", f"({tx},{ty})")
-    if (agent.x, agent.y) == (tx, ty):
+    def _arrived() -> bool:
+        # Exact tile, OR standing right next to a target that can't be stood on —
+        # a blocking node anchor, or any tile of a structure's footprint (e.g.
+        # "go to the cave", whose 3×3 body is unwalkable). Without the adjacency
+        # case agents orbit unreachable anchors forever, burning an LLM decision
+        # per tick on "moved toward…".
+        if (agent.x, agent.y) == (tx, ty):
+            return True
+        for s in world.structures:
+            if world.structure_contains(s, tx, ty):
+                return world.structure_distance(agent.x, agent.y, s) <= 1
+        return _dist(agent.x, agent.y, tx, ty) <= 1 and not _free(world, agent, tx, ty)
+
+    if _arrived():
         return f"already at {label}"
     steps = max(1, getattr(world, "move_speed", 1))
     for _ in range(steps):
-        if (agent.x, agent.y) == (tx, ty):
+        if _arrived():
             break
         if not _step_toward(world, agent, tx, ty):
             break   # blocked in — stop (likely now adjacent to a tree/rock/target)
-    if (agent.x, agent.y) == (tx, ty):
+    if _arrived():
         return f"reached {label} at ({agent.x},{agent.y})"
     return f"moved toward {label}, now at ({agent.x},{agent.y})"
 
@@ -217,15 +230,36 @@ def _exec_wander(world, agent, args) -> str:
     return "hemmed in — nowhere to wander"
 
 
+_EVERYONE_WORDS = {"all", "everyone", "everybody", "все", "всем", "всех", "группа",
+                   "группе", "ребята", "ребятам", "народ", "команда", "команде"}
+
+
 def _exec_say_to(world, agent, args) -> str:
     target_name = args.get("target", "")
     message = args.get("message", "...")
+    # Models regularly address the whole camp ("все", "all") — that's a shout,
+    # not an error. Route it to everyone in earshot instead of failing the turn.
+    if target_name.strip().lower() in _EVERYONE_WORDS:
+        from engine.models import chebyshev as _cheb
+        agent.memory.add(world.tick, world.day, "social", f'I called out: "{message}"', 1.5)
+        world.culture.note_spoken(world, agent, message)
+        heard = 0
+        for o in world.agents:
+            if o is agent or o.status != "active":
+                continue
+            if _cheb(agent.x, agent.y, o.x, o.y) <= 12:
+                o.deliver({"type": "speech", "from": agent.name, "from_id": agent.id,
+                           "text": f'{agent.name} крикнул всем: "{message}"', "payload": {}})
+                heard += 1
+        return (f'called out to everyone: "{message}" ({heard} heard)' if heard
+                else "you called out, but no one is in earshot")
     other = world.agent_by_name(target_name)
     if other is None or other.status == "dead":
         return f"no one named '{target_name}' to talk to"
     from engine.models import chebyshev
     if chebyshev(agent.x, agent.y, other.x, other.y) > 1:
-        return f"{target_name} is too far to talk to"
+        return (f"{target_name} is too far to talk to — подойди к нему (go_to "
+                f"{target_name}) или крикни всем (announce)")
     agent.relationships.record(other.id, +0.06)
     other.relationships.record(agent.id, +0.04)
     agent.memory.add(world.tick, world.day, "social", f'I said to {target_name}: "{message}"', 1.5)

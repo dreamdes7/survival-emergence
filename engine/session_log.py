@@ -13,18 +13,34 @@ from pathlib import Path
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 
 
+def new_run_id(scenario: dict, cfg: dict) -> str:
+    """The ONE canonical id for a run — shared by the session log and the run
+    recorder so a single copyable string points at everything from that run
+    (logs/session_<id>.jsonl and logs/runs/<id>/). Format: <scenario>_<ts>_seed<N>."""
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    scen = scenario.get("name") or cfg.get("scenario") or "world"
+    return f"{scen}_{ts}_seed{cfg.get('seed')}"
+
+
 class SessionLogger:
-    def __init__(self, world, cfg: dict) -> None:
+    def __init__(self, world, cfg: dict, run_id: str | None = None) -> None:
         LOG_DIR.mkdir(exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
         scen = world.scenario.get("name", "world")
-        self.path = LOG_DIR / f"session_{scen}_{ts}.jsonl"
+        # A caller can pass the canonical run_id so the session file and the run
+        # recorder dir share one name; otherwise mint a fresh one here.
+        self.run_id = run_id or new_run_id(world.scenario, cfg)
+        # run_id is "<scen>_<YYYYMMDD>_<HHMMSS>_seed<N>"; recover the timestamp part.
+        _parts = self.run_id.split("_")
+        ts = "_".join(_parts[1:3]) if len(_parts) >= 3 else \
+            datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.path = LOG_DIR / f"session_{self.run_id}.jsonl"
         self.day_length = int(cfg.get("sim", {}).get("day_length_ticks", 12)) or 12
         self._dead: set[str] = set()
         self._structs: set[str] = {s.id for s in world.structures}
         self._f = self.path.open("w", encoding="utf-8")
         self._write({
             "type": "session",
+            "run_id": self.run_id,
             "started": ts,
             "scenario": scen,
             "seed": cfg.get("seed"),

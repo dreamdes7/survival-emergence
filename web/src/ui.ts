@@ -267,7 +267,7 @@ function rosterRowsHtml(count: number, cfg: ForgeConfig): string {
 // no config has loaded yet).
 const DEFAULT_FORGE: ForgeConfig = {
   scenario: "island", seed: 0, provider: "openrouter",
-  sim: { max_days: 4, api_tick_seconds: 1, emergency_multiplier: 2.0 },
+  sim: { max_days: 4, api_tick_seconds: 1, emergency_multiplier: 1.3 },
   llm: { fallback_policy: "stub", thinking: "full" },
   agents: { count: 5, model_override: "", persona_mode: "blank", roster: [] },
   budget: { usd_cap: 0, context_tokens_per_agent_tick: 32000, max_output_tokens: 1024 },
@@ -291,7 +291,7 @@ function forgeFieldsHtml(cfg: ForgeConfig): string {
       ${["blank", "library", "self_select", "custom", "mixed"].map((m) =>
         `<option value="${m}"${(cfg.agents.persona_mode ?? "blank") === m ? " selected" : ""}>${m}</option>`).join("")}
     </select>`)}
-    ${field("emergency gate ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 2.0}" title="crit×N band where the heuristic overrides the brain; research: ~1.2, 0 = off">`)}
+    ${field("emergency gate ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 1.3}" title="crit×N band where the heuristic overrides the brain; research: ~1.2, 0 = off">`)}
     ${field("LLM fail →", "fallback_policy", `<select name="fallback_policy">
       <option value="stub"${(cfg.llm?.fallback_policy ?? "stub") === "stub" ? " selected" : ""}>stub (never stall)</option>
       <option value="wait"${(cfg.llm?.fallback_policy ?? "stub") === "wait" ? " selected" : ""}>wait (clean data)</option>
@@ -446,6 +446,23 @@ export function bindModalClose(): void {
   ccClose.addEventListener("click", closeModal);
   charModal.addEventListener("click", (e) => { if (e.target === charModal) closeModal(); });
   document.addEventListener("keydown", (e) => { if (e.key === "Escape" && modalIsOpen) closeModal(); });
+  // Click-to-copy for any [data-copy] chip (e.g. the run-id pill).
+  document.addEventListener("click", (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>("[data-copy]");
+    if (!el) return;
+    const text = el.getAttribute("data-copy") || "";
+    const done = () => {
+      el.classList.add("copied");
+      setTimeout(() => el.classList.remove("copied"), 1100);
+    };
+    if (navigator.clipboard?.writeText) navigator.clipboard.writeText(text).then(done).catch(done);
+    else {
+      const ta = document.createElement("textarea");
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); } catch { /* ignore */ }
+      ta.remove(); done();
+    }
+  });
 }
 
 // ── chrome / panels ───────────────────────────────────────────────────────────
@@ -455,6 +472,7 @@ export function renderChrome() {
   const scenarioName = state.scenario.charAt(0).toUpperCase() + state.scenario.slice(1);
   titleEl.textContent = store.activeSimId === "default" ? scenarioName : `${scenarioName} · ${store.activeSimId}`;
   statsEl.innerHTML = [
+    state.run_id ? copyPill("run", state.run_id) : "",
     pill("day", `${state.day} · T${state.tick}`),
     pill("phase", state.is_night ? "night" : "day"),
     pill("weather", state.weather ?? "clear"),
@@ -658,6 +676,14 @@ function renderChronicle() {
 
 function pill(label: string, value: string) {
   return `<div class="stat-pill">${label}<strong>${escapeHtml(value)}</strong></div>`;
+}
+
+// A pill whose value is click-to-copy — used for the run id so it's trivial to
+// grab and hand to an agent ("look at run <id>").
+function copyPill(label: string, value: string) {
+  return `<div class="stat-pill copy-pill" data-copy="${escapeAttr(value)}" `
+    + `title="Нажми, чтобы скопировать ID рана">${label}`
+    + `<strong>${escapeHtml(value)}</strong><span class="copy-ic">⧉</span></div>`;
 }
 
 function legend(label: string, value: string | number) {

@@ -37,6 +37,39 @@ XP_PER_ACTION = 1.0
 ROLE_MIN_XP = 18.0      # real practice before a role sticks
 ROLE_DOMINANCE = 1.5    # top craft must lead the runner-up by this factor
 
+# ── ASSIGNED roles (governance) → a canonical DOMAIN that grants a real edge ──
+# assign_role takes free text, so an emergent title ("хранитель огня") can be
+# purely honorific — but when the title clearly names a known craft/office, it
+# confers actual power in that domain. This is what makes handing out roles a
+# political act worth doing, not just a label. Matched by substring on the title.
+ROLE_DOMAIN_KEYWORDS: dict[str, tuple[str, ...]] = {
+    "forager": ("добыт", "собир", "провиз", "forag", "gather", "охот", "снаб"),
+    "fisher":  ("рыб", "fish", "рыбак"),
+    "builder": ("строит", "плотник", "зодч", "build", "мастер по", "инженер"),
+    "cook":    ("повар", "кух", "кашевар", "cook", "коптиль"),
+    "leader":  ("вожд", "лидер", "лидэр", "старейшин", "глав", "предводит",
+                "капитан", "вождь", "leader", "chief", "старост", "командир"),
+    "healer":  ("лекар", "целит", "врач", "знахар", "heal", "медик"),
+}
+
+# The mechanical edge each assigned domain grants (on top of earned skill XP).
+ROLE_DOMAIN_BONUS: dict[str, float] = {
+    "forager": 0.25, "fisher": 0.25, "builder": 0.25, "cook": 0.30, "healer": 0.0,
+    # leader's power is social (vote weight, reach), handled in governance — not a yield %.
+    "leader": 0.0,
+}
+
+
+def role_domain(role_text: str | None) -> str | None:
+    """Canonical domain for an assigned title, or None if it's purely honorific."""
+    if not role_text:
+        return None
+    low = role_text.lower()
+    for domain, keys in ROLE_DOMAIN_KEYWORDS.items():
+        if any(k in low for k in keys):
+            return domain
+    return None
+
 
 def skill_bonus(xp: float) -> float:
     """Diminishing yield/rate add-on: ~+6% per sqrt(xp), capped at +50%."""

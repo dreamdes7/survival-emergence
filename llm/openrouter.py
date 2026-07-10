@@ -211,6 +211,11 @@ class OpenRouterLLM:
         # coherent multi-day behaviour).
         self.thinking = thinking
         self.deliberate_every = max(1, int(deliberate_every))
+        # Consecutive decide() calls that died on an API error (403/402/network…).
+        # Reset on any success. The run loop watches this to PAUSE the sim loudly
+        # instead of letting agents "wait" themselves to death on silent fallbacks.
+        self.consecutive_failures = 0
+        self.last_api_error: str | None = None
 
     # ── public API ────────────────────────────────────────────────────────────
     def decide(self, agent, world) -> dict:
@@ -228,8 +233,11 @@ class OpenRouterLLM:
         try:
             data = self._post_with_retry(agent.model, messages)
         except Exception as exc:                       # network / api error
+            self.consecutive_failures += 1
+            self.last_api_error = str(exc)
             self._record_llm(agent, world, messages, None, {}, error=str(exc))
             return self._fb(agent, world, f"api error: {exc}")
+        self.consecutive_failures = 0
         usage = data.get("usage", {}) or {}
         self.budget.add(usage)
         try:
@@ -352,9 +360,19 @@ class OpenRouterLLM:
         shared = [m.text for m in agent.memory.retrieve(partner.name, n=4)]
         shared_txt = "\n".join(f"- {s}" for s in shared) or "  (мало что вспоминается)"
         convo = "\n".join(f"{l['speaker']}: {l['text']}" for l in transcript[-8:])
+        # A conversation still happens INSIDE the world: give the scene a one-line
+        # anchor of hard facts so plans made in chat obey the island's physics
+        # instead of real-world priors ("шалаш не выдержит шторм" — here it does).
+        wx = ", ШТОРМ" if world.weather == "storm" else \
+            (f", погода: {world.weather}" if world.weather else "")
+        facts = (f"Сейчас {'ночь' if world.is_night else 'день'}{wx}. "
+                 "Законы острова (факты, не домыслы): в шторм греют только СТЕНЫ — "
+                 "построенная палатка или пещера; костёр и горячий источник в бурю не "
+                 "спасают. Построенная палатка шторм держит; пещера — сырая, спится плохо.")
         messages = [
             {"role": "system", "content":
                 f"Ты {agent.name}. {persona_line}\n"
+                f"{facts}\n"
                 f"Ты разговариваешь с {partner.name} (отношение: {rel.label}, "
                 f"близость {rel.affinity:+.1f}). Отвечай ПО-РУССКИ, 1-2 короткие живые "
                 "реплики как в настоящем разговоре: отвечай по сути, соглашайся, спорь, "
@@ -513,12 +531,20 @@ class OpenRouterLLM:
             "реально плохо, действуй соответственно. Не выдумывай симптомы которых нет.\n"
             "- ДИАЛОГ: если к тебе обратились — ОТВЕЧАЙ по сути (согласись, поспорь, пошути). "
             "Реплики короткие, как в живом разговоре. Не игнорируй собеседника.\n"
+            "- НЕ ПОВТОРЯЙСЯ: если ты уже сказал это (см. «Разговор рядом») — не говори то же "
+            "самое снова. Договорились — иди ДЕЛАЙ, а не подтверждай договорённость по кругу.\n"
             "- Когда выживание в порядке (все ✓) и рядом люди — общайся свободно "
             "(страхи, воспоминания, шутки).\n"
             "\nКАК ТЫ УСТРОЕН (это не приказы — это про тебя):\n"
             "- СНАЧАЛА НЕ УМРИ. Если в состоянии есть ⚠/❗/💀 — еда, вода, тепло или сон "
-            "важнее всего. Ночью греет только горящий костёр (в нём должны быть дрова) или "
-            "готовое укрытие; без ухода костёр гаснет.\n"
+            "важнее всего.\n"
+            "- ЗАКОНЫ ОСТРОВА (это ФАКТЫ мира, не мнения — не спорь с ними и не выдумывай "
+            "своих): в тихую ночь греет горящий костёр (нужны дрова; без ухода гаснет). "
+            "В ШТОРМ ветер срывает тепло — костёр и горячий источник НЕ спасают; держат "
+            "только СТЕНЫ: построенная палатка (tent) или пещера. Построенная палатка "
+            "шторм ДЕРЖИТ — и в ней высыпаешься; пещера — сырой камень: бурю переждать "
+            "можно, а отдых и сон в ней скверные, и мест мало. Сырая еда в рюкзаке гниёт; "
+            "копчёная или сложенная в склад — хранится.\n"
             "- НО ВЫЖИТЬ — НЕ ЗНАЧИТ ЖИТЬ. Даже сытого и в тепле тебя гложет (см. «Что ты "
             "чувствуешь»): одиночество, ненужность, бессмысленность. Это не блажь — без этого "
             "дух угасает. Отпускает лишь тогда, когда ты кому-то по-настоящему близок, когда "
@@ -536,6 +562,24 @@ class OpenRouterLLM:
         psyche_text = _psyche_urgency(getattr(agent, "psyche", {}))
         feel_block = (f"Что ты чувствуешь (сверх выживания):\n{psyche_text}\n"
                       if psyche_text else "")
+        # Governance status: an assigned title (and the edge it grants), or exile.
+        gov_lines = []
+        my_role = world.roles.get(agent.id) if getattr(world, "roles", None) else None
+        if my_role:
+            from engine.skills import role_domain
+            dom = role_domain(my_role)
+            edge = {"forager": " — добываешь заметно больше",
+                    "fisher": " — рыбачишь добычливее",
+                    "builder": " — строишь быстрее",
+                    "cook": " — коптишь больше припасов",
+                    "leader": " — твой голос весит вдвое и слышен дальше"}.get(dom, "")
+            gov_lines.append(f"Тебе доверили роль: «{my_role}»{edge}.")
+        if world.is_exiled(agent):
+            gov_lines.append(
+                "ТЕБЯ ИЗГНАЛИ ИЗ ГРУППЫ. У общего костра тебе не греться, в чужих "
+                "палатках и пещерах не укрыться, из общего склада не брать. Ты сам по "
+                "себе — выживай один или заслужи прощение (дружба или чей-то дар вернут тебя).")
+        gov_block = ("\n" + "\n".join(gov_lines) + "\n") if gov_lines else ""
         dread = getattr(agent, "dread", 0.0)
         dread_line = ""
         if dread >= 25:
@@ -560,10 +604,26 @@ class OpenRouterLLM:
                 role = f", {o.role}" if getattr(o, "role", None) else ""
                 nearby_agents.append(f"{o.name}({rel}, {tag}{role}) at ({o.x},{o.y})")
 
-        nodes = sorted(agent.known_nodes.values(),
-                       key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))[:3 if fast else 6]
+        # Nearest-N alone can flood the list with one material (six wood nodes) and
+        # leave the agent blind to food/water entirely. Guarantee the nearest node
+        # of EACH vital category first, then pad with whatever else is closest.
+        known = sorted((n for n in agent.known_nodes.values() if n.quantity > 0),
+                       key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))
+        per_cat = 1 if fast else 2
+        cap = 5 if fast else 9
+        picked, seen = [], set()
+        for cat in ("water", "food", "wood", "fiber", "stone", "flint"):
+            for n in [n for n in known if n.yield_item == cat][:per_cat]:
+                if n.id not in seen:
+                    picked.append(n); seen.add(n.id)
+        for n in known:                       # pad with nearest leftovers (beads etc.)
+            if len(picked) >= cap:
+                break
+            if n.id not in seen:
+                picked.append(n); seen.add(n.id)
+        nodes = sorted(picked, key=lambda n: chebyshev(agent.x, agent.y, n.x, n.y))[:cap]
         node_lines = [f"{n.kind}->{n.yield_item} at ({n.x},{n.y}) qty{n.quantity:.0f}"
-                      for n in nodes if n.quantity > 0]
+                      for n in nodes]
         def structure_line(s) -> str:
             parts = [f"{s.kind}{'(' + s.role + ')' if s.role else ''} at ({s.x},{s.y})"]
             build_kind = s.state.get("buildable_kind")
@@ -586,9 +646,55 @@ class OpenRouterLLM:
                 usable = ready and world.shelter_has_room_for(agent, s)
                 status = "usable for me" if usable else "full/unusable"
                 parts.append(f"{status} occupants={occupants}/{cap}")
+                if float(s.state.get("comfort", 1.0)) < 0.7:
+                    parts.append("(сырой камень — спится плохо, это не дом)")
             return " ".join(parts)
 
         structs = [structure_line(s) for s in agent.known_structures.values()]
+
+        # What CAN be built — priced and checked against the pocket. Without this
+        # the freebies on the map (caves, springs) are concrete while building is
+        # an abstract verb, and no model ever plans a village. A menu, not an order.
+        _BUILD_GAIN = {
+            "campfire":   "тепло и свет (в шторм НЕ спасает)",
+            "tent":       "свой кров на 2 — настоящие стены, держат шторм и дают выспаться",
+            "water_still": "пресная вода у лагеря (капает — один глоток за ход)",
+            "store":      "общий склад: еда в нём НЕ гниёт, запасы общие",
+            "workbench":  "инструменты: топор (×2 дров), сеть (×2 рыбы), копьё",
+            "smokehouse": "коптить еду — не гниёт и сытнее",
+            "garden":     "грядка: посадил еду — собрал больше",
+            "well":       "колодец — поит хоть всю деревню сразу, без очереди",
+            "signpost":   "оставить надпись для всех",
+            "watchtower": "видно весь остров с высоты",
+        }
+        # RU display names so a Russian-thinking model grounds «шалаш» to `tent`.
+        _BUILD_RU = {
+            "campfire": "костёр", "tent": "шалаш/палатка", "water_still": "дистиллятор",
+            "store": "склад", "workbench": "верстак", "smokehouse": "коптильня",
+            "garden": "грядка", "well": "колодец", "signpost": "указатель",
+            "watchtower": "дозорная вышка",
+        }
+        build_lines, affordable = [], []
+        for bk, bspec in world.scenario.get("buildables", {}).items():
+            cost = bspec.get("cost", {})
+            cost_txt = ", ".join(f"{int(q)} {it}" for it, q in cost.items()) or "даром"
+            can = all(agent.inventory.get(it, 0) >= q for it, q in cost.items())
+            ru = _BUILD_RU.get(bk, "")
+            if can:
+                affordable.append(f"{bk} ({ru}; {cost_txt})" if ru else f"{bk} ({cost_txt})")
+            if not fast:
+                mark = "✓ материалы есть" if can else "✗ не хватает"
+                gain = _BUILD_GAIN.get(bk, bspec.get("role", ""))
+                label = f"{bk} — {ru}" if ru else bk
+                build_lines.append(f"  - {label} ({cost_txt}) — {gain} [{mark}]")
+        if fast:
+            # keep the fast prompt lean, but never hide that building is POSSIBLE
+            build_block = (f"Хватает материалов построить (build_structure): "
+                           f"{'; '.join(affordable)}\n") if affordable else ""
+        else:
+            build_block = ("Можно построить (build_structure, строится за несколько ходов; "
+                           "вдвоём-втроём быстрее):\n" + "\n".join(build_lines) + "\n") \
+                if build_lines else ""
 
         memory_count = 4 if fast else max(6, min(80, self.context_tokens // 700))
         # Retrieval scored against the agent's ACTUAL situation (needs + who's
@@ -696,12 +802,14 @@ class OpenRouterLLM:
                 f"{plan_block}"
                 f"Твоё состояние:\n{phys_text}{dread_line}\n"
                 f"{feel_block}"
+                f"{gov_block}"
                 f"Инвентарь: {inv}\n"
                 f"Данные обещания: {promises_txt}\n"
                 f"Следуешь за: {following}\n"
                 f"Выжившие рядом: {'; '.join(nearby_agents) if nearby_agents else 'никого не видно'}\n"
                 f"Ближайшие ресурсы: {'; '.join(node_lines) if node_lines else 'ещё не найдены'}\n"
                 f"Лагерь / постройки: {'; '.join(structs[:6]) if structs else 'только то, что было на острове до вас'}\n"
+                f"{build_block}"
                 f"Свежие воспоминания:\n" + ("\n".join(mem_lines) if mem_lines else "  (нет)") + "\n"
                 f"Разговор рядом:\n" + ("\n".join(chatter) if chatter else "  (тихо)") + "\n"
                 f"Доступные действия (выбери ровно одно):\n" + tool_menu + "\n"
@@ -715,6 +823,7 @@ class OpenRouterLLM:
                 f"Пол: {gender_ru}\n"
                 f"Твоё состояние:\n{phys_text}{dread_line}\n"
                 f"{feel_block}"
+                f"{gov_block}"
                 f"{role_line}"
                 f"Инвентарь: {inv}\n"
                 f"Цели: {', '.join(agent.goals) if agent.goals else 'выжить'}\n"
@@ -725,6 +834,7 @@ class OpenRouterLLM:
                 f"Что ты думаешь о людях:\n{beliefs_txt}\n"
                 f"Известные ресурсы: {'; '.join(node_lines) if node_lines else 'ещё не найдены'}\n"
                 f"Лагерь / постройки: {'; '.join(structs) if structs else 'только то, что было на острове до вас'}\n"
+                f"{build_block}"
                 f"Последние воспоминания:\n" + ("\n".join(mem_lines) if mem_lines else "  (нет)") + "\n"
                 f"Разговор рядом:\n"
                 + ("\n".join(chatter) if chatter else "  (тихо)") + "\n"
