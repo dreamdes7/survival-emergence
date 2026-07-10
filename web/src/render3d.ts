@@ -1773,6 +1773,62 @@ function buildWaterfalls(n: number): void {
   terrainGroup?.add(waterfallGroup);
 }
 
+// Sea stacks (phase 3): a few weathered rock islets standing off the coast —
+// the single cheapest way to make the lagoon read as a real place with depth
+// and a broken, layered silhouette instead of an empty pool.
+let seaStackGroup: THREE.Group | null = null;
+function buildSeaStacks(st: WorldState, n: number): void {
+  seaStackGroup?.removeFromParent();
+  seaStackGroup = new THREE.Group();
+  const grid = st.map.grid;
+  const isWater = (x: number, y: number) =>
+    x < 0 || y < 0 || x >= n || y >= n || grid[y][x].includes("water");
+  // candidate open-sea tiles 2-4 tiles off the shore
+  const cands: [number, number][] = [];
+  for (let y = 2; y < n - 2; y += 2) {
+    for (let x = 2; x < n - 2; x += 2) {
+      if (!isWater(x, y)) continue;
+      let nearLand = false, tooClose = false;
+      for (let r = 1; r <= 4; r += 1)
+        for (const [dx, dz] of [[r, 0], [-r, 0], [0, r], [0, -r]] as const)
+          if (!isWater(x + dx, y + dz)) { nearLand = true; if (r <= 1) tooClose = true; }
+      if (nearLand && !tooClose) cands.push([x, y]);
+    }
+  }
+  cands.sort((a, b) => hash01(a[0], a[1], 900) - hash01(b[0], b[1], 900));
+  const picked: [number, number][] = [];
+  for (const c of cands) {
+    if (picked.every((p) => Math.hypot(p[0] - c[0], p[1] - c[1]) > 9)) picked.push(c);
+    if (picked.length >= 4) break;
+  }
+  const rockMat = lamS(pal().wallHigh), capMat = lamS(pal().tuft);
+  for (const [x, y] of picked) {
+    const wx = x + 0.5, wz = y + 0.5;
+    const g = new THREE.Group();
+    const H = 0.9 + hash01(x, y, 901) * 1.1;
+    const base = new THREE.Mesh(new THREE.CylinderGeometry(0.34, 0.6, H, 6, 1), rockMat);
+    base.position.y = H / 2 - 0.5;                 // foot below the waterline
+    base.castShadow = true;
+    // tilt + a smaller stacked block for a broken, weathered read
+    base.rotation.z = (hash01(x, y, 902) - 0.5) * 0.24;
+    g.add(base);
+    const cap = new THREE.Mesh(new THREE.DodecahedronGeometry(0.3, 0), rockMat);
+    cap.position.y = H - 0.5; cap.scale.set(1, 0.7, 1);
+    cap.rotation.set(hash01(x, y, 903) * 6, hash01(x, y, 904) * 6, 0);
+    cap.castShadow = true;
+    g.add(cap);
+    if (hash01(x, y, 905) < 0.6) {                 // a tuft of green clings to the top
+      const grass = new THREE.Mesh(new THREE.SphereGeometry(0.16, 6, 4), capMat);
+      grass.position.y = H - 0.5 + 0.16; grass.scale.set(1, 0.5, 1);
+      g.add(grass);
+    }
+    g.position.set(wx, 0, wz);
+    g.rotation.y = hash01(x, y, 906) * 6.28;
+    seaStackGroup.add(g);
+  }
+  terrainGroup?.add(seaStackGroup);
+}
+
 // ── terrain: the island as SCULPTURE — stacked extruded plates ────────────────
 function buildTerrain(st: WorldState): void {
   terrainGroup?.removeFromParent();
@@ -1920,6 +1976,7 @@ function buildTerrain(st: WorldState): void {
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildSurf(st);
   buildWaterfalls(n);
+  buildSeaStacks(st, n);
   buildWaves(cx, cz, n);
   buildClouds(cx, cz, n);
   buildFog(cx, cz, n);
@@ -2925,6 +2982,35 @@ function buildFlora(st: WorldState): void {
     }
   }
 
+  // Cliff dressing (phase 3): scree at the FOOT of tall walls. A tile that sits
+  // 2+ plates below a near neighbour is a cliff base — pile weathered boulders
+  // there so walls meet the ground in rubble, not a clean seam. Merged, so a few
+  // hundred boulders cost one draw call.
+  const scree: THREE.BufferGeometry[] = [];
+  const screeLo = new THREE.Color(pal().dressRock), screeHi = new THREE.Color(pal().wallHigh);
+  for (let ty = 1; ty < n - 1; ty += 1) {
+    for (let tx = 1; tx < n - 1; tx += 1) {
+      if (st.map.grid[ty][tx].includes("water")) continue;
+      const lv = plateLevelAt(tx + 0.5, ty + 0.5);
+      let hi = false;
+      for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const)
+        if (plateLevelAt(tx + 0.5 + dx * 1.6, ty + 0.5 + dz * 1.6) >= lv + 2) hi = true;
+      if (!hi || hash01(tx, ty, 800) > 0.7) continue;
+      const cnt = 2 + Math.floor(hash01(tx, ty, 801) * 3);
+      for (let i = 0; i < cnt; i += 1) {
+        const wx = tx + hash01(tx, ty, 810 + i) * 0.9 + 0.05;
+        const wz = ty + hash01(tx, ty, 820 + i) * 0.9 + 0.05;
+        const gy = groundY(wx, wz); if (gy < 0.12) continue;
+        const rr = hash01(tx, ty, 830 + i);
+        const br = 0.06 + rr * 0.13;
+        const rock = new THREE.DodecahedronGeometry(br, 0);
+        rock.scale(1, 0.7 + rr * 0.4, 1);
+        rock.translate(wx, gy + br * 0.4, wz);
+        scree.push(bakeColor(rock, screeLo.clone().lerp(screeHi, rr).getHex()));
+      }
+    }
+  }
+
   const addMerged = (geos: THREE.BufferGeometry[]) => {
     if (!geos.length) return;
     const merged = mergeGeometries(geos, false);
@@ -2935,7 +3021,7 @@ function buildFlora(st: WorldState): void {
     floraGroup!.add(mesh);
   };
   addMerged(flowers); addMerged(ferns); addMerged(shrooms); addMerged(drift);
-  addMerged(tufts); addMerged(canopy); addMerged(trunks);
+  addMerged(tufts); addMerged(canopy); addMerged(trunks); addMerged(scree);
   scene.add(floraGroup);
 }
 
