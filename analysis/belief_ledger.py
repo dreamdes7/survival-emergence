@@ -51,16 +51,18 @@ _UNCONTROLLED = ("шторм", "штормо", "буря", "бури", "ураг
 # Causes that are social/moral/mystical, not physical — the superstition tell.
 # (No general-negativity words like "злой": "злой шторм" means fierce, not a moral
 #  verdict — such tokens produced false positives.)
-_MYSTICAL = ("не поделил", "поделили", "жадн", "грех", "табу", "наказ", "прогнев", "дух",
-             "боги", "бог ", "прокля", "ритуал", "жертв", "обидел", "предал", "кара",
-             "потому что мы", "потому что кто-то", "greed", "sin", "taboo", "spirit",
-             "ritual", "punish", "betray")
+_MYSTICAL = ("не поделил", "поделили", "жадн", "грехи", "за грех", "во грех", "табу",
+             "наказ", "прогнев", "боги", "бог ", "прокля", "ритуал", "жертв", "обидел",
+             "предал", "кара", "потому что мы", "потому что кто-то", "greed", "sin",
+             "taboo", "spirit", "ritual", "punish", "betray")
 
 # The STRONG supernatural-causation words — used for the connective-free catch, where
 # we have no "because" to lean on and must be sure a claim is genuinely mystical.
-_MYSTICAL_STRONG = ("наказ", "кара", "прогнев", "грех", "прокля", "боги", "бог ",
-                    "ритуал", "жертв", "проклят", "знак свыше", "злой дух", "духи леса",
-                    "curse", "sin", "ritual", "omen", "punish", "wrath")
+# ("грех не …" is the idiom "it'd be a shame not to" — NOT religion; hence "грехи"/
+#  "за грех" only, never bare "грех".)
+_MYSTICAL_STRONG = ("наказ", "кара", "прогнев", "грехи", "за грех", "во грех", "прокля",
+                    "боги", "бог ", "ритуал", "жертв", "проклят", "знак свыше", "злой дух",
+                    "духи леса", "curse", "sin", "ritual", "omen", "punish", "wrath")
 
 
 def _has(text: str, vocab) -> bool:
