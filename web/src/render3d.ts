@@ -626,14 +626,17 @@ const LIGHT_KEYS: LightKey[] = [
   { t: 0.00, sun: 0xffb08a, sunI: 1.25, elev: 0.14, azim: -1.7,
     sky: 0xf3d2d8, gnd: 0x6a6a70, hemiI: 0.72,
     fog: 0xeed9d2, top: 0xc9b6d8, hor: 0xffd9b8, water: 0x8fb0c0, dark: 0.22 },
-  { t: 0.10, sun: 0xffe9c8, sunI: 1.75, elev: 0.5, azim: -1.05,
-    sky: 0xd8ecec, gnd: 0x6a7a5e, hemiI: 0.85,
+  // Daytime keys carry COLOURED SHADOWS (the A Short Hike signature): a warm
+  // golden sun against a cool blue-violet ambient fill — lit faces glow warm,
+  // shade falls cool, and the whole frame gains painterly depth for free.
+  { t: 0.10, sun: 0xffdfae, sunI: 1.9, elev: 0.5, azim: -1.05,
+    sky: 0xbfdeed, gnd: 0x7d86ab, hemiI: 0.95,
     fog: 0xd6e8df, top: 0x8fd0ea, hor: 0xf6f3e2, water: 0x7fb6ba, dark: 0 },
-  { t: 0.24, sun: 0xfff2dd, sunI: 1.9, elev: 0.85, azim: 0.0,
-    sky: 0xd8ecec, gnd: 0x6a7a5e, hemiI: 0.9,
+  { t: 0.24, sun: 0xffe8c0, sunI: 2.0, elev: 0.85, azim: 0.0,
+    sky: 0xb9dcec, gnd: 0x8089ae, hemiI: 1.0,
     fog: 0xd6e8df, top: 0x8ecfe0, hor: 0xf4ead2, water: 0x7fb6ba, dark: 0 },
-  { t: 0.38, sun: 0xffbe6e, sunI: 1.95, elev: 0.26, azim: 1.15,
-    sky: 0xecd8bc, gnd: 0x70685a, hemiI: 0.74,
+  { t: 0.38, sun: 0xffbe6e, sunI: 2.0, elev: 0.26, azim: 1.15,
+    sky: 0xe4cfc0, gnd: 0x77689a, hemiI: 0.82,
     fog: 0xecd5ac, top: 0xa8c4d8, hor: 0xffcf8e, water: 0x87aeb2, dark: 0.05 },
   // sunset holds TWO keys (blaze, then violet dusk) so the evening is a scene
   // of its own rather than a single frame on the way to night
@@ -897,12 +900,14 @@ function buildHeights(st: WorldState): void {
     if (isWater(x, y)) return SEA_FLOOR;
     const d = dist[y][x];
     const t = grid[y][x];
-    // coastal shelf rises inland, biomes add their storeys
-    let h = 0.1 + Math.min(1, d / 7) ** 1.15 * 2.1;
+    // A STEEPER cone with lower plate cuts (below): terraces appear all over
+    // the island instead of only at the rocky core — the tiered, layered
+    // silhouette is the whole drama of the diorama.
+    let h = 0.12 + Math.min(1, d / 5.5) ** 0.95 * 3.0;
     if (t.includes("rock")) h += PEAK_ROCK * Math.min(1, d / 9 + 0.35);
-    else if (t.includes("foliage")) h += 0.5;
-    // gentle, slow noise — enough to bend plateau outlines, not to crumb them
-    h += (vnoise(x, y, 11, 31) - 0.5) * 0.8 + (vnoise(x, y, 5, 57) - 0.5) * 0.2;
+    else if (t.includes("foliage")) h += 0.6;
+    // bolder noise — bends terrace outlines into bays and promontories
+    h += (vnoise(x, y, 9, 31) - 0.5) * 1.15 + (vnoise(x, y, 4, 57) - 0.5) * 0.35;
     return Math.max(0.08, h);
   };
 
@@ -916,7 +921,8 @@ function buildHeights(st: WorldState): void {
     }
     g.push(row);
   }
-  for (let pass = 0; pass < 3; pass += 1) {
+  // two passes, not three: crisper steps mean more distinct terrace levels
+  for (let pass = 0; pass < 2; pass += 1) {
     const out = g.map((r) => r.slice());
     for (let y = 1; y < n; y += 1)
       for (let x = 1; x < n; x += 1)
@@ -943,10 +949,13 @@ function buildHeights(st: WorldState): void {
 // extruded into vertical-walled plates. We cut the smooth height field at
 // fixed thresholds, smooth each cut with Chaikin, and extrude. Flat tops,
 // smooth curved walls, an authored silhouette — out of pure generation.
-const PLATE_THRESH = [0.05, 1.2, 2.4, 3.6, 4.8];  // raw-height cuts (0 = coastline)
+// Lower, tighter cuts + the steeper cone in tileH: mid terraces now appear a
+// couple of tiles inland everywhere, so the whole island is layered — and lips
+// tall enough for waterfalls exist outside the rocky core too.
+const PLATE_THRESH = [0.05, 0.9, 1.9, 3.0, 4.4];  // raw-height cuts (0 = coastline)
 // world-space top of each plate — the gaps WIDEN with height, so the island
 // rises into a dramatic tiered massif with tall cliffs, not a gentle mound
-const PLATE_TOP = [0.26, 1.1, 2.15, 3.35, 4.7];
+const PLATE_TOP = [0.26, 1.05, 2.05, 3.25, 4.7];
 
 function rawHeightAt(wx: number, wz: number): number {
   // bilinear over the smooth corner grid
@@ -1614,18 +1623,21 @@ function buildWaterfalls(n: number): void {
   waterfallGroup?.removeFromParent();
   waterfallGroup = new THREE.Group();
   waterfallMats = [];
-  // candidate lips: a mid/high plate cell whose near neighbour sits 2+ plates lower
+  // candidate lips: ANY terrace edge — a cell whose near neighbour sits at
+  // least one plate lower (or is open sea: a fall straight into the shallows).
+  // Requiring 2-level drops found nothing on gentler seeds — invisible feature.
   type Lip = { x: number; z: number; dx: number; dz: number; top: number; bot: number; drop: number };
   const lips: Lip[] = [];
   for (let z = 2; z < n - 2; z += 1) {
     for (let x = 2; x < n - 2; x += 1) {
       const lv = plateLevelAt(x + 0.5, z + 0.5);
-      if (lv < 2) continue;
+      if (lv < 1) continue;
       for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
         const nl = plateLevelAt(x + 0.5 + dx * 1.7, z + 0.5 + dz * 1.7);
-        if (nl >= 0 && nl <= lv - 2) {
+        if (nl <= lv - 1) {
+          const bot = nl < 0 ? 0.02 : PLATE_TOP[nl];   // sea-surface for coast falls
           lips.push({ x: x + 0.5 + dx * 0.9, z: z + 0.5 + dz * 0.9, dx, dz,
-                      top: PLATE_TOP[lv], bot: PLATE_TOP[nl], drop: lv - nl });
+                      top: PLATE_TOP[lv], bot, drop: lv - Math.max(nl, -1) });
         }
       }
     }
@@ -1635,8 +1647,8 @@ function buildWaterfalls(n: number): void {
     || hashStr(`wf${a.x},${a.z}`) - hashStr(`wf${b.x},${b.z}`));
   const picked: Lip[] = [];
   for (const l of lips) {
-    if (picked.every((p) => Math.hypot(p.x - l.x, p.z - l.z) > 13)) picked.push(l);
-    if (picked.length >= 2) break;
+    if (picked.every((p) => Math.hypot(p.x - l.x, p.z - l.z) > 11)) picked.push(l);
+    if (picked.length >= 3) break;
   }
   for (const l of picked) {
     const h = l.top - l.bot + 0.22;
@@ -2817,14 +2829,15 @@ function buildProps(st: WorldState): void {
     else if (k === "shell_bed") obj = makeRock(node.id, 0xe8dcc8);
     if (!obj) continue;
     const wx = node.x + 0.5, wz = node.y + 0.5;
-    // Seat on the LOWEST nearby surface so props at a terrace lip settle into
-    // the step instead of hovering: pools sample wide (a pond can't overhang a
-    // cliff), trees/rocks just enough to kill the worst float.
-    const rad = k === "spring" || k === "fishing" ? 0.42 : 0.2;
-    let gy = surfaceY(wx, wz);
-    for (const [ox, oz] of [[-rad, 0], [rad, 0], [0, -rad], [0, rad]] as const)
-      gy = Math.min(gy, surfaceY(wx + ox, wz + oz));
-    gy = Math.max(0.02, gy);
+    // Seating: pools take the LOWEST nearby surface (a pond can't overhang a
+    // cliff — it settles into the step); everything else takes the MEDIAN so a
+    // tree at a lip neither hovers on air nor sinks into the upper plate.
+    const isPool = k === "spring" || k === "fishing";
+    const rad = isPool ? 0.42 : 0.2;
+    const samples = [surfaceY(wx, wz),
+      surfaceY(wx - rad, wz), surfaceY(wx + rad, wz),
+      surfaceY(wx, wz - rad), surfaceY(wx, wz + rad)].sort((a, b) => a - b);
+    const gy = Math.max(0.02, isPool ? samples[0] : samples[2]);
     obj.position.set(wx, gy, wz);
     // spin each prop to a stable per-id heading so a grove of palms/trees/rocks
     // doesn't read as clones all facing the same way (reflection clone inherits it)
@@ -3488,16 +3501,26 @@ function buildStructs(st: WorldState): void {
   for (const s of st.structures) {
     const obj = makeStructure(s);
     // Anchor at the FOOTPRINT centre (a 3×3 cave anchored at its top-left tile
-    // hung a full tile past its logical rect — over cliff lips that meant 90%
-    // of the model floating in the air), and seat on the LOWEST plate under the
-    // footprint: sinking a little into a terrace lip reads fine, hovering never.
+    // hung a full tile past its logical rect). Seat at the MAJORITY (median)
+    // level under the footprint — min-seating buried a lip-straddling cave
+    // inside the upper cliff — and when part of the footprint hangs over a
+    // lower step, fill under it with a rock foundation (Bad North cliff houses):
+    // nothing floats, nothing sinks.
     const sw = s.w || 1, sh = s.h || 1;
     const wx = s.x + sw / 2, wz = s.y + sh / 2;
-    let gy = surfaceY(wx, wz);
     const inx = Math.max(0.3, sw / 2 - 0.25), inz = Math.max(0.3, sh / 2 - 0.25);
-    for (const [ox, oz] of [[-inx, -inz], [inx, -inz], [-inx, inz], [inx, inz]] as const)
-      gy = Math.min(gy, surfaceY(wx + ox, wz + oz));
-    gy = Math.max(0.02, gy);
+    const hs = [surfaceY(wx, wz),
+      surfaceY(wx - inx, wz - inz), surfaceY(wx + inx, wz - inz),
+      surfaceY(wx - inx, wz + inz), surfaceY(wx + inx, wz + inz)].sort((a, b) => a - b);
+    const gy = Math.max(0.02, hs[2]);
+    if (gy - hs[0] > 0.18) {
+      const drop = gy - hs[0] + 0.12;
+      const found = new THREE.Mesh(
+        new THREE.BoxGeometry(sw * 0.82, drop, sh * 0.82), lam(pal().wallHigh));
+      found.position.set(wx, gy - drop / 2 + 0.02, wz);
+      found.castShadow = found.receiveShadow = true;
+      structsGroup.add(found);
+    }
     obj.position.set(wx, gy, wz);
     obj.userData.structId = s.id;
     structsGroup.add(obj);
