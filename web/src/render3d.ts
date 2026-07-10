@@ -1948,9 +1948,12 @@ function buildTerrain(st: WorldState): void {
   const wallLow = washed(pal().wallLow);       // wet-sand base walls
   const wallHigh = washed(pal().wallHigh);     // rock walls above
   const BEV = 0.12;
-  const dress = new THREE.Group();             // rim grass + wall-foot rocks
-  const tuftMat = lamS(pal().tuft);
-  const rockMat = lam(pal().dressRock);
+  // rim grass + wall-foot rocks — ACCUMULATED and merged into one mesh. These
+  // used to be thousands of individual meshes: fine zoomed in (frustum-culled),
+  // but zoomed out with the whole island in view every one rendered — the 1-2fps
+  // cliff. Merged, the whole-island view is a handful of draw calls.
+  const dressGeo: THREE.BufferGeometry[] = [];
+  const tuftHex = pal().tuft, dressRockHex = pal().dressRock;
 
   // STRATA: the cliff faces are NOT one grey slab. Each terrace gets its own
   // wall colour — the beach terrace is wet sand, the first grass terrace above
@@ -2045,24 +2048,21 @@ function buildTerrain(st: WorldState): void {
         if (!pointInLoop(px + nx * 0.8, pz + nz * 0.8, loop)) { nx = -nx; nz = -nz; }
         const r = hashStr(`d${k}:${i}:${Math.round(px)}`);
         if (r < 0.5) {
-          // tuft: three tiny leaning cones on the rim
+          // tuft: three tiny leaning cones on the rim (baked for merge)
           for (let b = 0; b < 3; b += 1) {
-            const cone3 = new THREE.Mesh(
-              new THREE.ConeGeometry(0.035, 0.16 + (b % 2) * 0.06, 4), tuftMat);
-            cone3.position.set(
+            const cone3 = new THREE.ConeGeometry(0.035, 0.16 + (b % 2) * 0.06, 4);
+            cone3.rotateZ((b - 1) * 0.22);
+            cone3.translate(
               px + nx * (0.5 + r * 0.5) + (b - 1) * 0.09,
               PLATE_TOP[k] + 0.07, pz + nz * (0.5 + r * 0.5) + ((b + 1) % 2) * 0.07);
-            cone3.rotation.z = (b - 1) * 0.22;
-            dress.add(cone3);
+            dressGeo.push(bakeColor(cone3, tuftHex));
           }
         } else if (r < 0.68 && k >= 1) {
-          // rock at the foot of the wall on the plate below
-          const rock = new THREE.Mesh(
-            new THREE.DodecahedronGeometry(0.1 + r * 0.12, 0), rockMat);
-          rock.position.set(px - nx * 0.55, PLATE_TOP[k - 1] + 0.08, pz - nz * 0.55);
-          rock.rotation.set(r * 7, r * 3, r * 5);
-          rock.castShadow = true;
-          dress.add(rock);
+          // rock at the foot of the wall on the plate below (baked for merge)
+          const rock = new THREE.DodecahedronGeometry(0.1 + r * 0.12, 0);
+          rock.rotateX(r * 7); rock.rotateY(r * 3);
+          rock.translate(px - nx * 0.55, PLATE_TOP[k - 1] + 0.08, pz - nz * 0.55);
+          dressGeo.push(bakeColor(rock, dressRockHex));
         }
       }
     }
@@ -2076,7 +2076,16 @@ function buildTerrain(st: WorldState): void {
       terrainGroup.add(m);
     }
   }
-  terrainGroup.add(dress);
+  if (dressGeo.length) {
+    const merged = mergeGeometries(dressGeo, false);
+    if (merged) {
+      const m = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({
+        vertexColors: true, flatShading: true }));
+      m.castShadow = true; m.receiveShadow = true;
+      m.frustumCulled = false;
+      terrainGroup.add(m);
+    }
+  }
 
   // Bad North: the island mirrored as a dark still silhouette in the water.
   const reflMat = new THREE.MeshBasicMaterial({
