@@ -46,6 +46,7 @@ const GradeShader = {
     // style knobs (driven from gfx / presets)
     uInkAmt: { value: 0.85 },
     uInkWidth: { value: 0.0 },
+    uInkMode: { value: 0.0 },   // 0 = all edges (creases+silhouette), 1 = silhouette only
     uComic: { value: 0.0 },
     uPosterLevels: { value: 6.0 },
     uPosterAmt: { value: 0.13 },
@@ -81,7 +82,7 @@ const GradeShader = {
     uniform vec3 uCamPos;
     uniform vec3 uCamFwd;
     uniform float uStorm;
-    uniform float uInkAmt, uInkWidth, uComic, uPosterLevels, uPosterAmt;
+    uniform float uInkAmt, uInkWidth, uInkMode, uComic, uPosterLevels, uPosterAmt;
     uniform float uHalftone, uHalftoneScale, uSat, uPaperAmt, uVignette, uBarrel;
     uniform float uSepia, uFlicker, uWeave;
     uniform vec3 uHiTint, uShadowTint;
@@ -137,11 +138,14 @@ const GradeShader = {
       // contour is alive the way a hand-drawn line is, while fills hold still.
       float t6 = floor(uTime * 6.0) / 6.0;
       vec2 roll = vec2(hash(vec2(t6, 3.1)), hash(vec2(t6, 7.7))) * 0.5;
+      // boil amplitude: kept small so the contour reads as a steady hand-drawn
+      // line with a hint of life, not a crawling wobble (was 3.0 — too much once
+      // the rest of the frame is super-sampled crisp).
       vec2 bo = (vec2(texture2D(uPaper, uv * asp * 2.2 + roll).g,
                       texture2D(uPaper, uv * asp * 2.2 + roll + vec2(0.53, 0.29)).g)
-                 - 0.5) * (3.0 / uRes);
+                 - 0.5) * (1.3 / uRes);
       vec2 iuv = uv + bo;
-      vec2 ip = (1.3 + uInkWidth * 2.2) / uRes;    // wider cross = bolder line
+      vec2 ip = (1.9 + uInkWidth * 2.2) / uRes;    // wider cross = bolder line
       vec4 s0 = texture2D(uInk, iuv + vec2(-ip.x, -ip.y));
       vec4 s1 = texture2D(uInk, iuv + vec2( ip.x,  ip.y));
       vec4 s2 = texture2D(uInk, iuv + vec2( ip.x, -ip.y));
@@ -151,14 +155,34 @@ const GradeShader = {
       float d2 = s2.a <= 0.0 ? far0 : s2.a, d3 = s3.a <= 0.0 ? far0 : s3.a;
       float dn = length(s0.xyz - s1.xyz) + length(s2.xyz - s3.xyz);
       float dmin = min(min(d0, d1), min(d2, d3));
-      float dd = (abs(d0 - d1) + abs(d2 - d3)) / max(dmin, 4.0);
-      float ink = smoothstep(0.5, 1.1, dn) * 0.55 + smoothstep(0.030, 0.10, dd) * 0.6;
-      ink = min(ink, 1.0);
-      // the line is deposited pigment, not a drawn stroke: pigment-equation
-      // darkening (saturates mids, spares highlights) with a cool ink cast
-      c.rgb = pigment(c.rgb, 1.0 + ink * uInkAmt);
-      c.rgb *= mix(vec3(1.0), vec3(0.93, 0.985, 1.04), ink * 0.5);
-      // comic mode lays a SOLID confident outline over the paint
+      // CLAMP the normalisation (not just floor it): a purely relative threshold
+      // (/dmin) makes distant objects need a proportionally huge depth jump, so
+      // their outlines fade with distance. Capping dmin at 28 keeps far silhouettes
+      // detectable while the floor of 4 still stops near objects over-triggering.
+      float dd = (abs(d0 - d1) + abs(d2 - d3)) / clamp(dmin, 4.0, 28.0);
+      // ALL-EDGES: normal creases (every interior facet) + depth overlaps.
+      float allEdges = smoothstep(0.5, 1.1, dn) * 0.55 + smoothstep(0.030, 0.10, dd) * 0.6;
+      // SILHOUETTE: a depth step that COINCIDES with a normal change. This is a
+      // true object boundary — the near surface faces one way, whatever's behind
+      // faces another. It fires on object outlines, overlaps, and terrace lips
+      // (flat top vs vertical face), but NOT on flat receding ground (depth ramp,
+      // constant normal) or interior facet creases (sharp normal, no depth step).
+      // Thresholds are lowered so small props (rocks, reeds) and distant/weakly-
+      // separated boundaries register, while the normal gate still rejects flat
+      // ground (constant normal) and the crush of interior facets (no depth step).
+      float depthStep   = smoothstep(0.006, 0.03, dd);
+      float normalBound = smoothstep(0.22, 0.60, dn);
+      float silhouette  = depthStep * normalBound * 1.7;
+      float ink = min(mix(allEdges, silhouette, uInkMode), 1.0);
+      // COLOURED ink: the line is a darker, slightly cool shade of the LOCAL
+      // colour (hue kept) rather than pigment-squared toward black — a red
+      // flower gets a dark-red edge, foliage a deep-green one. The old pigment
+      // equation crushed small/dark props to near-black, which read as a plain
+      // black marker. *0.4 keeps enough chroma that the hue still shows.
+      vec3 inkTint = c.rgb * 0.4;
+      inkTint *= mix(vec3(1.0), vec3(0.9, 0.98, 1.1), 0.5);   // faint cool cast
+      c.rgb = mix(c.rgb, inkTint, min(ink * uInkAmt, 1.0));
+      // comic mode still lays a SOLID confident near-black outline over the paint
       c.rgb = mix(c.rgb, vec3(0.05, 0.06, 0.09), clamp(ink, 0.0, 1.0) * uComic * 0.72);
 
       // ink pooling: soft luminance edges still pool a little pigment (kept
@@ -397,8 +421,64 @@ const TiltShiftShader = {
     }`,
 };
 
+// Pixelate + ordered dither — an "A Short Hike"-style low-fi pass at the very
+// end of the chain. Snaps the frame to square blocks (chunky pixels), then
+// quantises the colour with a 4x4 Bayer ordered dither so gradients (sky, soft
+// shadow) break into a retro dot pattern instead of banding. Both off = a
+// straight passthrough.
+const PixelateShader = {
+  uniforms: {
+    tDiffuse: { value: null as THREE.Texture | null },
+    uRes: { value: new THREE.Vector2(1280, 720) },
+    uPixel: { value: 1.0 },    // block size in device px; ≤1 = no pixelation
+    uScale: { value: 1.0 },    // render super-sample factor (to lock dither to display px)
+    uBits: { value: 8.0 },     // colour depth per channel in bits; ≥8 = full (off)
+    uDither: { value: 0.0 },   // 0 = hard bands … 1 = full ordered dither
+  },
+  vertexShader: `
+    varying vec2 vUv;
+    void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }`,
+  fragmentShader: `
+    uniform sampler2D tDiffuse;
+    uniform vec2 uRes;
+    uniform float uPixel;
+    uniform float uScale;
+    uniform float uBits;
+    uniform float uDither;
+    varying vec2 vUv;
+    // Recursive Bayer 4x4 (array-free, driver-safe on GLSL ES 1.0) → [0,1).
+    float bayer2(vec2 a) { a = floor(a); return fract(a.x * 0.5 + a.y * a.y * 0.75); }
+    float bayer4(vec2 a) { return bayer2(a * 0.5) * 0.25 + bayer2(a); }
+    void main() {
+      bool px = uPixel > 1.001;
+      vec2 blk = vec2(uPixel) / uRes;
+      // sample the block CENTRE so each chunky pixel is one flat colour
+      vec2 suv = px ? (floor(vUv / blk) + 0.5) * blk : vUv;
+      vec3 c = texture2D(tDiffuse, suv).rgb;
+      // Colour-depth crush with optional ordered dither. levels = 2^bits per
+      // channel; at 8 bits it's a no-op (full colour), so watercolour etc. stay
+      // clean unless you deliberately reduce the depth. The Bayer threshold is
+      // what makes the crush read as a dither PATTERN instead of hard bands, and
+      // uDither blends from "round to nearest" (0) to "full ordered dither" (1).
+      if (uBits < 7.99) {
+        float levels = pow(2.0, uBits);
+        // Lock the Bayer grid to DISPLAY pixels (uRes/uScale), not backing pixels.
+        // The pass runs at the super-sampled backing res; a backing-pixel dither
+        // gets averaged away by the CSS downsample, re-introducing the bands it
+        // was meant to hide (the horizontal stripe). One threshold per display
+        // pixel (or per pixel-block) survives the downsample intact.
+        vec2 dcoord = px ? floor(vUv / blk) : floor(vUv * uRes / uScale);
+        float offset = mix(0.5, bayer4(dcoord), uDither);
+        c = clamp(floor(c * (levels - 1.0) + offset) / (levels - 1.0), 0.0, 1.0);
+      }
+      gl_FragColor = vec4(c, 1.0);
+    }`,
+};
+
 function lam(color: number): THREE.MeshLambertMaterial {
-  return new THREE.MeshLambertMaterial({ color, flatShading: true });
+  const m = new THREE.MeshLambertMaterial({ color, flatShading: true });
+  smudgeNormals(m);          // painterly broken light on every flat-shaded prop/structure
+  return m;
 }
 
 // Smooth-shaded variant for sculpted surfaces (plate tops and walls).
@@ -419,7 +499,78 @@ function jitter(color: number, seed: string, amt = 0.05): THREE.Color {
 }
 
 function lamJ(color: number, seed: string, amt = 0.05): THREE.MeshLambertMaterial {
-  return new THREE.MeshLambertMaterial({ color: jitter(color, seed, amt), flatShading: true });
+  const m = new THREE.MeshLambertMaterial({ color: jitter(color, seed, amt), flatShading: true });
+  smudgeNormals(m);
+  return m;
+}
+
+// Foliage-specific jitter: WIDE lightness + saturation (some trees bright & lush,
+// some deep & dark) with only a modest hue drift — reads as a natural mixed
+// stand rather than uniform clones, without straying into unnatural teal greens.
+function jitterLeaf(color: number, seed: string): THREE.Color {
+  const c = new THREE.Color(color);
+  c.offsetHSL(
+    (hashStr(seed + "h") - 0.5) * 0.10,
+    (hashStr(seed + "s") - 0.5) * 0.28,
+    (hashStr(seed + "l") - 0.5) * 0.24,
+  );
+  return c;
+}
+// ── painterly normal smudge ───────────────────────────────────────────────────
+// Break the hard flat-shaded facet LIGHTING into an organic, hand-painted gradient
+// by wobbling the fragment normal with a world-space noise BEFORE the lighting is
+// computed. Silhouette (geometry) untouched, and the ink prepass renders its own
+// clean normals, so outlines stay crisp — only the SHADING inside a surface breaks.
+// The noise mixes SOFT value noise with HARD Voronoi cells, and a low-freq mask
+// makes some areas soft-washed and others hard-facetted (not a uniform blend).
+const SMUDGE_FN = `
+  uniform float uSmudge;
+  float smHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+  float smNoise(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(smHash(i), smHash(i + vec2(1.0, 0.0)), u.x),
+               mix(smHash(i + vec2(0.0, 1.0)), smHash(i + vec2(1.0, 1.0)), u.x), u.y); }
+  vec3 smHash3(vec2 p){ vec3 q = vec3(dot(p, vec2(127.1, 311.7)),
+    dot(p, vec2(269.5, 183.3)), dot(p, vec2(419.2, 371.9))); return fract(sin(q) * 43758.5453); }
+  vec3 smCell(vec2 x){ vec2 n = floor(x), f = fract(x); float md = 8.0; vec3 res = vec3(0.5);
+    for (int j = -1; j <= 1; j++){ for (int i = -1; i <= 1; i++){
+      vec2 g = vec2(float(i), float(j)); vec3 h = smHash3(n + g); vec2 r = g + h.xy - f;
+      float d = dot(r, r); if (d < md){ md = d; res = smHash3(n + g + 17.3); } } }
+    return res; }`;
+const SMUDGE_APPLY = `
+  {
+    // HARD flat facets from Voronoi (fold Y into XZ so spherical forms aren't
+    // sliced into vertical columns)…
+    vec2 cellUv = vec2(vWSm.x + vWSm.y * 0.7, vWSm.z - vWSm.y * 0.5) * 3.0;
+    vec3 hard = smCell(cellUv) - 0.5;
+    // …and SOFT value-noise wobble.
+    vec3 soft = vec3(smNoise(vWSm.xz * 6.0) - 0.5,
+                     smNoise(vWSm.yz * 6.0 + 5.1) - 0.5,
+                     smNoise(vWSm.xy * 6.0 + 9.3) - 0.5);
+    // low-freq mask: 0 = this AREA stays a soft wash, 1 = this area breaks into
+    // hard facets. So the character varies across the surface, not a flat blend.
+    float region = smoothstep(0.34, 0.66, smNoise(vWSm.xz * 1.3 + 3.3));
+    vec3 pert = mix(soft * 0.9, hard, region);
+    normal = normalize(normal + pert * uSmudge);
+  }`;
+
+function smudgeNormals(m: THREE.Material, amt = 0.6): void {
+  m.onBeforeCompile = (shader) => {
+    shader.uniforms.uSmudge = { value: amt };
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWSm;")
+      .replace("#include <begin_vertex>",
+        "#include <begin_vertex>\nvWSm = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWSm;\n" + SMUDGE_FN)
+      .replace("#include <normal_fragment_begin>", "#include <normal_fragment_begin>\n" + SMUDGE_APPLY);
+  };
+  m.customProgramCacheKey = () => "smudge";
+}
+
+function lamJLeaf(color: number, seed: string): THREE.MeshLambertMaterial {
+  const m = new THREE.MeshLambertMaterial({ color: jitterLeaf(color, seed), flatShading: true });
+  smudgeNormals(m);
+  return m;
 }
 
 // ── palette (shared spirit with vector.ts, tuned for lit 3D) ──────────────────
@@ -550,6 +701,7 @@ let gradePass: ShaderPass;
 let kuwaharaPass: ShaderPass;
 let tiltPass: ShaderPass;
 let fxaaPass: ShaderPass;
+let pixelPass: ShaderPass;
 let bloomPass: UnrealBloomPass;
 let terrainGroup: THREE.Group | null = null;
 let propsGroup: THREE.Group | null = null;
@@ -564,6 +716,7 @@ let skyMat: THREE.ShaderMaterial | null = null;
 let fireLights: THREE.PointLight[] = [];
 let inkTarget: THREE.WebGLRenderTarget | null = null;
 let inkMat: THREE.ShaderMaterial | null = null;
+let lastRenderPr = 0;   // so a renderScale change re-applies even without a resize
 type Swayer = { m: THREE.Object3D; phase: number; amp: number; base: number };
 let swayers: Swayer[] = [];
 let breathers: Swayer[] = [];               // canopy blobs pulsing in the wind
@@ -935,6 +1088,10 @@ function ensureRenderer(stageEl: HTMLElement): void {
     fragmentShader: `
       varying vec3 vN; varying float vD;
       void main() { gl_FragColor = vec4(normalize(vN), vD); }`,
+    // DoubleSide so thin two-sided blades (palm fronds, reeds) write depth+normal
+    // whichever way they face — otherwise back-facing fronds are culled from the
+    // prepass and get no silhouette outline.
+    side: THREE.DoubleSide,
   });
   inkTarget = new THREE.WebGLRenderTarget(1, 1, {
     type: THREE.HalfFloatType,
@@ -945,8 +1102,16 @@ function ensureRenderer(stageEl: HTMLElement): void {
 
   sun = new THREE.DirectionalLight(0xfff2dd, 1.9);
   sun.castShadow = true;
-  sun.shadow.mapSize.set(2048, 2048);
-  sun.shadow.bias = -0.0005;
+  // 4096 over the island frustum: 2x the linear texel density of the old 2048,
+  // so small props (rocks, reeds) cast a shadow with actual shape instead of a
+  // few blocky texels.
+  sun.shadow.mapSize.set(4096, 4096);
+  // normalBias offsets the shadow lookup along the surface normal — the correct
+  // cure for peter-panning (shadows detaching / "sliding off" their caster).
+  // With it doing the anti-acne work, the constant bias can be tiny, which stops
+  // the detachment the old heavy -0.0005 constant bias caused.
+  sun.shadow.bias = -0.00015;
+  sun.shadow.normalBias = 0.035;
   scene.add(sun);
   scene.add(sun.target);
 
@@ -1067,6 +1232,9 @@ function ensureRenderer(stageEl: HTMLElement): void {
   composer.addPass(tiltPass);
   fxaaPass = new ShaderPass(FXAAShader);
   composer.addPass(fxaaPass);
+  // low-fi pass last, so it pixelates/dithers the finished painterly frame
+  pixelPass = new ShaderPass(PixelateShader);
+  composer.addPass(pixelPass);
 
   bindPicking(renderer.domElement);
 
@@ -1286,6 +1454,38 @@ function tintGeometry(geo: THREE.BufferGeometry, topY: number): void {
   geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
 }
 
+// Per-PIXEL tone patches keyed to world XZ, injected into a Lambert material.
+// The plate tops are low-poly, so vertex-colour patches just smear across big
+// triangles and vanish — a fragment-space noise shows the patches regardless of
+// mesh density: broad regions of yellow-green (dry) ↔ blue-green (lush) grass,
+// biome-safe (on sand/rock it just reads warmer/cooler).
+function patchTint(m: THREE.Material): void {
+  m.onBeforeCompile = (shader) => {
+    shader.vertexShader = shader.vertexShader
+      .replace("#include <common>", "#include <common>\nvarying vec3 vWPos;")
+      .replace("#include <begin_vertex>",
+        "#include <begin_vertex>\nvWPos = (modelMatrix * vec4(transformed, 1.0)).xyz;");
+    shader.fragmentShader = shader.fragmentShader
+      .replace("#include <common>", `#include <common>
+        varying vec3 vWPos;
+        float ptHash(vec2 p){ return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453); }
+        float ptNoise(vec2 p){ vec2 i = floor(p), f = fract(p); vec2 u = f * f * (3.0 - 2.0 * f);
+          return mix(mix(ptHash(i), ptHash(i + vec2(1.0, 0.0)), u.x),
+                     mix(ptHash(i + vec2(0.0, 1.0)), ptHash(i + vec2(1.0, 1.0)), u.x), u.y); }`)
+      .replace("#include <color_fragment>", `#include <color_fragment>
+        {
+          float pn = (ptNoise(vWPos.xz / 7.0) - 0.5)
+                   + (ptNoise(vWPos.xz / 3.0 + 11.3) - 0.5) * 0.5;   // big regions + break-up
+          // Amplitude has to clear the colour-crush step (colorBits): a subtle
+          // shift just rounds back to the same level and reads as flat, so the
+          // patches are bold enough to land on DIFFERENT quantised greens.
+          float tone = pn * 0.55;
+          diffuseColor.rgb *= vec3(1.0 + tone, 1.0 + tone * 0.15, 1.0 - tone);
+        }`);
+  };
+  m.customProgramCacheKey = () => "patchTint";
+}
+
 // ── loop classification for extrusion (outer shells vs holes) ─────────────────
 type Loop = [number, number][];
 
@@ -1382,6 +1582,7 @@ function buildTerrain(st: WorldState): void {
     const m = lamS(color);
     m.map = brushTexture();
     m.vertexColors = true;
+    patchTint(m);          // per-pixel yellow↔blue tone patches over the surface
     return m;
   };
   const wallLow = washed(0xcfbf9a);            // wet-sand base walls
@@ -2150,12 +2351,14 @@ function makePalm(id: string): THREE.Group {
   const fronds = 7;
   for (let i = 0; i < fronds; i += 1) {
     const fr = hashStr(id + "f" + i);
+    const frondMat = new THREE.MeshLambertMaterial({
+      color: jitterLeaf(i % 2 ? C.leaf : C.leafDark, id + "fc" + i),
+      flatShading: true, side: THREE.DoubleSide,
+    });
+    smudgeNormals(frondMat);
     const blade = new THREE.Mesh(
       frondGeometry(0.72 + fr * 0.25, 0.2 + fr * 0.06, 0.5 + fr * 0.25),
-      new THREE.MeshLambertMaterial({
-        color: jitter(i % 2 ? C.leaf : C.leafDark, id, 0.06),
-        flatShading: true, side: THREE.DoubleSide,
-      }),
+      frondMat,
     );
     blade.position.set(topX, crownY, 0);
     blade.rotation.y = (i / fronds) * Math.PI * 2 + r * 2;
@@ -2186,7 +2389,7 @@ function makeFruitTree(id: string): THREE.Group {
   trunk.rotation.z = (r - 0.5) * 0.16;
   trunk.castShadow = true;
   g.add(trunk);
-  const mat = lamJ(C.leaf, id, 0.07);
+  const mat = lamJLeaf(C.leaf, id);
   const crowns: THREE.Mesh[] = [];
   if (v > 0.66) {
     // umbrella: one wide flattened crown
@@ -2476,6 +2679,9 @@ function buildProps(st: WorldState): void {
     const wx = node.x + 0.5, wz = node.y + 0.5;
     const gy = Math.max(0.02, surfaceY(wx, wz));
     obj.position.set(wx, gy, wz);
+    // spin each prop to a stable per-id heading so a grove of palms/trees/rocks
+    // doesn't read as clones all facing the same way (reflection clone inherits it)
+    obj.rotation.y = hashStr(node.id + "yaw") * Math.PI * 2;
     propsGroup.add(obj);
 
     // shoreline trees lay a still dark reflection on the water (Bad North)
@@ -2496,7 +2702,8 @@ function buildProps(st: WorldState): void {
   // read as MASSES. A rare dead SNAG adds character — a bleak, weathered stand
   // that suits the island's grim mood (no cheerful blossom here).
   const n = st.map.size;
-  const canopyMats = Array.from({ length: 6 }, (_, i) => lamJ(0x628f54, `canopy${i}`, 0.1));
+  // more materials + wide leaf jitter so a grove reads as many green shades
+  const canopyMats = Array.from({ length: 12 }, (_, i) => lamJLeaf(0x628f54, `canopy${i}`));
   const SNAG = 0x6b5a44;
   for (let ty = 0; ty < n; ty += 1) {
     for (let tx = 0; tx < n; tx += 1) {
@@ -2532,7 +2739,7 @@ function buildProps(st: WorldState): void {
         const s = 0.3 + hash01(tx, ty, 98 + k) * 0.3;
         const tall = hash01(tx, ty, 102 + k) < 0.22;   // the odd emergent tree
         const stemH = tall ? s * 1.7 : s;
-        const mat = canopyMats[(tx * 7 + ty * 13 + k) % 6];
+        const mat = canopyMats[(tx * 7 + ty * 13 + k) % 12];
         const blob = new THREE.Mesh(new THREE.IcosahedronGeometry(s, 0), mat);
         blob.position.set(wx, gy + stemH + s * 0.35, wz);
         blob.scale.y = 0.8;
@@ -3381,19 +3588,31 @@ function tick(): void {
   if (el) {
     const w = el.clientWidth, h = el.clientHeight;
     const cur = renderer.getSize(new THREE.Vector2());
-    if (Math.abs(cur.x - w) > 1 || Math.abs(cur.y - h) > 1) {
-      // cap at 1.5: the Kuwahara abstraction + paper grain already soften the
-      // image, so 1.5x vs 2x is imperceptible but ~44% fewer fragments to shade
-      const pr = Math.min(1.5, window.devicePixelRatio || 1);
-      renderer.setSize(w, h, false);
+    // Supersample factor over CSS px, driven by the "Render sharpness" setting —
+    // deliberately INDEPENDENT of devicePixelRatio. On a 1x-DPI (Full HD) display
+    // dpr=1 would render 1:1 with no AA headroom, so the Kuwahara/FXAA/tilt-shift
+    // passes soften the image with nothing to spare = mush. Rendering at 1.5–2x
+    // and letting the browser downsample restores the crispness the look was
+    // tuned for on a HiDPI dev monitor (which was implicitly doing exactly this).
+    const pr = Math.min(2, Math.max(1, gfx.renderScale || 1.5));
+    if (Math.abs(cur.x - w) > 1 || Math.abs(cur.y - h) > 1 || pr !== lastRenderPr) {
+      lastRenderPr = pr;
       renderer.setPixelRatio(pr);
-      composer.setSize(w, h);
+      renderer.setSize(w, h, false);
       composer.setPixelRatio(pr);
+      composer.setSize(w, h);
+      // setSize(false) leaves CSS alone, so a <canvas> with no CSS width/height
+      // displays at its BACKING-STORE size — at pr>1 that overflows the stage
+      // 1:1 instead of downsampling. Pin the CSS box to the stage so the
+      // pr×-sized buffer super-samples down into it (the whole point of SSAA).
+      renderer.domElement.style.width = `${w}px`;
+      renderer.domElement.style.height = `${h}px`;
       (fxaaPass.material.uniforms.resolution.value as THREE.Vector2)
         .set(1 / (w * pr), 1 / (h * pr));
       (gradePass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       (kuwaharaPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       (tiltPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
+      (pixelPass.uniforms.uRes.value as THREE.Vector2).set(w * pr, h * pr);
       inkTarget?.setSize(Math.max(1, Math.round(w * pr)), Math.max(1, Math.round(h * pr)));
       camera.aspect = w / Math.max(1, h);
       camera.updateProjectionMatrix();
@@ -3793,6 +4012,14 @@ function tick(): void {
   const fog = scene.fog as THREE.Fog;
   fog.near = 70 - stormMix * 35;
   fog.far = 210 - stormMix * 90;
+  if (pixelPass) {
+    // block size in DISPLAY px: multiply by the render scale so a "4px" block
+    // stays 4 screen pixels rather than shrinking under super-sampling.
+    pixelPass.uniforms.uPixel.value = gfx.pixel > 1 ? gfx.pixel * lastRenderPr : 1;
+    pixelPass.uniforms.uScale.value = lastRenderPr;
+    pixelPass.uniforms.uBits.value = gfx.colorBits;
+    pixelPass.uniforms.uDither.value = gfx.dither;
+  }
   if (gradePass) {
     const gu = gradePass.uniforms;
     gu.uTime.value = now;
@@ -3804,6 +4031,7 @@ function tick(): void {
     // live style knobs from the graphics panel / preset
     gu.uInkAmt.value = gfx.ink;
     gu.uInkWidth.value = gfx.inkWidth;
+    gu.uInkMode.value = gfx.inkSilhouette ? 1 : 0;
     gu.uComic.value = gfx.comic;
     gu.uPosterLevels.value = gfx.posterLevels;
     gu.uPosterAmt.value = gfx.posterAmt;

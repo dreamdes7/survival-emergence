@@ -39,9 +39,9 @@ function renderLog(): void {
   const turns = histories.get(currentAgentId) ?? [];
   logEl.innerHTML = turns.length
     ? turns.map((t) =>
-        `<div class="iv-turn iv-${t.role === "наблюдатель" ? "q" : "a"}">${escapeHtml(t.text)}</div>`,
+        `<div class="iv-turn iv-${t.role === "observer" ? "q" : "a"}">${escapeHtml(t.text)}</div>`,
       ).join("")
-    : `<div class="cc-empty">Спроси выжившего о чём угодно — он ответит из своей памяти.</div>`;
+    : `<div class="cc-empty">Ask the survivor anything — they'll answer from their own memory.</div>`;
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -54,7 +54,7 @@ async function ask(): Promise<void> {
   inputEl.value = "";
 
   const turns = histories.get(agentId) ?? [];
-  turns.push({ role: "наблюдатель", text: question });
+  turns.push({ role: "observer", text: question });
   histories.set(agentId, turns);
   renderLog();
   logEl.insertAdjacentHTML("beforeend", `<div class="iv-turn iv-a iv-wait">…</div>`);
@@ -64,7 +64,7 @@ async function ask(): Promise<void> {
     const r = await interviewAgent(store.activeSimId, agentId, question, turns.slice(0, -1));
     turns.push({ role: r.agent, text: r.answer });
   } catch (err) {
-    turns.push({ role: "система", text: `не удалось спросить: ${err instanceof Error ? err.message : err}` });
+    turns.push({ role: "system", text: `failed to ask: ${err instanceof Error ? err.message : err}` });
   } finally {
     histories.set(agentId, turns);
     busy = false;

@@ -35,7 +35,7 @@ async function toggleReplay(): Promise<void> {
     return;
   }
   if (snapshots.length < 2) {
-    pushEvent("replay: история пока слишком коротка");
+    pushEvent("replay: history is still too short");
     return;
   }
   store.replayMode = true;
@@ -44,13 +44,13 @@ async function toggleReplay(): Promise<void> {
   sliderEl.max = String(snapshots.length - 1);
   sliderEl.value = String(snapshots.length - 1);
   showIndex(snapshots.length - 1);
-  pushEvent(`replay: ${snapshots.length} снапшотов — листай слайдером`);
+  pushEvent(`replay: ${snapshots.length} snapshots — scrub the slider`);
 }
 
 function showIndex(i: number): void {
   const snap = snapshots[Math.max(0, Math.min(snapshots.length - 1, i))];
   if (!snap) return;
-  labelEl.textContent = `Дн.${snap.day} · T${snap.tick}`;
+  labelEl.textContent = `Day ${snap.day} · T${snap.tick}`;
   showSnapshotCb(snap);
 }
 
@@ -62,5 +62,5 @@ export function exitReplay(): void {
   // Snap back to the freshest live state of the active sim.
   const live = store.simStates.get(store.activeSimId);
   if (live) showSnapshotCb(live);
-  pushEvent("replay: назад в прямой эфир");
+  pushEvent("replay: back to live");
 }

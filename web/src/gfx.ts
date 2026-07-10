@@ -8,6 +8,7 @@ export type Gfx = {
   // ── paint / grade (fed to the GradeShader) ──────────────────────────────────
   ink: number;          // outline weight
   inkWidth: number;     // outline thickness (contour dilation)
+  inkSilhouette: boolean; // outline whole objects only (silhouette) vs every edge
   comic: number;        // 0 watercolour · 1 comic (gates solid ink + flat fills)
   posterLevels: number; // luminance bands
   posterAmt: number;    // 0 soft wash · 1 hard cel steps
@@ -28,6 +29,12 @@ export type Gfx = {
   handheld: number;     // 0..1 operator micro-drift while following
   // ── film stock emulation (independent of the art preset) ────────────────────
   film: string;         // FILM_PROFILES key — the "capture medium" on top
+  // ── render quality (independent of the paint preset) ─────────────────────────
+  renderScale: number;  // internal super-sample factor over CSS px (SSAA), 1..2
+  // ── low-fi pass (independent of the paint preset) ────────────────────────────
+  pixel: number;        // block size in display px; 1 = off (A Short Hike look)
+  colorBits: number;    // colour depth per channel in bits; 8 = off (full colour)
+  dither: number;       // 0 = hard bands … 1 = full ordered dither (needs colorBits < 8)
 };
 
 // A film stock (Dehancer-style): a tone curve (toe lift / shoulder rolloff /
@@ -56,8 +63,8 @@ export const FILM_PROFILES: Record<string, FilmProfile> = {
 };
 
 export const FILM_LABELS: Record<string, string> = {
-  none: "Без плёнки", portra: "Kodak Portra", fuji: "Fuji", ektachrome: "Ektachrome",
-  bw: "Ч/б (Tri-X)", faded: "Выцветшая печать", technicolor: "Technicolor",
+  none: "No film", portra: "Kodak Portra", fuji: "Fuji", ektachrome: "Ektachrome",
+  bw: "B&W (Tri-X)", faded: "Faded print", technicolor: "Technicolor",
 };
 
 // Which fields a preset owns. Camera/optics fields are deliberately excluded so
@@ -72,10 +79,10 @@ export const PAINT_KEYS: (keyof Gfx)[] = [
 // no-op relative to how the frame looked before presets existed.
 const WATERCOLOR: Gfx = {
   preset: "watercolor",
-  ink: 0.85, inkWidth: 0, comic: 0, posterLevels: 6, posterAmt: 0.13,
+  ink: 0.85, inkWidth: 0, inkSilhouette: true, comic: 0, posterLevels: 6, posterAmt: 0.13,
   halftone: 0, halftoneScale: 5, saturation: 1.14, paper: 1, vignette: 0.14,
   barrel: 0, bloom: 0.22, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
 };
 
 // Old-film cartoon: keeps the painterly base but ages it — warm faded duotone,
@@ -83,10 +90,10 @@ const WATERCOLOR: Gfx = {
 // Built ON watercolour (soft, not the hard cel of comic).
 const VINTAGE: Gfx = {
   preset: "vintage",
-  ink: 1.0, inkWidth: 0.3, comic: 0, posterLevels: 5, posterAmt: 0.3,
+  ink: 1.0, inkWidth: 0.3, inkSilhouette: true, comic: 0, posterLevels: 5, posterAmt: 0.3,
   halftone: 0, halftoneScale: 5, saturation: 0.84, paper: 0.9, vignette: 0.36,
   barrel: 0.07, bloom: 0.36, focus: 1, sepia: 0.62, flicker: 0.5, weave: 0.4,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
 };
 
 // Bold cel + ink + Ben-Day dots: comic / old-cartoon. Flatter fills, fewer,
@@ -94,21 +101,54 @@ const VINTAGE: Gfx = {
 // punchier limited-feeling palette, and a whisper of lens barrel.
 const COMIC: Gfx = {
   preset: "comic",
-  ink: 1.5, inkWidth: 1.15, comic: 1, posterLevels: 4, posterAmt: 0.9,
+  ink: 1.5, inkWidth: 1.15, inkSilhouette: true, comic: 1, posterLevels: 4, posterAmt: 0.9,
   halftone: 0.6, halftoneScale: 5, saturation: 1.34, paper: 0.4, vignette: 0.2,
   barrel: 0.1, bloom: 0.26, focus: 1, sepia: 0, flicker: 0, weave: 0,
-  letterbox: false, viewfinder: true, handheld: 0.5, film: "none",
+  letterbox: false, viewfinder: true, handheld: 0.5, film: "none", renderScale: 1.5, pixel: 1, colorBits: 8, dither: 0.95,
 };
 
 export const PRESETS: Record<string, Gfx> = {
   watercolor: WATERCOLOR, vintage: VINTAGE, comic: COMIC,
 };
 
+// The look the app OPENS with — a tuned custom grade, deliberately NOT any of the
+// three presets. preset:"custom" so no preset pill is highlighted by default.
+// Kept separate from the WATERCOLOR preset so "what it opens with" and "what the
+// Watercolor pill does" are decoupled (they used to be conflated).
+const DEFAULTS: Gfx = {
+  preset: "custom",
+  ink: 1.0, inkWidth: 0, inkSilhouette: true, comic: 0, posterLevels: 2, posterAmt: 0,
+  halftone: 0, halftoneScale: 5, saturation: 1.0, paper: 0.2, vignette: 0,
+  barrel: 0, bloom: 0.14, focus: 0, sepia: 0, flicker: 0, weave: 0.1,
+  letterbox: false, viewfinder: true, handheld: 0, film: "none", renderScale: 1.5, pixel: 1, colorBits: 3, dither: 0.5,
+};
+
+// Bumped when a default changes in a way that should override an existing saved
+// value once (rather than being masked by stale localStorage). v2: silhouette
+// outline default. v3: dither on by default. v4: restore the original watercolour
+// preset. v5: the initial look is the tuned DEFAULTS with no preset selected.
+// v6: colour depth crushed to 2 bits. v7: 3 bits + dither 0.5.
+const GFX_VERSION = "7";
+
 function load(): Gfx {
-  const base: Gfx = { ...WATERCOLOR };
+  const base: Gfx = { ...DEFAULTS };
   try {
     const saved = JSON.parse(localStorage.getItem("gfx") || "null");
     if (saved && typeof saved === "object") Object.assign(base, saved);
+    // one-time migrations for anyone whose saved settings predate this version
+    if (localStorage.getItem("gfx_v") !== GFX_VERSION) {
+      // reset to the tuned default look with no preset selected (undo an earlier
+      // build that had baked the tuned values into the WATERCOLOR preset)
+      for (const k of PAINT_KEYS) (base as Record<string, unknown>)[k] = DEFAULTS[k];
+      base.preset = "custom";
+      base.inkSilhouette = true;
+      base.dither = 0.5;
+      base.colorBits = 3;
+      localStorage.setItem("gfx_v", GFX_VERSION);
+      // persist now: the version marker is already bumped, so without writing the
+      // migrated value back the stale saved one would win on the next load.
+      localStorage.setItem("gfx", JSON.stringify(base));
+    }
   } catch { /* ignore corrupt storage */ }
   return base;
 }

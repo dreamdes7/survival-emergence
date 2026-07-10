@@ -201,8 +201,8 @@ function toggleRenderStyle(): void {
   cloudsForScenario = "";
   void setupClouds();
   void render();
-  const label = store.renderStyle === "3d" ? "3D диорама"
-    : store.renderStyle === "vector" ? "вектор (2D)" : "тайлы";
+  const label = store.renderStyle === "3d" ? "3D diorama"
+    : store.renderStyle === "vector" ? "vector (2D)" : "tiles";
   pushEvent(`render: ${label}`);
 }
 
@@ -219,7 +219,7 @@ function bindViewportControls() {
     if (target.id === "audio-btn") {
       const on = toggleAudio();
       target.classList.toggle("on", on);
-      pushEvent(on ? "звук: эмбиент включён" : "звук выключен");
+      pushEvent(on ? "sound: ambient on" : "sound off");
     }
     if (target.id === "cine-btn") {
       const on = !target.classList.contains("on");
@@ -613,7 +613,7 @@ function syncAgents(): void {
     else dom.wrap.classList.remove("dead");
     if (a.said && a.said !== dom.lastSaid) {
       dom.lastSaid = a.said;
-      dom.bubbleEl.textContent = a.said;
+      dom.bubbleText.textContent = a.said;
       dom.bubbleEl.classList.add("show");
       dom.ttl = bubbleTtl(a.said);
     }
@@ -631,7 +631,10 @@ function syncAgents(): void {
 // ── HTML overlay: agent names + speech bubbles (crisp, zoom-independent) ───────
 const overlayEl = document.querySelector<HTMLDivElement>("#overlay")!;
 const cineboxEl = document.querySelector<HTMLDivElement>("#cinebox")!;
-type AgentDom = { wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; intentEl: HTMLDivElement; ttl: number; lastSaid: string; lastIntent: string };
+type AgentDom = {
+  wrap: HTMLDivElement; nameEl: HTMLDivElement; bubbleEl: HTMLDivElement; bubbleText: HTMLSpanElement;
+  intentEl: HTMLDivElement; ttl: number; lastSaid: string; lastIntent: string;
+};
 const agentDom = new Map<string, AgentDom>();
 
 // Speech bubbles linger by reading time, not a flat 4-6s — a longer line stays
@@ -647,6 +650,14 @@ function ensureAgentDom(id: string, name: string): AgentDom {
     wrap.className = "agent-ov";
     const bubbleEl = document.createElement("div");
     bubbleEl.className = "agent-bubble";
+    // A small colour tag inside the bubble (the speaker's own tint) so a
+    // stack of several bubbles is still legible at a glance without having
+    // to trace each one back down to its name tag.
+    const bubbleTag = document.createElement("span");
+    bubbleTag.className = "agent-bubble-tag";
+    const bubbleText = document.createElement("span");
+    bubbleText.className = "agent-bubble-text";
+    bubbleEl.append(bubbleTag, bubbleText);
     const intentEl = document.createElement("div");
     intentEl.className = "agent-intent";
     const nameEl = document.createElement("div");
@@ -655,7 +666,7 @@ function ensureAgentDom(id: string, name: string): AgentDom {
     wrap.style.setProperty("--tint", agentCssInk(id));
     wrap.append(bubbleEl, intentEl, nameEl);
     overlayEl.appendChild(wrap);
-    d = { wrap, nameEl, bubbleEl, intentEl, ttl: 0, lastSaid: "", lastIntent: "" };
+    d = { wrap, nameEl, bubbleEl, bubbleText, intentEl, ttl: 0, lastSaid: "", lastIntent: "" };
     agentDom.set(id, d);
   }
   d.nameEl.textContent = name;
@@ -680,7 +691,7 @@ function syncAgentDom(state: WorldState): void {
     else dom.wrap.classList.remove("dead");
     if (a.said && a.said !== dom.lastSaid) {
       dom.lastSaid = a.said;
-      dom.bubbleEl.textContent = a.said;
+      dom.bubbleText.textContent = a.said;
       dom.bubbleEl.classList.add("show");
       dom.ttl = bubbleTtl(a.said);
     }
@@ -742,6 +753,46 @@ function updateOverlay(): void {
     z -= 1;
     it.d.wrap.style.transform = `translate(${it.x}px, ${it.y}px) translate(-50%, -100%)`;
     placed.push({ x: it.x, y: it.y, w, h });
+  }
+
+  // Names never climb (see above) — but an active speech bubble is exempt
+  // from dimming, so when several nearby agents talk in the same tick their
+  // bubbles used to just print on top of each other. Stack ONLY the bubble
+  // (via `translate`, which composes with its own show/hide transform rather
+  // than fighting it) into vertical lanes, one lane per bubble-width of
+  // horizontal overlap; the name tag underneath stays exactly where it was.
+  const speaking = items.filter((it) => it.d.ttl > 0).sort((a, b) => a.id.localeCompare(b.id));
+  const lanes: { x: number; level: number }[] = [];
+  for (const it of speaking) {
+    const bw = (it.d.bubbleEl.offsetWidth || 140) + 12;
+    let level = 0;
+    while (lanes.some((l) => l.level === level && Math.abs(l.x - it.x) < bw)) level += 1;
+    lanes.push({ x: it.x, level });
+    const bh = (it.d.bubbleEl.offsetHeight || 32) + 8;
+    it.d.bubbleEl.style.translate = level > 0 ? `0 ${-level * bh}px` : "";
+  }
+  for (const it of items) {
+    if (it.d.ttl <= 0 && it.d.bubbleEl.style.translate) it.d.bubbleEl.style.translate = "";
+  }
+
+  // Same story for the NAME chips: "keepBright" ones (selected, or currently
+  // speaking) never dim, so a cluster of several bright agents used to just
+  // overlap with nothing to separate them. Same lane trick as the bubbles
+  // above, but stacked into a column BELOW the natural spot (bubbles already
+  // own the space above), one lane per name-height of horizontal overlap.
+  const bright = items.filter((it) => it.id === sel || it.d.ttl > 0).sort((a, b) => a.id.localeCompare(b.id));
+  const nameLanes: { x: number; level: number }[] = [];
+  for (const it of bright) {
+    const w = (it.d.nameEl.offsetWidth || 60) + 8;
+    let level = 0;
+    while (nameLanes.some((l) => l.level === level && Math.abs(l.x - it.x) < w)) level += 1;
+    nameLanes.push({ x: it.x, level });
+    const h = (it.d.nameEl.offsetHeight || 22) + 4;
+    it.d.nameEl.style.translate = level > 0 ? `0 ${level * h}px` : "";
+  }
+  const brightIds = new Set(bright.map((it) => it.id));
+  for (const it of items) {
+    if (!brightIds.has(it.id) && it.d.nameEl.style.translate) it.d.nameEl.style.translate = "";
   }
 }
 

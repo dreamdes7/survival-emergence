@@ -7,6 +7,7 @@ import { requiredProgress, store } from "./store";
 import { setInterviewAgent } from "./interview";
 import { agentCssInk, escapeAttr, escapeHtml, genderLabel, intentIcon } from "./utils";
 import { applyPreset, FILM_LABELS, FILM_PROFILES, gfx, PRESETS, saveGfx } from "./gfx";
+import { enhanceNumberInputs, enhanceSelects } from "./widgets";
 import type { AgentState, FeedEntry, ForgeConfig, StructureState, WorldState } from "./types";
 
 // ── injected navigation (main.ts assigns the real implementations) ────────────
@@ -22,7 +23,6 @@ export const nav = {
 export const stageEl = document.querySelector<HTMLDivElement>("#stage")!;
 const titleEl = document.querySelector<HTMLHeadingElement>("#world-title")!;
 const statsEl = document.querySelector<HTMLDivElement>("#world-stats")!;
-const legendEl = document.querySelector<HTMLDivElement>("#legend")!;
 const forgeForm = document.querySelector<HTMLFormElement>("#forge-form")!;
 const metricsEl = document.querySelector<HTMLDivElement>("#metrics-dashboard")!;
 const eventsEl = document.querySelector<HTMLElement>("#event-log")!;
@@ -116,10 +116,10 @@ function renderAgentModal(agent: AgentState) {
 
   const oldScrollTop = ccDiary.scrollTop;
   const psy = agent.psyche ?? {};
-  const psyLabel: Record<string, string> = { belonging: "близость", esteem: "нужность", purpose: "смысл" };
+  const psyLabel: Record<string, string> = { belonging: "belonging", esteem: "esteem", purpose: "purpose" };
   ccBars.innerHTML = Object.entries(agent.physiology).map(([k, v]) => statBar(k, v)).join("")
     + (Object.keys(psy).length
-        ? `<div class="cc-drives-label">Драйвы (выше выживания)</div>`
+        ? `<div class="cc-drives-label">Drives (beyond survival)</div>`
           + Object.entries(psy).map(([k, v]) => statBar(psyLabel[k] ?? k, v)).join("")
         : "");
   ccInv.innerHTML = Object.keys(agent.inventory).length
@@ -130,7 +130,7 @@ function renderAgentModal(agent: AgentState) {
   const skEntries = Object.entries(skills).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]);
   ccSkills.innerHTML = skEntries.length
     ? skEntries.map(([k, v]) => `<div class="cc-chip">${escapeHtml(k)} · ${Math.round(v)}</div>`).join("")
-    : `<div class="cc-empty">Ещё не нашёл своего ремесла.</div>`;
+    : `<div class="cc-empty">Hasn't found a craft yet.</div>`;
 
   const beliefs = agent.beliefs ?? [];
   ccBeliefs.innerHTML = beliefs.length
@@ -139,7 +139,7 @@ function renderAgentModal(agent: AgentState) {
         const tags = b.tags?.length ? `<span class="cc-belief-tags">${escapeHtml(b.tags.join(", "))}</span>` : "";
         return `<div class="cc-belief ${cls}"><span class="cc-belief-name">${escapeHtml(b.name)}</span><span class="cc-belief-note">${escapeHtml(b.note)}</span>${tags}</div>`;
       }).join("")
-    : `<div class="cc-empty">Пока не составил мнения о людях.</div>`;
+    : `<div class="cc-empty">Hasn't formed opinions about others yet.</div>`;
 
   const rels = agent.relationships ?? [];
   ccRels.innerHTML = rels.length
@@ -183,12 +183,12 @@ function chip(text: string) {
 // Provenance badge: at a glance, is the MODEL driving this agent, or the heuristic?
 function sourceBadge(source: string): string {
   const label: Record<string, string> = {
-    llm: "🧠 модель", emergency: "⚠ авто-выживание", llm_fallback_stub: "↩ эвристика (сбой LLM)",
-    repair_stub: "🔧 эвристика (починка)", stub: "⚙ эвристика", wait: "⏸ ждёт",
+    llm: "🧠 model", emergency: "⚠ auto-survival", llm_fallback_stub: "↩ heuristic (LLM failed)",
+    repair_stub: "🔧 heuristic (repair)", stub: "⚙ heuristic", wait: "⏸ waiting",
   };
   const heuristic = source !== "llm";
   const cls = heuristic ? "src-heuristic" : "src-model";
-  return `<span class="cc-source-badge ${cls}" title="кто принял решение">${escapeHtml(label[source] ?? source)}</span>`;
+  return `<span class="cc-source-badge ${cls}" title="who made this decision">${escapeHtml(label[source] ?? source)}</span>`;
 }
 
 // ── sim bar ───────────────────────────────────────────────────────────────────
@@ -209,7 +209,7 @@ export function renderSimBar(): void {
           ${canDelete ? `<button class="sim-tab-close" data-close="${escapeAttr(m.sim_id)}" title="Delete simulation">✕</button>` : ""}
         </div>`;
     }).join("") +
-    `<button class="btn-new-sim" id="btn-new-sim" title="New simulation">+</button>`;
+    `<button class="btn-new-sim" id="btn-new-sim" title="New simulation" aria-label="New simulation"></button>`;
 
   simbarEl.querySelectorAll<HTMLElement>(".sim-tab").forEach((tab) => {
     tab.addEventListener("click", (e) => {
@@ -280,49 +280,60 @@ function forgeFieldsHtml(cfg: ForgeConfig): string {
   const count = cfg.agents.count;
   const prov = cfg.provider ?? "openrouter";
   return `
-    ${field("scenario", "scenario", `<select name="scenario">
-      <option value="mars"${cfg.scenario === "mars" ? " selected" : ""}>mars</option>
-      <option value="island"${cfg.scenario === "island" ? " selected" : ""}>island</option>
-    </select>`)}
-    ${field("seed", "seed", `<input name="seed" type="number" min="0" value="${cfg.seed}">`)}
-    ${field("days", "days", `<input name="days" type="number" min="1" max="30" value="${cfg.sim.max_days}">`)}
-    ${field("agents", "agents", `<input name="agents" type="number" min="1" max="12" value="${count}">`)}
-    ${field("persona mode", "persona_mode", `<select name="persona_mode">
-      ${["blank", "library", "self_select", "custom", "mixed"].map((m) =>
-        `<option value="${m}"${(cfg.agents.persona_mode ?? "blank") === m ? " selected" : ""}>${m}</option>`).join("")}
-    </select>`)}
-    ${field("emergency gate ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 1.0}" title="crit×N band where the heuristic overrides the brain; 1.0=deathbed only, 0=pure/off">`)}
-    ${field("LLM fail →", "fallback_policy", `<select name="fallback_policy">
-      <option value="stub"${(cfg.llm?.fallback_policy ?? "stub") === "stub" ? " selected" : ""}>stub (never stall)</option>
-      <option value="wait"${(cfg.llm?.fallback_policy ?? "stub") === "wait" ? " selected" : ""}>wait (clean data)</option>
-    </select>`)}
-    ${field("thinking", "thinking", `<select name="thinking" title="split = дешёвые тики + план дня раз в N тиков">
-      <option value="full"${(cfg.llm?.thinking ?? "full") === "full" ? " selected" : ""}>full (каждый тик)</option>
-      <option value="split"${(cfg.llm?.thinking ?? "full") === "split" ? " selected" : ""}>split (план+fast)</option>
-    </select>`)}
-    ${field("anomaly", "anomaly", `<select name="anomaly">
-      <option value="none">none</option>
-      <option value="random">random (1)</option>
-      <option value="hatch">hatch — button ritual</option>
-      <option value="monolith">monolith — dread altar</option>
-      <option value="idol">idol — offerings</option>
-      <option value="whisperzone">whispering zone</option>
-      <option value="relic">cursed relic</option>
-    </select>`)}
-    ${field("provider", "provider", `<select name="provider">
-      <option value="openrouter"${prov === "openrouter" ? " selected" : ""}>OpenRouter</option>
-      <option value="megallm"${prov === "megallm" ? " selected" : ""}>MegaLLM</option>
-      <option value="stub"${prov === "stub" ? " selected" : ""}>Stub (free)</option>
-    </select>`)}
-    ${field("api tick", "api_tick_seconds", `<input name="api_tick_seconds" type="number" min="0" step="0.25" value="${cfg.sim.api_tick_seconds ?? 1}">`)}
-    ${field("usd cap", "usd_cap", `<input name="usd_cap" type="number" min="0" step="0.01" value="${cfg.budget.usd_cap ?? 0}">`)}
-    ${field("context", "context_tokens_per_agent_tick", `<input name="context_tokens_per_agent_tick" type="number" min="1024" step="1024" value="${cfg.budget.context_tokens_per_agent_tick ?? cfg.budget.tokens_per_agent_tick ?? 32000}">`)}
-    ${field("output", "max_output_tokens", `<input name="max_output_tokens" type="number" min="128" step="128" value="${cfg.budget.max_output_tokens ?? 1024}">`)}
-    ${field("model (all)", "model", `<input name="model" type="text" list="model-options" value="${escapeAttr(cfg.agents.model_override ?? "")}" placeholder="blank = use per-agent below">`, true)}
-    <div class="field wide roster-block">
-      <label>per-agent model — blank = use model (all) above (names are auto)</label>
-      <div id="roster-rows">${rosterRowsHtml(count, cfg)}</div>
+    <div class="forge-section">
+      <div class="forge-section-title">World</div>
+      ${field("Scenario", "scenario", `<select name="scenario">
+        <option value="mars"${cfg.scenario === "mars" ? " selected" : ""}>Mars</option>
+        <option value="island"${cfg.scenario === "island" ? " selected" : ""}>Island</option>
+      </select>`)}
+      ${field("Seed", "seed", `<input name="seed" type="number" min="0" value="${cfg.seed}">`)}
+      ${field("Days", "days", `<input name="days" type="number" min="1" max="30" value="${cfg.sim.max_days}">`)}
+      ${field("Agents", "agents", `<input name="agents" type="number" min="1" max="12" value="${count}">`)}
+      ${field("Persona mode", "persona_mode", `<select name="persona_mode">
+        ${["blank", "library", "self_select", "custom", "mixed"].map((m) =>
+          `<option value="${m}"${(cfg.agents.persona_mode ?? "blank") === m ? " selected" : ""}>${m}</option>`).join("")}
+      </select>`)}
+      ${field("Anomaly", "anomaly", `<select name="anomaly">
+        <option value="none">None</option>
+        <option value="random">Random (1)</option>
+        <option value="hatch">Hatch — button ritual</option>
+        <option value="monolith">Monolith — dread altar</option>
+        <option value="idol">Idol — offerings</option>
+        <option value="whisperzone">Whispering zone</option>
+        <option value="relic">Cursed relic</option>
+      </select>`)}
     </div>
+    <div class="forge-section">
+      <div class="forge-section-title">Agents &amp; AI</div>
+      ${field("Provider", "provider", `<select name="provider">
+        <option value="openrouter"${prov === "openrouter" ? " selected" : ""}>OpenRouter</option>
+        <option value="megallm"${prov === "megallm" ? " selected" : ""}>MegaLLM</option>
+        <option value="stub"${prov === "stub" ? " selected" : ""}>Stub (free)</option>
+      </select>`)}
+      ${field("Model (all)", "model", `<input name="model" type="text" list="model-options" value="${escapeAttr(cfg.agents.model_override ?? "")}" placeholder="blank = use per-agent below">`, true)}
+      <div class="field wide roster-block">
+        <label>Per-agent model <span class="hint">— blank uses model (all) above, names are auto</span></label>
+        <div id="roster-rows">${rosterRowsHtml(count, cfg)}</div>
+      </div>
+      ${field("Thinking", "thinking", `<select name="thinking" title="split = cheap ticks + a day-plan every N ticks">
+        <option value="full"${(cfg.llm?.thinking ?? "full") === "full" ? " selected" : ""}>full (every tick)</option>
+        <option value="split"${(cfg.llm?.thinking ?? "full") === "split" ? " selected" : ""}>split (plan + fast)</option>
+      </select>`)}
+      ${field("Emergency override ×", "emergency_multiplier", `<input name="emergency_multiplier" type="number" min="0" max="3" step="0.1" value="${cfg.sim.emergency_multiplier ?? 1.0}" title="crit×N band where the heuristic overrides the brain; 1.0 = deathbed only, 0 = pure/off">`)}
+      ${field("On LLM failure", "fallback_policy", `<select name="fallback_policy">
+        <option value="stub"${(cfg.llm?.fallback_policy ?? "stub") === "stub" ? " selected" : ""}>stub (never stall)</option>
+        <option value="wait"${(cfg.llm?.fallback_policy ?? "stub") === "wait" ? " selected" : ""}>wait (clean data)</option>
+      </select>`)}
+    </div>
+    <details class="forge-advanced">
+      <summary>Advanced budget</summary>
+      <div class="forge-section">
+        ${field("API tick (s)", "api_tick_seconds", `<input name="api_tick_seconds" type="number" min="0" step="0.25" value="${cfg.sim.api_tick_seconds ?? 1}">`)}
+        ${field("USD cap", "usd_cap", `<input name="usd_cap" type="number" min="0" step="0.01" value="${cfg.budget.usd_cap ?? 0}">`)}
+        ${field("Context tokens", "context_tokens_per_agent_tick", `<input name="context_tokens_per_agent_tick" type="number" min="1024" step="1024" value="${cfg.budget.context_tokens_per_agent_tick ?? cfg.budget.tokens_per_agent_tick ?? 32000}">`)}
+        ${field("Output tokens", "max_output_tokens", `<input name="max_output_tokens" type="number" min="128" step="128" value="${cfg.budget.max_output_tokens ?? 1024}">`)}
+      </div>
+    </details>
   `;
 }
 
@@ -338,6 +349,8 @@ function wireForgeForm(formEl: HTMLFormElement, cfg: ForgeConfig): void {
   const provSel = formEl.querySelector<HTMLSelectElement>('select[name="provider"]')!;
   void loadProviderModels(provSel.value);
   provSel.addEventListener("change", () => void loadProviderModels(provSel.value));
+  enhanceSelects(formEl);
+  enhanceNumberInputs(formEl);
 }
 
 // Build the full overrides payload from a filled forge form — shared by
@@ -368,7 +381,7 @@ function forgePayload(formEl: HTMLFormElement): Record<string, unknown> {
 export function renderForge(cfg: ForgeConfig) {
   forgeCfg = cfg;
   forgeForm.innerHTML = forgeFieldsHtml(cfg)
-    + `<button class="forge-submit" type="submit">Применить к текущей</button>`;
+    + `<button class="forge-submit" type="submit">Apply to current</button>`;
   wireForgeForm(forgeForm, cfg);
 }
 
@@ -408,8 +421,8 @@ export function openNewSim(): void {
   form.innerHTML = forgeFieldsHtml(cfg)
     + `<div id="newsim-status" class="newsim-status" role="status" aria-live="polite"></div>`
     + `<div class="newsim-actions">`
-    + `<button type="button" class="btn-cancel" data-newsim-cancel>Отмена</button>`
-    + `<button type="submit" class="btn-create">Запустить ✦</button></div>`;
+    + `<button type="button" class="btn-cancel" data-newsim-cancel>Cancel</button>`
+    + `<button type="submit" class="btn-create">Launch ✦</button></div>`;
   wireForgeForm(form, cfg);
   newSimModalEl().hidden = false;
 }
@@ -427,14 +440,14 @@ export function bindNewSimModal(): void {
     const status = document.getElementById("newsim-status");
     const submit = form.querySelector<HTMLButtonElement>('button[type="submit"]');
     const payload = forgePayload(form);
-    if (status) { status.textContent = "Запускаю симуляцию…"; status.classList.remove("error"); }
+    if (status) { status.textContent = "Starting simulation…"; status.classList.remove("error"); }
     if (submit) submit.disabled = true;
     try {
       await nav.createSim(payload);
       modal.hidden = true;
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      if (status) { status.textContent = `Не удалось запустить: ${message}`; status.classList.add("error"); }
+      if (status) { status.textContent = `Failed to start: ${message}`; status.classList.add("error"); }
       pushEvent(`create sim failed: ${message}`);
     } finally {
       if (submit) submit.disabled = false;
@@ -471,19 +484,22 @@ export function renderChrome() {
   if (!state) return;
   const scenarioName = state.scenario.charAt(0).toUpperCase() + state.scenario.slice(1);
   titleEl.textContent = store.activeSimId === "default" ? scenarioName : `${scenarioName} · ${store.activeSimId}`;
-  statsEl.innerHTML = [
-    state.run_id ? copyPill("run", state.run_id) : "",
-    pill("day", `${state.day} · T${state.tick}`),
-    pill("phase", state.is_night ? "night" : "day"),
-    pill("weather", state.weather ?? "clear"),
-    pill("escape", `${Math.round(state.escape_progress)}`),
-    pill("agents", `${state.agents.filter((a) => a.status !== "dead").length}/${state.agents.length}`),
-  ].join("");
-  legendEl.innerHTML = [
-    legend("resources", state.resources.filter((r) => r.quantity > 0).length),
-    legend("structures", state.structures.length),
-    legend("winner", state.escape_winner ?? "-"),
-  ].join("");
+  statsEl.innerHTML = `
+    <div class="ws-pills">
+      <div class="stat-pill ws-title-pill">world
+        <strong class="ws-title-val">
+          <span>${escapeHtml(store.activeSimId === "default" ? scenarioName : `${scenarioName} · ${store.activeSimId}`)}</span>
+          ${state.run_id ? copyIcon(state.run_id) : ""}
+        </strong>
+      </div>
+      ${pill("day", `${state.day}`)}
+      ${pill("tick", `${state.tick}`)}
+      ${pill("phase", state.is_night ? "night" : "day")}
+      ${pill("weather", state.weather ?? "clear")}
+      ${pill("escape", `${Math.round(state.escape_progress)}`)}
+      ${pill("agents", `${state.agents.filter((a) => a.status !== "dead").length}/${state.agents.length}`)}
+    </div>
+  `;
 
   renderMetrics();
   renderChronicle();
@@ -495,7 +511,7 @@ export function renderChrome() {
 // The live inspector: a compact always-on card for whoever is selected (and the
 // camera is following in 3D). It's the glanceable read on one survivor —
 // thought, current action, plan, vitals — without the full modal covering the
-// scene. Double-click / "детали →" still opens the deep card.
+// scene. Double-click / "Details →" still opens the deep card.
 export function renderInspector() {
   const id = store.selectedAgentId;
   const agent = id ? store.state?.agents.find((a) => a.id === id) : null;
@@ -515,7 +531,7 @@ export function renderInspector() {
     agent.thought ? `<div class="cc-cog-line cc-thought">💭 ${escapeHtml(agent.thought)}</div>` : "",
     agent.action ? `<div class="cc-cog-line cc-action">▶ ${escapeHtml(agent.action)}</div>` : "",
     agent.plan?.goal ? `<div class="cc-cog-line cc-plan">🗺 ${escapeHtml(agent.plan.goal)}</div>` : "",
-  ].join("") || `<div class="cc-empty">Пока размышляет…</div>`;
+  ].join("") || `<div class="cc-empty">Still thinking…</div>`;
 
   // The three survival vitals that matter at a glance (skip niche physiology).
   const order = ["health", "hunger", "thirst", "energy", "oxygen", "warmth", "morale"];
@@ -542,28 +558,40 @@ const gfxPresetsEl = document.querySelector<HTMLDivElement>("#gfx-presets")!;
 const gfxControlsEl = document.querySelector<HTMLDivElement>("#gfx-controls")!;
 const gfxBtn = document.querySelector<HTMLButtonElement>("#gfx-btn")!;
 
-const PRESET_LABELS: Record<string, string> = { watercolor: "Акварель", comic: "Комикс", custom: "Свой" };
+const PRESET_LABELS: Record<string, string> = { watercolor: "Watercolor", vintage: "Vintage", comic: "Comic", custom: "Custom" };
 const GFX_SLIDERS: { key: string; label: string; min: number; max: number; step: number }[] = [
-  { key: "ink", label: "Контур", min: 0, max: 2.5, step: 0.05 },
-  { key: "inkWidth", label: "Толщина линии", min: 0, max: 3, step: 0.05 },
-  { key: "posterAmt", label: "Cel-заливка (плоский свет)", min: 0, max: 1, step: 0.02 },
-  { key: "posterLevels", label: "Ступени света", min: 2, max: 8, step: 1 },
-  { key: "halftone", label: "Растр в тенях (Ben-Day)", min: 0, max: 1, step: 0.02 },
-  { key: "saturation", label: "Насыщенность", min: 0, max: 2, step: 0.02 },
-  { key: "paper", label: "Бумага / зерно", min: 0, max: 1.5, step: 0.02 },
-  { key: "bloom", label: "Свечение (bloom)", min: 0, max: 1, step: 0.02 },
-  { key: "focus", label: "Глубина резкости", min: 0, max: 2, step: 0.05 },
-  { key: "vignette", label: "Виньетка", min: 0, max: 0.5, step: 0.01 },
-  { key: "barrel", label: "Линза (дисторсия)", min: 0, max: 0.35, step: 0.01 },
-  { key: "handheld", label: "Дрожание камеры", min: 0, max: 2, step: 0.05 },
+  { key: "ink", label: "Outline", min: 0, max: 2.5, step: 0.05 },
+  { key: "inkWidth", label: "Outline thickness", min: 0, max: 3, step: 0.05 },
+  { key: "posterAmt", label: "Cel shading (flat light)", min: 0, max: 1, step: 0.02 },
+  { key: "posterLevels", label: "Light steps", min: 2, max: 8, step: 1 },
+  { key: "halftone", label: "Shadow screentone (Ben-Day)", min: 0, max: 1, step: 0.02 },
+  { key: "saturation", label: "Saturation", min: 0, max: 2, step: 0.02 },
+  { key: "paper", label: "Paper grain", min: 0, max: 1.5, step: 0.02 },
+  { key: "bloom", label: "Bloom", min: 0, max: 1, step: 0.02 },
+  { key: "focus", label: "Depth of field", min: 0, max: 2, step: 0.05 },
+  { key: "vignette", label: "Vignette", min: 0, max: 0.5, step: 0.01 },
+  { key: "barrel", label: "Lens distortion", min: 0, max: 0.35, step: 0.01 },
+  { key: "handheld", label: "Camera shake", min: 0, max: 2, step: 0.05 },
 ];
 const GFX_FILM: { key: string; label: string; min: number; max: number; step: number }[] = [
-  { key: "sepia", label: "Винтаж (тёплый тон)", min: 0, max: 1, step: 0.02 },
-  { key: "flicker", label: "Мерцание плёнки", min: 0, max: 1, step: 0.02 },
-  { key: "weave", label: "Дрожание кадра (gate)", min: 0, max: 1, step: 0.02 },
+  { key: "sepia", label: "Vintage (warm tone)", min: 0, max: 1, step: 0.02 },
+  { key: "flicker", label: "Film flicker", min: 0, max: 1, step: 0.02 },
+  { key: "weave", label: "Frame weave (gate)", min: 0, max: 1, step: 0.02 },
 ];
 const GFX_TOGGLES: { key: string; label: string }[] = [
-  { key: "viewfinder", label: "Видоискатель при слежении" },
+  { key: "viewfinder", label: "Viewfinder while following" },
+];
+// Render quality — a global, not a paint look (excluded from presets). Higher =
+// more internal resolution super-sampled down = crisper, but more GPU load.
+const GFX_QUALITY: { key: string; label: string; min: number; max: number; step: number }[] = [
+  { key: "renderScale", label: "Render sharpness", min: 1, max: 2, step: 0.25 },
+];
+// Low-fi "A Short Hike" pass: chunky pixels + ordered dither. Also a global,
+// not a paint look (excluded from presets). pixel=1 / dither=0 = off.
+const GFX_PIXEL: { key: string; label: string; min: number; max: number; step: number }[] = [
+  { key: "pixel", label: "Pixel size", min: 1, max: 8, step: 1 },
+  { key: "colorBits", label: "Colour bits", min: 1, max: 8, step: 1 },
+  { key: "dither", label: "Dither", min: 0, max: 1, step: 0.05 },
 ];
 
 const fmtNum = (v: number, step: number) => (step >= 1 ? String(Math.round(v)) : v.toFixed(2));
@@ -576,38 +604,48 @@ function renderGfxPanel(): void {
     + `${escapeHtml(PRESET_LABELS[name] ?? name)}</button>`).join("");
   const sliderRow = (s: { key: string; label: string; min: number; max: number; step: number }) => {
     const v = gfxNum[s.key] ?? 0;
+    const pct = ((v - s.min) / (s.max - s.min)) * 100;
     return `<div class="gfx-row"><label>${s.label}</label>`
       + `<span class="gfx-val" data-val="${s.key}">${fmtNum(v, s.step)}</span>`
-      + `<input type="range" data-gfx="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}"></div>`;
+      + `<input type="range" data-gfx="${s.key}" min="${s.min}" max="${s.max}" step="${s.step}" value="${v}" style="--pct:${pct}%"></div>`;
   };
-  const toggles = GFX_TOGGLES.map((t) =>
-    `<label class="gfx-toggle">${t.label}`
-    + `<input type="checkbox" data-gfxt="${t.key}" ${gfxBool[t.key] ? "checked" : ""}></label>`).join("");
+  const toggleRow = (key: string, label: string) =>
+    `<button type="button" class="gfx-toggle-row${gfxBool[key] ? " on" : ""}" data-gfxt="${key}">`
+    + `<span>${label}</span>`
+    + `<span class="gfx-toggle-switch"><span class="gfx-toggle-knob"></span></span>`
+    + `</button>`;
+  const toggles = GFX_TOGGLES.map((t) => toggleRow(t.key, t.label)).join("");
   const filmOpts = Object.keys(FILM_PROFILES).map((k) =>
     `<option value="${k}" ${gfx.film === k ? "selected" : ""}>${FILM_LABELS[k] ?? k}</option>`).join("");
-  const filmSelect = `<div class="gfx-row gfx-selrow"><label>Плёночный профиль</label>`
+  const filmSelect = `<div class="gfx-row gfx-selrow"><label>Film profile</label>`
     + `<select id="gfx-film" class="gfx-select">${filmOpts}</select></div>`;
-  gfxControlsEl.innerHTML = `<div class="gfx-sec">Стиль</div>${GFX_SLIDERS.map(sliderRow).join("")}`
-    + `<div class="gfx-sec">Плёнка / винтаж</div>${filmSelect}${GFX_FILM.map(sliderRow).join("")}`
-    + `<div class="gfx-sec">Камера / оптика</div>${toggles}`;
+  gfxControlsEl.innerHTML = `<div class="gfx-sec">Quality</div>${GFX_QUALITY.map(sliderRow).join("")}`
+    + `<div class="gfx-sec">Pixel / dither</div>${GFX_PIXEL.map(sliderRow).join("")}`
+    + `<div class="gfx-sec">Style</div>${GFX_SLIDERS.map(sliderRow).join("")}`
+    + toggleRow("inkSilhouette", "Outline whole objects only")
+    + `<div class="gfx-sec">Film / vintage</div>${filmSelect}${GFX_FILM.map(sliderRow).join("")}${toggles}`;
+  enhanceSelects(gfxControlsEl);
 }
 
-// Collapsible docks + reopen edge-tabs + the chronicle/activity tab switch.
+// Collapsible docks: one toggle handle per side (see .dock-toggle in
+// styles.css) that stays at the panel's edge open or closed, plus the
+// chronicle/activity tab switch.
 export function bindDockUI(): void {
   const leftdock = document.getElementById("leftdock")!;
   const rightdock = document.getElementById("rightdock")!;
-  const reopen: Record<string, HTMLButtonElement> = {
-    left: document.querySelector<HTMLButtonElement>(".dock-reopen-l")!,
-    right: document.querySelector<HTMLButtonElement>(".dock-reopen-r")!,
+  const toggles: Record<string, HTMLButtonElement> = {
+    left: document.querySelector<HTMLButtonElement>(".dock-toggle-l")!,
+    right: document.querySelector<HTMLButtonElement>(".dock-toggle-r")!,
   };
   const setCollapsed = (side: string, collapsed: boolean) => {
     (side === "left" ? leftdock : rightdock).classList.toggle("collapsed", collapsed);
-    reopen[side].hidden = !collapsed;
+    toggles[side].classList.toggle("collapsed", collapsed);
   };
-  document.querySelectorAll<HTMLButtonElement>("[data-collapse]").forEach((b) =>
-    b.addEventListener("click", () => setCollapsed(b.dataset.collapse!, true)));
-  document.querySelectorAll<HTMLButtonElement>("[data-reopen]").forEach((b) =>
-    b.addEventListener("click", () => setCollapsed(b.dataset.reopen!, false)));
+  document.querySelectorAll<HTMLButtonElement>("[data-toggle]").forEach((b) =>
+    b.addEventListener("click", () => {
+      const side = b.dataset.toggle!;
+      setCollapsed(side, !b.classList.contains("collapsed"));
+    }));
 
   const tabs = document.getElementById("left-tabs")!;
   tabs.addEventListener("click", (e) => {
@@ -639,18 +677,29 @@ export function bindGfxPanel(): void {
     if (t.dataset.gfx) {
       const key = t.dataset.gfx;
       gfxNum[key] = Number(t.value);
-      gfx.preset = "custom";
       const valEl = gfxControlsEl.querySelector(`[data-val="${key}"]`);
       if (valEl) valEl.textContent = fmtNum(Number(t.value), Number(t.step));
-      gfxPresetsEl.querySelectorAll(".gfx-preset").forEach((el) => el.classList.remove("sel"));
-      saveGfx();
-    } else if (t.dataset.gfxt) {
-      gfxBool[t.dataset.gfxt] = t.checked;
+      const pct = ((Number(t.value) - Number(t.min)) / (Number(t.max) - Number(t.min))) * 100;
+      t.style.setProperty("--pct", `${pct}%`);
+      // render scale + low-fi pass are global knobs, not paint looks — don't
+      // drop the active preset selection when one of them is the thing changed.
+      if (key !== "renderScale" && key !== "pixel" && key !== "colorBits" && key !== "dither") {
+        gfx.preset = "custom";
+        gfxPresetsEl.querySelectorAll(".gfx-preset").forEach((el) => el.classList.remove("sel"));
+      }
       saveGfx();
     } else if (t.id === "gfx-film") {
       gfx.film = t.value;
       saveGfx();
     }
+  });
+  gfxControlsEl.addEventListener("click", (e) => {
+    const btn = (e.target as HTMLElement).closest<HTMLButtonElement>("[data-gfxt]");
+    if (!btn) return;
+    const key = btn.dataset.gfxt!;
+    gfxBool[key] = !gfxBool[key];
+    btn.classList.toggle("on", gfxBool[key]);
+    saveGfx();
   });
 }
 
@@ -659,35 +708,43 @@ function renderChronicle() {
   const ch = store.state?.chronicle ?? [];
   const saga = store.state?.saga ?? [];
   if (!ch.length && !saga.length) {
-    chronicleEl.innerHTML = `<div class="chronicle-empty">Сага ещё не началась…</div>`;
+    chronicleEl.innerHTML = `<div class="chronicle-empty">The saga hasn't begun yet…</div>`;
     return;
   }
   // Narrator's literary voice on top (newest fragment first), then raw chronicle.
   const sagaHtml = [...saga].reverse().slice(0, 3).map((s) =>
-    `<div class="saga-entry"><span class="ch-day">Дн.${s.day}</span>` +
+    `<div class="saga-entry"><span class="ch-day">Day ${s.day}</span>` +
     `<span class="saga-text">${escapeHtml(s.text)}</span></div>`).join("");
   const chHtml = [...ch].reverse().slice(0, 16).map((e) =>
     `<div class="chronicle-entry ch-${escapeAttr(e.kind)}">` +
-      `<span class="ch-day">Дн.${e.day}</span>` +
+      `<span class="ch-day">Day ${e.day}</span>` +
       `<span class="ch-text">${escapeHtml(e.text)}</span>` +
     `</div>`).join("");
   chronicleEl.innerHTML = sagaHtml + chHtml;
 }
 
 function pill(label: string, value: string) {
-  return `<div class="stat-pill">${label}<strong>${escapeHtml(value)}</strong></div>`;
+  const cap = value.charAt(0).toUpperCase() + value.slice(1);
+  return `<div class="stat-pill">${label}<strong>${escapeHtml(cap)}</strong></div>`;
 }
 
-// A pill whose value is click-to-copy — used for the run id so it's trivial to
-// grab and hand to an agent ("look at run <id>").
-function copyPill(label: string, value: string) {
-  return `<div class="stat-pill copy-pill" data-copy="${escapeAttr(value)}" `
-    + `title="Нажми, чтобы скопировать ID рана">${label}`
-    + `<strong>${escapeHtml(value)}</strong><span class="copy-ic">⧉</span></div>`;
+// Icon-only copy button for the run id — the full id is rarely worth reading
+// at a glance, only grabbing (to hand to an agent: "look at run <id>").
+function copyIcon(value: string) {
+  return `<button type="button" class="ws-copy" data-copy="${escapeAttr(value)}" `
+    + `title="Copy run ID: ${escapeAttr(value)}" aria-label="Copy run ID">`
+    + `<svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></svg>`
+    + `</button>`;
 }
 
-function legend(label: string, value: string | number) {
-  return `<div class="legend-item">${label}: ${escapeHtml(String(value))}</div>`;
+function fact(label: string, value: string | number, note?: string) {
+  return `<div class="fact-row"><span class="fact-label">${escapeHtml(label)}</span>`
+    + `<span class="fact-val">${escapeHtml(String(value))}`
+    + (note ? `<span class="fact-note"> ${escapeHtml(note)}</span>` : "") + `</span></div>`;
+}
+
+function sectionLabel(text: string) {
+  return `<div class="stats-sec">${escapeHtml(text)}</div>`;
 }
 
 function renderMetrics() {
@@ -708,45 +765,56 @@ function renderMetrics() {
     .map(([key, label]) => metricRow(label, state.metrics.indicators[key] ?? 0))
     .join("");
   metricsEl.innerHTML = `
+    ${sectionLabel("Indicators")}
     ${rows}
     ${metricRow("gini inventory", state.metrics.gini_inventory)}
-    <div class="line-item">barter: ${state.metrics.barter_count}</div>
-    <div class="line-item">tools: ${Object.keys(state.metrics.tool_usage).length}</div>
-    ${cultureLines(state.metrics.culture)}
-    ${provenanceLine(state.provenance)}
+    ${sectionLabel("World")}
+    ${fact("Resources", state.resources.filter((r) => r.quantity > 0).length)}
+    ${fact("Structures", state.structures.length)}
+    ${fact("Winner", state.escape_winner ?? "—")}
+    ${fact("Barter trades", state.metrics.barter_count)}
+    ${fact("Tools used", Object.keys(state.metrics.tool_usage).length)}
+    ${cultureFacts(state.metrics.culture)}
+    ${provenanceFacts(state.provenance)}
   `;
 }
 
 // Culture as data: memes that provably travelled, story chains + drift, beads.
-function cultureLines(c: WorldState["metrics"]["culture"]): string {
+function cultureFacts(c: WorldState["metrics"]["culture"]): string {
   if (!c) return "";
-  const parts: string[] = [];
-  parts.push(`<div class="line-item">мемы: ${c.memes.count} (передач ${c.memes.transmissions})</div>`);
+  const parts: string[] = [sectionLabel("Culture")];
+  parts.push(fact("Memes", c.memes.count, c.memes.transmissions ? `(${c.memes.transmissions} spread)` : undefined));
   if (c.stories.chains) {
-    parts.push(`<div class="line-item">истории: ${c.stories.chains} · пересказов ${c.stories.retellings}`
-      + ` · дрейф ${Math.round(c.stories.max_drift * 100)}%`
-      + (c.stories.myths ? ` · мифов ${c.stories.myths}` : "") + `</div>`);
+    parts.push(fact("Story chains", c.stories.chains));
+    parts.push(fact("Retellings", c.stories.retellings, `(drift ${Math.round(c.stories.max_drift * 100)}%)`));
+    if (c.stories.myths) parts.push(fact("Myths", c.stories.myths));
   }
   if (c.currency) {
-    parts.push(`<div class="line-item">💠 ${escapeHtml(c.currency.item)}: передач ${c.currency.transfers}`
-      + ` · у ${c.currency.holders} чел.</div>`);
+    const item = c.currency.item.charAt(0).toUpperCase() + c.currency.item.slice(1);
+    parts.push(fact(`${item} transfers`, c.currency.transfers));
+    parts.push(fact(`${item} holders`, c.currency.holders));
   }
   const top = c.memes.top[0];
   if (top && top.carriers > 0) {
-    parts.push(`<div class="line-item meme-top" title="самый живучий мем">«${escapeHtml(top.text)}»`
-      + ` — ${escapeHtml(top.author)}, носителей ${top.carriers}</div>`);
+    parts.push(`<div class="meme-card" title="the most persistent meme">`
+      + `<div class="meme-quote">"${escapeHtml(top.text)}"</div>`
+      + `<div class="meme-meta">${escapeHtml(top.author)} · ${top.carriers} carrier${top.carriers !== 1 ? "s" : ""}</div>`
+      + `</div>`);
   }
   return parts.join("");
 }
 
 // The headline research indicator: how much of this run the MODEL actually drove.
-function provenanceLine(p: WorldState["provenance"]): string {
+function provenanceFacts(p: WorldState["provenance"]): string {
   if (!p || !p.total) return "";
   const modelPct = Math.round((1 - p.heuristic_share) * 100);
   const heurPct = 100 - modelPct;
   const cls = p.heuristic_share > 0.2 ? "prov-warn" : "prov-ok";
-  return `<div class="line-item prov-line ${cls}" title="доля решений от модели vs эвристики">`
-    + `авторство: 🧠 ${modelPct}% · ⚙ ${heurPct}%</div>`;
+  return sectionLabel("Provenance")
+    + `<div class="prov-row ${cls}" title="share of decisions made by the model vs the heuristic">`
+    + `<span class="prov-badge prov-model">🧠 Model <strong>${modelPct}%</strong></span>`
+    + `<span class="prov-badge prov-heuristic">⚙ Heuristic <strong>${heurPct}%</strong></span>`
+    + `</div>`;
 }
 
 function metricRow(label: string, value: number) {
@@ -807,7 +875,7 @@ export function renderEvents() {
   const atBottom = eventsEl.scrollHeight - eventsEl.scrollTop - eventsEl.clientHeight < 48;
   const sys = store.events.slice(0, 3).reverse().map((e) => `<div class="log-sys">${escapeHtml(e)}</div>`).join("");
   const feed = (store.state?.feed ?? []).slice(-26).map(feedLine).join("");
-  eventsEl.innerHTML = (sys + feed) || `<p class="empty">Тихо. Пока ничего не произошло.</p>`;
+  eventsEl.innerHTML = (sys + feed) || `<p class="empty">Quiet. Nothing has happened yet.</p>`;
   if (atBottom) eventsEl.scrollTop = eventsEl.scrollHeight;
 }
 

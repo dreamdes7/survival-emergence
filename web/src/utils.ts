@@ -18,8 +18,8 @@ export function escapeAttr(text: string) {
 }
 
 export function genderLabel(gender?: string | null): string {
-  if (gender === "female") return "женщина";
-  if (gender === "male") return "мужчина";
+  if (gender === "female") return "female";
+  if (gender === "male") return "male";
   return "";
 }
 

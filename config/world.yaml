@@ -2,7 +2,7 @@
 # Loads scenarios/<scenario>.yaml for the survival layer (terrain, resources,
 # physiology, escape condition).
 
-scenario: mars            # mars | island
+scenario: island          # mars | island
 seed: 42
 
 # ── Palimpsest — cross-run island memory (off by default) ─────────────────────
