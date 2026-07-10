@@ -1835,10 +1835,12 @@ function buildSeaStacks(st: WorldState, n: number): void {
 // seated on the surface, UV-scrolled so it flows.
 let streamGroup: THREE.Group | null = null;
 let streamMats: THREE.MeshBasicMaterial[] = [];
+let streamTex: THREE.CanvasTexture | null = null;
 function buildStreams(st: WorldState, n: number): void {
   streamGroup?.removeFromParent();
   streamGroup = new THREE.Group();
   streamMats = [];
+  if (!streamTex) { streamTex = streakTexture(); streamTex.wrapS = streamTex.wrapT = THREE.RepeatWrapping; }
   terrainGroup?.updateMatrixWorld(true);
   for (const node of st.resources) {
     if (node.quantity <= 0 || node.kind !== "spring") continue;
@@ -1886,9 +1888,11 @@ function buildStreams(st: WorldState, n: number): void {
     geo.setAttribute("uv", new THREE.Float32BufferAttribute(uv, 2));
     geo.setIndex(idx);
     geo.computeVertexNormals();
+    // shared texture, single-sided, opaque-ish: the ribbon sits flat ON the
+    // ground so there's no need for the costly transparent double-sided overdraw
     const mat = new THREE.MeshBasicMaterial({
-      color: 0x8fd0ce, transparent: true, opacity: 0.62, depthWrite: false,
-      side: THREE.DoubleSide, map: streakTexture(),
+      color: 0x8fd0ce, transparent: true, opacity: 0.72, depthWrite: false,
+      map: streamTex!.clone(),
     });
     mat.map!.wrapS = mat.map!.wrapT = THREE.RepeatWrapping;
     mat.map!.repeat.set(0.5, 1);
@@ -1947,6 +1951,23 @@ function buildTerrain(st: WorldState): void {
   const dress = new THREE.Group();             // rim grass + wall-foot rocks
   const tuftMat = lamS(pal().tuft);
   const rockMat = lam(pal().dressRock);
+
+  // STRATA: the cliff faces are NOT one grey slab. Each terrace gets its own
+  // wall colour — the beach terrace is wet sand, the first grass terrace above
+  // it a GREEN bank, mid terraces earthy, only the high tiers bare rock — and a
+  // TALUS skirt flares each plate's foot outward so the base reads wider than
+  // the top (eroded strata, not extruded cardboard). One merged skirt mesh.
+  const last = PLATE_THRESH.length - 1;
+  const wallHex: number[] = PLATE_THRESH.map((_, k) => {
+    if (k === 0) return pal().wallLow;
+    if (k >= last - 1) return pal().wallHigh;
+    const grass = new THREE.Color(pal().tops[Math.max(0, k - 1)]);
+    const earth = new THREE.Color(pal().wallLow);
+    return grass.clone().lerp(earth, k === 1 ? 0.3 : 0.55).offsetHSL(0, 0.02, -0.14).getHex();
+  });
+  const wallMats = PLATE_THRESH.map((_, k) =>
+    k === 0 ? wallLow : (k >= last - 1 ? wallHigh : washed(wallHex[k])));
+  const skirt: THREE.BufferGeometry[] = [];
   for (let k = 0; k < PLATE_THRESH.length; k += 1) {
     const thr = PLATE_THRESH[k];
     const solid = (x: number, y: number) =>
@@ -1973,10 +1994,44 @@ function buildTerrain(st: WorldState): void {
       geo.rotateX(-Math.PI / 2);               // shape XY -> world XZ, depth -> +Y
       geo.translate(0, baseY + BEV, 0);
       tintGeometry(geo, PLATE_TOP[k]);         // macro wash + wall-foot shading
-      const mesh = new THREE.Mesh(geo, [topMat, k === 0 ? wallLow : wallHigh]);
+      const mesh = new THREE.Mesh(geo, [topMat, wallMats[k]]);
       mesh.castShadow = true;
       mesh.receiveShadow = true;
       terrainGroup.add(mesh);
+
+      // talus apron: flare this plate's foot outward + down, so the cliff base
+      // is wider than its top. Merged later into one mesh, tinted by tier.
+      if (k >= 1) {
+        const lp = shell.outer;
+        let cxs = 0, czs = 0;
+        for (const [x, z] of lp) { cxs += x; czs += z; }
+        cxs /= lp.length; czs /= lp.length;
+        const footY = baseY + BEV * 0.6, drop = 0.16, flare = 0.42 + k * 0.06;
+        const col = new THREE.Color(wallHex[k]).offsetHSL(0, 0, -0.05);
+        const sp: number[] = [], sc: number[] = [];
+        const put = (x: number, y: number, z: number) => {
+          sp.push(x, y, z); sc.push(col.r, col.g, col.b);
+        };
+        const outv = (x: number, z: number): [number, number] => {
+          const ox = x - cxs, oz = z - czs; const L = Math.hypot(ox, oz) || 1;
+          return [ox / L, oz / L];
+        };
+        for (let i = 0; i < lp.length; i += 1) {
+          const [ax, az] = lp[i]; const [bx, bz] = lp[(i + 1) % lp.length];
+          const [oax, oaz] = outv(ax, az); const [obx, obz] = outv(bx, bz);
+          const Ai: [number, number, number] = [ax, footY, az];
+          const Bi: [number, number, number] = [bx, footY, bz];
+          const Ao: [number, number, number] = [ax + oax * flare, footY - drop, az + oaz * flare];
+          const Bo: [number, number, number] = [bx + obx * flare, footY - drop, bz + obz * flare];
+          put(...Ai); put(...Bi); put(...Bo);
+          put(...Ai); put(...Bo); put(...Ao);
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(sp, 3));
+        g.setAttribute("color", new THREE.Float32BufferAttribute(sc, 3));
+        g.computeVertexNormals();
+        skirt.push(g);
+      }
 
       // SET DRESSING along this shell's rim: grass tufts just inside the edge
       // (life at the silhouette) and small rocks at the wall's foot below.
@@ -2012,6 +2067,15 @@ function buildTerrain(st: WorldState): void {
       }
     }
   }
+  if (skirt.length) {
+    const merged = mergeGeometries(skirt, false);
+    if (merged) {
+      const m = new THREE.Mesh(merged, new THREE.MeshLambertMaterial({
+        vertexColors: true, flatShading: true, side: THREE.DoubleSide }));
+      m.receiveShadow = true;
+      terrainGroup.add(m);
+    }
+  }
   terrainGroup.add(dress);
 
   // Bad North: the island mirrored as a dark still silhouette in the water.
@@ -2044,7 +2108,9 @@ function buildTerrain(st: WorldState): void {
   waterMesh.position.set(cx, 0, cz);
   if (skyMesh) skyMesh.position.set(cx, 0, cz);
   buildSurf(st);
-  buildWaterfalls(n);
+  // buildWaterfalls disabled — transparent scrolling sheets were a fill-rate
+  // sink (heavy overdraw at renderScale, per-fall canvas textures). Streams keep
+  // the watershed read far more cheaply.
   buildStreams(st, n);
   buildSeaStacks(st, n);
   buildWaves(cx, cz, n);
