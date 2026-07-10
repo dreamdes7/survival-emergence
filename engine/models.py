@@ -90,6 +90,7 @@ STRUCTURE_SIZE: dict[str, tuple[int, int]] = {
     "well": (2, 2),
     "signpost": (1, 1),
     "watchtower": (3, 3),
+    "grave": (1, 1),           # dug over a buried body — a place that remembers a name
     # island — natural landmarks
     "hotspring": (2, 2),
     "cave": (3, 3),

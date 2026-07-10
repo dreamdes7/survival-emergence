@@ -772,6 +772,19 @@ function drawWatchtower(S: number): Graphics {
   return g;
 }
 
+function drawGrave(S: number): Graphics {
+  const g = new Graphics();
+  dropShadow(g, S * 0.34, -1);
+  // a low mound of turned earth
+  g.ellipse(0, -S * 0.06, S * 0.34, S * 0.16).fill(V.grassDark)
+    .stroke({ width: 1, color: V.shadow, alpha: 0.5 });
+  g.ellipse(0, -S * 0.12, S * 0.26, S * 0.1).fill(V.grass);
+  // a plain wooden cross at the head
+  g.rect(-1.6, -S * 0.62, 3.2, S * 0.56).fill(V.wood).stroke({ width: 1, color: V.woodDark });
+  g.rect(-S * 0.16, -S * 0.5, S * 0.32, 2.8).fill(V.wood).stroke({ width: 1, color: V.woodDark });
+  return g;
+}
+
 function drawCave(S: number): Graphics {
   const g = new Graphics();
   dropShadow(g, S * 0.5, -2);
@@ -918,6 +931,7 @@ export function buildVectorStructure(s: StructureState, pw: number, ph: number):
     case "garden": return drawGarden(S);
     case "signpost": return drawSignpost(S);
     case "watchtower": return drawWatchtower(S);
+    case "grave": return drawGrave(S);
     case "cave": return drawCave(S);
     case "hotspring": return drawHotspring(S);
     case "lighthouse": return drawLighthouse(Boolean(st.active), S);

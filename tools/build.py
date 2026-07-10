@@ -125,6 +125,7 @@ def _exec_build_structure(world, agent, args) -> str:
             s.state["fuel"] = 100.0
             _warm_nearby(world, s, warmth=22.0, morale=6.0)
         agent.memory.add(world.tick, world.day, "action", f"finished building a {kind}", 2.3)
+        world.place_note(s.x, s.y, f"{agent.name} построил это (день {world.day})")
         return f"finished the {kind}!"
     hint = " — это большая стройка, в одиночку медленно: позови других сюда" if (heavy and crew <= 1) else ""
     return f"worked on {kind} ({s.state['progress']:.0f}/{req:.0f}){hint}"

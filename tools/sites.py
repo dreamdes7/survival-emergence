@@ -63,14 +63,62 @@ def _exec_investigate(world, agent, args) -> str:
     return "it was a tomb — a gas leak hits you, you stagger back"
 
 
-# ── examine (anomaly) ─────────────────────────────────────────────────────────
+# ── examine (anomaly, graves, and the memory of a place) ──────────────────────
+_PLACE_RU = {
+    "campfire": "костёр", "tent": "шалаш", "store": "склад", "well": "колодец",
+    "water_still": "опреснитель", "workbench": "верстак", "smokehouse": "коптильня",
+    "garden": "грядка", "signpost": "указатель", "watchtower": "дозорная вышка",
+    "cave": "пещера", "hotspring": "горячий источник",
+}
+
+
+def _adjacent_place(world, agent):
+    """An adjacent built structure or grave — something that has a history to read."""
+    best, best_d = None, 2
+    for s in world.structures:
+        if not (s.state.get("complete") or s.kind == "grave"):
+            continue
+        d = world.structure_distance(agent.x, agent.y, s)
+        if d <= 1 and d < best_d:
+            best, best_d = s, d
+    return best
+
+
 def _avail_examine(world, agent) -> bool:
-    return _adjacent_site(world, agent, "examine") is not None
+    return (_adjacent_site(world, agent, "examine") is not None
+            or _adjacent_place(world, agent) is not None)
+
+
+def _examine_place(world, agent, s) -> str:
+    log = s.state.get("log", [])
+    if s.kind == "grave":
+        of = s.state.get("of", "неизвестного")
+        by = s.state.get("buried_by", "кто-то")
+        # to stand at a grave is to grieve — and grief is a form of belonging
+        if getattr(agent, "psyche", None):
+            if agent.psyche.get("purpose") is not None:
+                agent.psyche["purpose"] = min(100.0, agent.psyche["purpose"] + 8)
+            if agent.psyche.get("belonging") is not None:
+                agent.psyche["belonging"] = min(100.0, agent.psyche["belonging"] + 6)
+        agent.memory.add(world.tick, world.day, "reflection",
+                         f"постоял у могилы {of}. её выкопал {by}", 2.0)
+        world.place_note(s.x, s.y, f"{agent.name} приходил к могиле {of}")
+        extra = [e["text"] for e in log[-4:] if by not in e["text"]]
+        tail = f" Здесь также: {'; '.join(extra)}." if extra else ""
+        return f"могила {of}. похоронил {by}, день {s.state.get('day', '?')}.{tail}"
+    kind_ru = _PLACE_RU.get(s.kind, s.kind)
+    if not log:
+        return f"{kind_ru}: тихое место, ничего примечательного здесь не случилось"
+    hist = "; ".join(e["text"] for e in log[-5:])
+    return f"{kind_ru} помнит: {hist}"
 
 
 def _exec_examine(world, agent, args) -> str:
     s = _adjacent_site(world, agent, "examine")
     if s is None:
+        place = _adjacent_place(world, agent)
+        if place is not None:
+            return _examine_place(world, agent, place)
         return "no anomaly to examine here"
     n = s.state.get("examined", 0)
     s.state["examined"] = n + 1
@@ -120,7 +168,8 @@ def build_site_tools() -> list[Tool]:
     return [
         Tool("investigate", "Search an adjacent crashed pod or wreck.", "exploration",
              available=_avail_investigate, execute=_exec_investigate),
-        Tool("examine", "Examine an adjacent anomaly.", "exploration",
+        Tool("examine", "Осмотреть рядом стоящее: аномалию, могилу или постройку — "
+                        "узнать, что здесь случилось.", "exploration",
              available=_avail_examine, execute=_exec_examine),
         Tool("breach", "Force open an adjacent sealed bunker (needs a helper nearby).",
              "exploration", {"target": "optional"},

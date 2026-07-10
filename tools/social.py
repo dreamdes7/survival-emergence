@@ -240,6 +240,108 @@ def _exec_claim(world, agent, args) -> str:
     return f"claimed {node.kind}"
 
 
+# ── steal: the crime that makes law possible ──────────────────────────────────
+# Scarcity breeds temptation; a witness turns temptation into a crime; gossip turns
+# a crime into a reputation; and reputation is what rules and exile are FOR. Nothing
+# in the prompt says "don't steal" — the tool just makes theft possible, quiet, and
+# occasionally seen. Whether the group builds a norm against it is theirs to decide.
+_STEAL_PREF = ("dried_food", "food", "fish", "fruit", "berries", "coconut", "food_ration",
+               "water", "human_flesh", "axe", "net", "tool", "flint", "wood", "fiber", "stone")
+
+
+def _pick_loot(inv, want: str):
+    if want and inv.get(want, 0) > 0:
+        return want
+    for it in _STEAL_PREF:
+        if inv.get(it, 0) > 0:
+            return it
+    for k, v in inv.items():
+        if v > 0:
+            return k
+    return None
+
+
+def _steal_store(world, agent):
+    for s in world.adjacent_structures(agent, role="store"):
+        if s.state.get("complete") and s.state.get("cache"):
+            return s
+    return None
+
+
+def _steal_victims(world, agent):
+    return [o for o in world.living_agents() if o is not agent
+            and chebyshev(agent.x, agent.y, o.x, o.y) <= 1
+            and any(v > 0 for v in o.inventory.values())]
+
+
+def _avail_steal(world, agent) -> bool:
+    return _steal_store(world, agent) is not None or bool(_steal_victims(world, agent))
+
+
+def _exec_steal(world, agent, args) -> str:
+    want = str(args.get("item", "")).strip()
+    target = str(args.get("target", "")).strip().lower()
+    store = _steal_store(world, agent) if target in ("", "склад", "store", "хранилище") else None
+    victim = None
+    if store is None:
+        cands = _steal_victims(world, agent)
+        if target:
+            victim = next((o for o in cands if o.name.lower() == target), None)
+        if victim is None and cands:
+            victim = max(cands, key=lambda o: sum(o.inventory.values()))   # the richest reach
+    if store is None and victim is None:
+        return "рядом некого и нечего обкрадывать"
+
+    if store is not None:
+        cache = store.state["cache"]
+        item = _pick_loot(cache, want)
+        if item is None:
+            return "склад пуст"
+        cache[item] -= 1
+        if cache[item] <= 0:
+            del cache[item]
+        src, victim_name = "из общего склада", None
+    else:
+        item = _pick_loot(victim.inventory, want)
+        if item is None:
+            return f"у {victim.name} нечего взять"
+        victim.inventory[item] -= 1
+        if victim.inventory[item] <= 0:
+            del victim.inventory[item]
+        src, victim_name = f"у {victim.name}", victim.name
+        # the victim won't notice now — the loss surfaces hours later (world._resolve_thefts)
+        pend = getattr(victim, "_thefts", None)
+        if pend is None:
+            pend = victim._thefts = []
+        pend.append({"item": item, "tick": world.tick})
+    agent.inventory[item] = agent.inventory.get(item, 0) + 1
+
+    # a crime is only a crime if it's seen — nearer eyes catch it more often
+    seen_by = []
+    for o in world.living_agents():
+        if o is agent or (victim is not None and o is victim):
+            continue
+        d = chebyshev(agent.x, agent.y, o.x, o.y)
+        if d > 5:
+            continue
+        if world.rng.random() > max(0.1, 0.7 - 0.12 * d):
+            continue
+        whom = f"у {victim_name}" if victim_name else "из общего склада"
+        o.memory.add(world.tick, world.day, "social",
+                     f"я видел, как {agent.name} тайком взял {item} {whom}", 2.6)
+        o.relationships.record(agent.id, -0.3)
+        seen_by.append(o.name)
+    world.emit("theft", actor=agent.id, payload={
+        "name": agent.name, "item": item, "victim": victim_name, "seen_by": seen_by})
+    if seen_by:
+        world.place_note(agent.x, agent.y, f"{agent.name} украл {item} {src}")
+        world.log_event("theft",
+                        f"👐 {agent.name} украл {item} {src} — видели {', '.join(seen_by)}",
+                        2.4, [agent.name] + ([victim_name] if victim_name else []))
+    tail = " Кто-то заметил." if seen_by else " Никто не смотрел."
+    return f"ты незаметно взял {item} {src}.{tail}"
+
+
 # ── gossip: reputation that spreads beyond direct experience ──────────────────
 def _avail_gossip(world, agent) -> bool:
     if len(world.living_agents()) < 3:
@@ -472,6 +574,10 @@ def build_social_tools() -> list[Tool]:
         Tool("claim", "Claim the resource node you're standing next to as yours.", "social",
              {"kind": "optional: which adjacent resource"},
              available=_avail_claim, execute=_exec_claim),
+        Tool("steal", "Тайком взять что-то из чужого инвентаря или общего склада. "
+                      "Голод не спрашивает. Но кто-то может увидеть.", "social",
+             {"target": "у кого (имя) или 'склад'", "item": "что взять (необязательно)"},
+             available=_avail_steal, execute=_exec_steal),
         Tool("gossip", "Quietly share your opinion of a third person with someone nearby — "
                        "it shapes how they see them.", "social",
              {"about": "person you're talking about", "to": "who you tell (optional)",

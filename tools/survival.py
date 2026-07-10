@@ -5,7 +5,7 @@ generator, build needs the escape structure, etc.
 """
 from __future__ import annotations
 from .base import Tool
-from engine.models import FOOD_ITEMS, WATER_ITEMS, chebyshev
+from engine.models import FOOD_ITEMS, WATER_ITEMS, Structure, chebyshev
 from engine.skills import skill_bonus
 
 
@@ -270,6 +270,7 @@ def _exec_butcher(world, agent, args) -> str:
         o.relationships.record(agent.id, -0.4)
         o.dread = min(100.0, getattr(o, "dread", 0.0) + 15)
         seen_by.append(o.name)
+    world.place_note(agent.x, agent.y, f"здесь {agent.name} разделал тело {corpse.name}")
     world.emit("taboo", actor=agent.id,
                payload={"name": agent.name, "corpse": corpse.name, "seen_by": seen_by})
     world.log_event("taboo",
@@ -278,6 +279,58 @@ def _exec_butcher(world, agent, args) -> str:
                     3.0, [agent.name])
     tail = " Кто-то видел." if seen_by else " Никто не видел. Пока."
     return f"ты сделал это. в руках — мясо, в голове — тишина.{tail}"
+
+
+# ── burial: the other answer to a body ────────────────────────────────────────
+# The counterweight to the taboo. A corpse is either meat or a person to grieve —
+# burying settles that, closes grief, and (crucially) puts the body beyond the
+# reach of butcher_corpse forever. No prompt tells them to bury; the pull is grief.
+def _burial_target(world, agent):
+    for o in world.agents:
+        if (o.status == "dead" and not getattr(o, "buried", False)
+                and chebyshev(agent.x, agent.y, o.x, o.y) <= 1):
+            return o
+    return None
+
+
+def _avail_bury(world, agent) -> bool:
+    return _burial_target(world, agent) is not None
+
+
+def _exec_bury(world, agent, args) -> str:
+    dead = _burial_target(world, agent)
+    if dead is None:
+        return "рядом нет тела, которое можно предать земле"
+    dead.buried = True                     # a buried body can never be butchered
+    grave = Structure(
+        id=f"grave@{dead.x},{dead.y}#{world.tick}", kind="grave",
+        x=dead.x, y=dead.y, role="grave",
+        state={"complete": True, "of": dead.name, "buried_by": agent.name,
+               "day": world.day, "log": [{"day": world.day,
+                                          "text": f"{agent.name} похоронил {dead.name}"}]},
+    )
+    world.structures.append(grave)
+    # closure: burying is heavy, meaningful work — it restores purpose and settles
+    # grief a little, for the one who digs and for those who stand by
+    if getattr(agent, "psyche", None) and agent.psyche.get("purpose") is not None:
+        agent.psyche["purpose"] = min(100.0, agent.psyche["purpose"] + 18)
+    agent.physiology["morale"] = min(100.0, agent.physiology.get("morale", 50.0) + 6)
+    agent.memory.add(world.tick, world.day, "reflection",
+                     f"я похоронил {dead.name}. хоть что-то правильное среди всего этого", 2.6)
+    stood_by = []
+    for o in world.living_agents():
+        if o is agent or chebyshev(agent.x, agent.y, o.x, o.y) > 5:
+            continue
+        o.memory.add(world.tick, world.day, "social",
+                     f"{agent.name} похоронил {dead.name}. мы постояли рядом", 2.2)
+        if getattr(o, "psyche", None) and o.psyche.get("belonging") is not None:
+            o.psyche["belonging"] = min(100.0, o.psyche["belonging"] + 6)
+        stood_by.append(o.name)
+    world.emit("burial", actor=agent.id,
+               payload={"name": agent.name, "of": dead.name, "stood_by": stood_by})
+    world.log_event("burial", f"⚰️ {agent.name} похоронил {dead.name}", 2.6,
+                    [agent.name, dead.name])
+    return f"ты предал {dead.name} земле. теперь здесь могила"
 
 
 def build_survival_tools() -> list[Tool]:
@@ -295,4 +348,7 @@ def build_survival_tools() -> list[Tool]:
         Tool("butcher_corpse",
              "Разделать тело погибшего ради мяса. Это накормит. Этого не вернуть.",
              "survival", available=_avail_butcher, execute=_exec_butcher),
+        Tool("bury",
+             "Похоронить тело погибшего рядом. Проститься и предать земле.",
+             "survival", available=_avail_bury, execute=_exec_bury),
     ]

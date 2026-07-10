@@ -363,6 +363,43 @@ class World:
     def adjacent_to_structure(self, agent, structure: Structure, reach: int = 1) -> bool:
         return self.structure_distance(agent.x, agent.y, structure) <= reach
 
+    def place_note(self, x: int, y: int, text: str, radius: int = 2) -> None:
+        """Memory of place: pin a short line to the nearest built structure (or
+        grave) so a campfire, a store, a grave accumulates the history of what
+        happened here — surfaced later by `examine`. Silent if nothing is near."""
+        best, best_d = None, radius + 1
+        for s in self.structures:
+            if not (s.state.get("complete") or s.kind == "grave"):
+                continue
+            d = self.structure_distance(x, y, s)
+            if d < best_d:
+                best, best_d = s, d
+        if best is None:
+            return
+        log = best.state.setdefault("log", [])
+        log.append({"day": self.day, "text": text})
+        if len(log) > 12:
+            del log[0]
+
+    def _resolve_thefts(self) -> None:
+        """A theft is quiet: the victim doesn't notice at the moment it happens.
+        The loss only surfaces a while later, when they reach for the thing and
+        find it gone — turning a private lack into a grievance that can spread."""
+        for a in self.living_agents():
+            pend = getattr(a, "_thefts", None)
+            if not pend:
+                continue
+            keep = []
+            for t in pend:
+                age = self.tick - t["tick"]
+                if age >= 3 and self.rng.random() < 0.5:
+                    a.memory.add(self.tick, self.day, "observation",
+                                 f"у меня пропал {t['item']} — кто-то взял, пока я не видел", 2.2)
+                    a.physiology["morale"] = max(0.0, a.physiology.get("morale", 50.0) - 5)
+                elif age < 8:
+                    keep.append(t)          # still might notice; give up after a while
+            a._thefts = keep
+
     def structure_footprint_clear(self, kind: str, x: int, y: int,
                                   ignore: Structure | None = None) -> bool:
         x0, y0, x1, y1 = self.structure_rect_for(kind, x, y)
@@ -830,6 +867,9 @@ class World:
                     if a.inventory[item] <= 0:
                         del a.inventory[item]
 
+        # Quiet crimes surface late: a stolen thing is missed hours after it's taken.
+        self._resolve_thefts()
+
         # Fear signs: the island's dark folklore engine (see scenarios/*.yaml `fear`).
         self._fear_signs()
 
@@ -860,6 +900,8 @@ class World:
                     legacy = f", унеся с собой умения {a.role}" if getattr(a, "role", None) else ""
                     self.log_event("death",
                                    f"{a.name} погиб ({', '.join(vital_zero)}){legacy}", 3.0, [a.name])
+                    # the ground remembers where someone fell (memory of place)
+                    self.place_note(a.x, a.y, f"здесь погиб {a.name} (день {self.day})")
             else:
                 a.incap_ticks = 0
                 a.status = "active"
