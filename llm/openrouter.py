@@ -242,6 +242,20 @@ def _shelter_foresight(agent, world) -> str:
     fiber gathered in a whole 7-day run, one unfinished tent)."""
     if agent.physiology.get("warmth") is None or world.is_exiled(agent):
         return ""
+    # BODY FIRST. Shelter-building is a WHEN-YOU-HAVE-SLACK investment: only nudge
+    # it while every lethal stat is comfortable (above the ⚠ band). Without this
+    # gate the material need crowded out survival — agents tunnel-visioned on
+    # gathering fiber and building while the fire went out and nobody ate or slept,
+    # and a whole camp froze on day 3 (0 maintain, 5 rest, eat 6). Build by day
+    # when fed and warm; survive the night.
+    phys_cfg = world.scenario.get("physiology", {})
+    for stat in ("hunger", "thirst", "warmth", "energy"):
+        v = agent.physiology.get(stat)
+        if v is None:
+            continue
+        crit = phys_cfg.get(stat, {}).get("critical", 20)
+        if v < crit * 2.0:              # anything not clearly OK → survive first
+            return ""
     living = world.living_agents()
     cap = sum(int(s.state.get("capacity", 2)) for s in world.structures
               if s.role == "shelter" and s.state.get("complete", True))
