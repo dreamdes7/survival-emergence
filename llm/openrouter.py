@@ -233,6 +233,43 @@ def _survival_foresight(agent, world) -> str:
     return "\n".join(lines)
 
 
+def _shelter_foresight(agent, world) -> str:
+    """No roof for everyone + night/storm near → surface the MATERIAL need to build
+    shelter, so gathering wood/fiber becomes as urgent as food/water. Building
+    materials are a ONE-TIME need that never 'spikes' in any single tick, so
+    without this the recurring hunger/thirst always crowd them out — the camp talks
+    about a tent for days and never gathers the fiber for it (observed: 6 wood + 3
+    fiber gathered in a whole 7-day run, one unfinished tent)."""
+    if agent.physiology.get("warmth") is None or world.is_exiled(agent):
+        return ""
+    living = world.living_agents()
+    cap = sum(int(s.state.get("capacity", 2)) for s in world.structures
+              if s.role == "shelter" and s.state.get("complete", True))
+    if cap >= len(living):
+        return ""                       # everyone has a roof — no pressure
+    tt_night, _ = _day_clock(world)
+    storm = world.weather == "storm"
+    if not storm and (world.is_night is False and tt_night > 8):
+        return ""                       # not urgent yet — plenty of daylight
+    builds = world.scenario.get("buildables", {})
+    tent = builds.get("tent") or next(
+        (b for b in builds.values() if b.get("role") == "shelter"), None)
+    if not tent:
+        return ""
+    _RU = {"wood": "дерева", "fiber": "волокна", "stone": "камня", "food": "еды"}
+    need = [f"{int(q - agent.inventory.get(it, 0))} {_RU.get(it, it)}"
+            for it, q in tent.get("cost", {}).items() if agent.inventory.get(it, 0) < q]
+    when = "ШТОРМ бьёт" if storm else ("ночь на дворе" if world.is_night
+                                       else f"ночь через ~{tt_night} ход.")
+    if need:
+        return (f"  ⛺ крова хватает не всем ({cap} мест на {len(living)}), а {when} — "
+                f"без стен худо. Палатке не хватает: {', '.join(need)}. Разговоры её не "
+                f"построят — иди ДОБУДЬ недостающее (дерево у деревьев, волокно в "
+                f"зарослях), потом стройте вместе.")
+    return (f"  ⛺ крова хватает не всем, а {when}, и материал у тебя УЖЕ ЕСТЬ — "
+            f"иди к месту и строй (build_structure tent), не мешкай и не заболтайся.")
+
+
 def _psyche_urgency(psyche: dict) -> str:
     """Turn low psychosocial drives into a FELT lack (not an order): the model
     is meant to act on the restlessness — grow close, be useful, leave a mark —
@@ -650,9 +687,12 @@ class OpenRouterLLM:
             "а не «иду к 17,19, gather food»). В args координаты класть МОЖНО.\n"
             "- Состояние ниже — честное: ✓ — порядок; ⚠/❗/💀 — реально плохо, действуй. "
             "Не выдумывай симптомов, которых нет.\n"
-            "- Если к тебе обратились — ответь ПО СУТИ (согласись, поспорь, пошути), не "
-            "игнорируй. НЕ ПОВТОРЯЙСЯ: договорились — иди и ДЕЛАЙ, а не подтверждай "
-            "договорённость по кругу. Когда всё ✓ и рядом люди — говори свободно.\n"
+            "- Если к тебе обратились — ответь коротко ПО СУТИ, но помни: РАЗГОВОРЫ "
+            "НИЧЕГО НЕ СТРОЯТ И НЕ КОРМЯТ. Проговорить план — не значит выполнить его. "
+            "Сказал «пойдём построим / принесу дров / натянем тент» — в СЛЕДУЮЩИЙ ход "
+            "иди и делай это (gather, build_structure), а не обсуждай снова и не "
+            "«подхватывай верёвку» на словах. За день пустой болтовни у костра на "
+            "острове не появится ни одной стены. Меньше слов — больше дела.\n"
             "\nТВОЁ ТЕЛО — четыре счётчика, и убивает любой из них: голод, жажда, холод, "
             "истощение.\n"
             "- Голод и жажда возвращаются каждый день. Ешь и пей ЗАРАНЕЕ, проходя мимо еды "
@@ -675,9 +715,12 @@ class OpenRouterLLM:
             "горячего источника — держат только СТЕНЫ: построенная палатка или пещера. "
             "Палатка держит шторм, и в ней высыпаешься; пещера — сырой камень: бурю "
             "переждать можно, но спится скверно и мест мало.\n"
-            "- Стройка идёт по шагам: начал (build_structure) — заплатил материалы, дальше "
-            "каждый ход добавляет прогресс; вдвоём-втроём заметно быстрее. НЕДОСТРОЕННОЕ "
-            "не работает — начал, так дострой.\n"
+            "- Чтобы палатка появилась, кто-то должен РЕАЛЬНО собрать материал (палатка = "
+            "4 дерева + 3 волокна: дерево рубят у деревьев/пальм, волокно рвут в зарослях) "
+            "и вызвать build_structure. Сколько о ней ни говори — сама она не построится, а "
+            "склад дерева без волокна бесполезен. Стройка идёт по шагам: начал — заплатил "
+            "материалы, каждый ход добавляет прогресс, вдвоём-втроём быстрее; НЕДОСТРОЕННОЕ "
+            "не греет — начал, так дострой в тот же день.\n"
             "- Сырая еда в рюкзаке гниёт. Копчёная хранится; сложенная в склад — не гниёт.\n"
             "\nДУША. Одиночество, ненужность, бессмысленность (см. «Что ты чувствуешь») "
             "давят по-настоящему — но от них НЕ УМИРАЮТ. Умирают от голода, жажды, холода "
@@ -692,6 +735,8 @@ class OpenRouterLLM:
 
         phys_text = _phys_urgency(agent.physiology, world.scenario.get("physiology", {}))
         foresight = _survival_foresight(agent, world)
+        shelter_fs = _shelter_foresight(agent, world)
+        foresight = "\n".join(x for x in (foresight, shelter_fs) if x)
         foresight_block = (f"Успеешь ли пополниться (расчёт, не приказ):\n{foresight}\n"
                            if foresight else "")
         psyche_text = _psyche_urgency(getattr(agent, "psyche", {}))

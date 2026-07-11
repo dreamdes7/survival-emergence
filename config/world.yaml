@@ -34,7 +34,11 @@ sim:
   # Conversation scenes: a say_to that lands on an adjacent agent plays out up to
   # N extra replies in the same tick (real dialogue instead of one line per tick).
   # 0 = off. Real-LLM replies use a compact cheap prompt, stubs use a phrase pool.
-  dialogue_scene_lines: 4
+  # Lowered 4->2: at 4 a single "давай построим" spawned a whole agree-to-build
+  # scene, and the roleplay of building crowded out the actual gathering/building
+  # (a 7-day run yielded 248 dialogue lines and one unfinished tent). 2 keeps
+  # dialogue real without letting the camp talk a shelter into existence.
+  dialogue_scene_lines: 2
   fog:
     home_radius: 10       # tiles each agent can see from spawn (per-agent sector)
     reveal_roles:         # structure roles always visible at spawn (survival infra)
